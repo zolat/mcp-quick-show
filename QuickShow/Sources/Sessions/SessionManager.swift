@@ -1,177 +1,214 @@
 import Cocoa
 
-/// Tracks panels per session. Phase 1: each session has a single
-/// HUDWindow holding a single named panel (no multi-tab yet — that
-/// lands in Phase 3, when this class grows a tab list per session).
-///
-/// State transitions:
-/// - `handshake(sessionId)`: registers an empty session entry.
-/// - `upsert(sessionId, name, content)`: returns or creates the HUD,
-///   either reusing the renderer (same name + content_type) or
-///   swapping in a fresh renderer (different content_type or first
-///   upsert).
-/// - `close(sessionId, name)`: tears down the HUD if the named slot
-///   is currently active. (Phase 3: closes just the tab.)
+/// Tracks panels per session. Phase 3: per-session HUD, multi-panel
+/// per HUD (tab-strip switchable). Same-name `upsert` updates in
+/// place; different-name `upsert` opens a new tab.
 @MainActor
 final class SessionManager {
     private let renderers: RendererRegistry
 
-    /// Per-session HUD state. Phase 1 = at most one panel per session;
-    /// the field grows to a tab list in Phase 3.
+    /// One MCP-session's worth of state: a HUD window + the ordered
+    /// list of panels currently in it.
     final class SessionState {
         let id: String
         var hud: HUDWindow?
-        var panel: Panel?
+        var panels: [Panel] = []
+        /// Cascade index assigned at creation, stable across panel
+        /// adds / removes so the HUD doesn't jump if siblings close.
+        let cascadeIndex: Int
 
-        init(id: String) {
+        init(id: String, cascadeIndex: Int) {
             self.id = id
+            self.cascadeIndex = cascadeIndex
         }
     }
 
-    /// One rendered panel inside a HUD. Phase 1 = one per HUD.
+    /// One rendered panel inside a HUD.
     final class Panel {
         let name: String
         let contentType: String
         let renderer: any PanelRenderer
+        let view: NSView
 
-        init(name: String, contentType: String, renderer: any PanelRenderer) {
+        init(name: String, contentType: String, renderer: any PanelRenderer, view: NSView) {
             self.name = name
             self.contentType = contentType
             self.renderer = renderer
+            self.view = view
         }
     }
 
     private(set) var sessions: [String: SessionState] = [:]
+    private var sessionsRegisteredOrder = 0
 
     init(renderers: RendererRegistry) {
         self.renderers = renderers
     }
 
-    /// Register a session on hello. Called even before any panels are
-    /// opened so we can index into `sessions` by ID later.
+    /// Register a session on `hello`. Reserves a cascade index even
+    /// before any panels open so the first HUD lands in a stable
+    /// position regardless of registration / open order.
     func registerSession(_ sessionId: String) {
         if sessions[sessionId] == nil {
-            sessions[sessionId] = SessionState(id: sessionId)
+            let idx = sessionsRegisteredOrder
+            sessionsRegisteredOrder += 1
+            sessions[sessionId] = SessionState(id: sessionId, cascadeIndex: idx)
         }
     }
 
     /// Render content into the named slot. Returns the render result
-    /// + a PNG snapshot. Errors propagate as `RenderFailure` (with the
-    /// styled error UI rendered into the panel before the throw).
+    /// + a PNG snapshot. Errors propagate as `RenderFailureWithSnapshot`.
     func upsert(sessionId: String,
                 name: String,
                 contentType: String,
                 form: String,
                 body: String) async throws -> (RenderResult, Data) {
-        let session = sessions[sessionId] ?? {
-            let s = SessionState(id: sessionId)
-            sessions[sessionId] = s
-            return s
-        }()
+        let session = ensureSession(sessionId)
 
         // Ensure HUD exists.
         let hud: HUDWindow
         if let existing = session.hud {
             hud = existing
         } else {
-            let cascadeIndex = sessions.values.count - 1
-            let h = HUDWindow(initialPosition: HUDWindow.cascadeTopRight(cascadeIndex))
-            h.onCloseRequested = { [weak self, weak h] in
-                guard let self = self, let h = h else { return }
-                self.tearDownHUD(matching: h)
+            let h = HUDWindow(initialPosition: HUDWindow.cascadeTopRight(session.cascadeIndex))
+            h.onCloseRequested = { [weak self] in
+                self?.closeAllPanels(in: sessionId)
+            }
+            h.onSelectTab = { [weak self] name in
+                self?.switchTab(in: sessionId, to: name)
+            }
+            h.onCloseTab = { [weak self] name in
+                self?.close(sessionId: sessionId, name: name)
             }
             h.makeKeyAndOrderFront(nil)
             session.hud = h
             hud = h
         }
 
-        // Ensure renderer for the right content_type.
-        let renderer: any PanelRenderer
-        if let panel = session.panel,
-           panel.contentType == contentType {
-            renderer = panel.renderer
-            if panel.name != name {
-                hud.setPanelName(name)
-                session.panel = Panel(name: name, contentType: contentType, renderer: renderer)
+        // Find existing panel for this name in this session.
+        var panel: Panel
+        if let existing = session.panels.first(where: { $0.name == name }) {
+            if existing.contentType == contentType {
+                panel = existing
+            } else {
+                // Same name, different type → swap the renderer.
+                hud.removePanel(name)
+                guard let renderer = renderers.make(forContentType: contentType) else {
+                    throw RenderFailure(
+                        message: "no renderer registered for content_type '\(contentType)'",
+                        line: nil
+                    )
+                }
+                let view = renderer.makeView()
+                let newPanel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
+                let idx = session.panels.firstIndex(where: { $0.name == name })!
+                session.panels[idx] = newPanel
+                hud.installPanel(name: name, view: view)
+                panel = newPanel
             }
         } else {
-            guard let r = renderers.make(forContentType: contentType) else {
+            // New panel.
+            guard let renderer = renderers.make(forContentType: contentType) else {
                 throw RenderFailure(
                     message: "no renderer registered for content_type '\(contentType)'",
                     line: nil
                 )
             }
-            renderer = r
-            let view = r.makeView()
-            hud.installRendererView(view, name: name)
-            session.panel = Panel(name: name, contentType: contentType, renderer: renderer)
+            let view = renderer.makeView()
+            let newPanel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
+            session.panels.append(newPanel)
+            hud.installPanel(name: name, view: view)
+            panel = newPanel
         }
+
+        hud.setActivePanel(name)
+        hud.updateTabs(session.panels.map(\.name))
 
         let payload = PanelPayload(name: name, contentType: contentType, form: form, body: body)
         do {
-            let result = try await renderer.update(payload: payload)
+            let result = try await panel.renderer.update(payload: payload)
             hud.sizeToContent(width: result.width, height: result.height)
-            let snapshot = try await renderer.snapshot()
+            let snapshot = try await panel.renderer.snapshot()
             return (result, snapshot)
         } catch let renderFailure as RenderFailure {
-            // Renderer painted the error UI into its view; capture
-            // that so the caller can ship a snapshot alongside the
-            // structured error.
-            let errorSnapshot = (try? await renderer.snapshot()) ?? Data()
+            let errorSnapshot = (try? await panel.renderer.snapshot()) ?? Data()
             throw RenderFailureWithSnapshot(failure: renderFailure, snapshot: errorSnapshot)
         }
     }
 
-    /// Close the named slot. Phase 1: tears down the whole HUD if it
-    /// currently shows that slot.
+    /// Close the named slot. If it was the last panel, tear down the
+    /// HUD; if it was the active panel, switch to the next-most-
+    /// recently-added remaining panel.
     func close(sessionId: String, name: String) {
         guard let session = sessions[sessionId] else { return }
-        if session.panel?.name == name {
+        guard let idx = session.panels.firstIndex(where: { $0.name == name }) else { return }
+        let wasActive = session.hud?.activePanelName == name
+        session.panels.remove(at: idx)
+        session.hud?.removePanel(name)
+        if session.panels.isEmpty {
             session.hud?.close()
             session.hud = nil
-            session.panel = nil
+            return
         }
+        session.hud?.updateTabs(session.panels.map(\.name))
+        if wasActive {
+            // Switch to the panel that's now at the same index (or
+            // the last one if we removed from the end).
+            let nextIdx = min(idx, session.panels.count - 1)
+            session.hud?.setActivePanel(session.panels[nextIdx].name)
+            session.hud?.updateTabs(session.panels.map(\.name))
+        }
+    }
+
+    /// Switch the HUD to show a different panel (no content update).
+    func switchTab(in sessionId: String, to name: String) {
+        guard let session = sessions[sessionId],
+              session.panels.contains(where: { $0.name == name }) else { return }
+        session.hud?.setActivePanel(name)
+        session.hud?.updateTabs(session.panels.map(\.name))
+    }
+
+    /// Close every panel in the session and tear down the HUD.
+    func closeAllPanels(in sessionId: String) {
+        guard let session = sessions[sessionId] else { return }
+        session.hud?.close()
+        session.hud = nil
+        session.panels = []
     }
 
     /// Re-snapshot the named slot without re-rendering. Returns nil
     /// if the slot isn't open.
     func inspect(sessionId: String, name: String) async throws -> (RenderResult, Data)? {
         guard let session = sessions[sessionId],
-              let panel = session.panel,
-              panel.name == name else {
+              let panel = session.panels.first(where: { $0.name == name }) else {
             return nil
         }
         let snapshot = try await panel.renderer.snapshot()
-        // We don't have a fresh size measurement, but we can report the
-        // hud's content frame as the panel dimensions.
-        let frame = session.hud?.frame.size ?? .zero
-        return (RenderResult(width: Double(frame.width), height: Double(frame.height)), snapshot)
+        let size = session.hud?.frame.size ?? .zero
+        return (RenderResult(width: Double(size.width), height: Double(size.height)), snapshot)
     }
 
-    /// List panels in a session. Phase 1: 0 or 1 panel.
+    /// All panels in a session, in insertion order.
     func list(sessionId: String) -> [PanelDescriptor] {
-        guard let session = sessions[sessionId],
-              let panel = session.panel,
-              let hud = session.hud else {
-            return []
+        guard let session = sessions[sessionId] else { return [] }
+        let size = session.hud?.frame.size ?? .zero
+        return session.panels.map { panel in
+            PanelDescriptor(
+                name: panel.name,
+                contentType: panel.contentType,
+                width: Double(size.width),
+                height: Double(size.height)
+            )
         }
-        let size = hud.frame.size
-        return [PanelDescriptor(
-            name: panel.name,
-            contentType: panel.contentType,
-            width: Double(size.width),
-            height: Double(size.height)
-        )]
     }
 
-    private func tearDownHUD(matching hud: HUDWindow) {
-        for (id, state) in sessions where state.hud === hud {
-            state.hud?.close()
-            state.hud = nil
-            state.panel = nil
-            sessions[id] = state
-            return
-        }
+    private func ensureSession(_ sessionId: String) -> SessionState {
+        if let s = sessions[sessionId] { return s }
+        let idx = sessionsRegisteredOrder
+        sessionsRegisteredOrder += 1
+        let s = SessionState(id: sessionId, cascadeIndex: idx)
+        sessions[sessionId] = s
+        return s
     }
 }
 
@@ -184,8 +221,7 @@ struct PanelDescriptor: Sendable {
 }
 
 /// Internal error wrapper that bundles a `RenderFailure` with the
-/// snapshot of the error UI. The control handler unpacks both into
-/// the `render_error` response envelope.
+/// snapshot of the error UI.
 struct RenderFailureWithSnapshot: Error {
     let failure: RenderFailure
     let snapshot: Data

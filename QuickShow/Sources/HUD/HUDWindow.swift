@@ -3,23 +3,29 @@ import Cocoa
 /// Borderless floating window. Always-on-top via `.floating` level,
 /// cross-Space via `.canJoinAllSpaces + .fullScreenAuxiliary`.
 /// Lifted-from-and-simplified from PipAnything's `OverlayWindow`.
+///
+/// Phase 3 update: multi-panel. The HUD holds N renderer views; the
+/// `TabStripView` switches the visible one. Single-panel HUDs hide
+/// the tab strip entirely.
 @MainActor
 final class HUDWindow: NSWindow {
-    // Initial size for a fresh HUD before content-aware resize lands.
     static let defaultSize = NSSize(width: 480, height: 360)
     static let maxInitialSize = NSSize(width: 800, height: 1000)
 
-    /// The renderer's view, sized to fill the window's content rect
-    /// (minus the resize grip's overlap area at the bottom-right).
     private let contentHost = NSView()
     private let titleBar = TitleBarOverlay()
+    private let tabStrip = TabStripView()
     let resizeHandle = ResizeHandle()
 
-    /// The currently-installed renderer view. Replaced when the panel's
-    /// content_type changes; nil if no renderer attached yet.
-    private(set) var rendererView: NSView?
+    /// Currently-installed renderer views, keyed by panel name.
+    /// At most one is visible at a time; the others are hidden in
+    /// place so their state (scroll position, JS context) survives.
+    private var rendererViews: [String: NSView] = [:]
+    private(set) var activePanelName: String?
 
     var onCloseRequested: (() -> Void)?
+    var onSelectTab: ((String) -> Void)?
+    var onCloseTab: ((String) -> Void)?
 
     init(initialPosition: NSPoint? = nil) {
         let frame = NSRect(
@@ -40,8 +46,6 @@ final class HUDWindow: NSWindow {
         isOpaque = false
         backgroundColor = .clear
         level = .floating
-        // Cross-Space + fullscreen-aux: visible from every Space and
-        // from inside another app's fullscreen presentation.
         collectionBehavior = [
             .canJoinAllSpaces,
             .fullScreenAuxiliary,
@@ -50,12 +54,6 @@ final class HUDWindow: NSWindow {
         isMovableByWindowBackground = true
         hasShadow = true
         ignoresMouseEvents = false
-        // Borderless windows default to `canBecomeKey = false`, which
-        // prevents interactive elements (link clicks, code-copy
-        // buttons in Phase 1+) from receiving focus. Allowing key
-        // status here lets the WKWebView handle events natively.
-        // (Subclass override needed because NSWindow's getters can't
-        // be set on borderless windows directly.)
     }
 
     override var canBecomeKey: Bool { true }
@@ -87,6 +85,18 @@ final class HUDWindow: NSWindow {
             titleBar.heightAnchor.constraint(equalToConstant: TitleBarOverlay.height),
         ])
 
+        // Tab strip sits below the title bar, above the content.
+        tabStrip.translatesAutoresizingMaskIntoConstraints = false
+        tabStrip.onSelect = { [weak self] name in self?.onSelectTab?(name) }
+        tabStrip.onClose = { [weak self] name in self?.onCloseTab?(name) }
+        root.addSubview(tabStrip)
+        NSLayoutConstraint.activate([
+            tabStrip.topAnchor.constraint(equalTo: titleBar.bottomAnchor),
+            tabStrip.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 4),
+            tabStrip.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -4),
+            tabStrip.heightAnchor.constraint(equalToConstant: TabStripView.height),
+        ])
+
         resizeHandle.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(resizeHandle)
         NSLayoutConstraint.activate([
@@ -97,20 +107,60 @@ final class HUDWindow: NSWindow {
         ])
     }
 
-    /// Install a renderer's view as the panel content. If an older
-    /// view is present, it's removed first.
-    func installRendererView(_ view: NSView, name: String) {
-        rendererView?.removeFromSuperview()
+    /// Install a renderer's view as a new panel. If the name already
+    /// has a view registered, replace it (caller used a different
+    /// content_type for the same slot, e.g. user typoed). The newly
+    /// installed view becomes active.
+    func installPanel(name: String, view: NSView) {
+        if let existing = rendererViews[name], existing !== view {
+            existing.removeFromSuperview()
+        }
         view.translatesAutoresizingMaskIntoConstraints = false
-        contentHost.addSubview(view)
-        NSLayoutConstraint.activate([
-            view.topAnchor.constraint(equalTo: contentHost.topAnchor),
-            view.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor),
-            view.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor),
-            view.bottomAnchor.constraint(equalTo: contentHost.bottomAnchor),
-        ])
-        rendererView = view
+        if view.superview == nil {
+            contentHost.addSubview(view)
+            NSLayoutConstraint.activate([
+                view.topAnchor.constraint(equalTo: contentHost.topAnchor),
+                view.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor),
+                view.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor),
+                view.bottomAnchor.constraint(equalTo: contentHost.bottomAnchor),
+            ])
+        }
+        rendererViews[name] = view
+        setActivePanel(name)
+    }
+
+    /// Make `name` the visible panel; hide the others in place. The
+    /// title bar updates to show the active name.
+    func setActivePanel(_ name: String) {
+        guard rendererViews[name] != nil else { return }
+        activePanelName = name
+        for (n, v) in rendererViews {
+            v.isHidden = (n != name)
+        }
         titleBar.setTitle(name)
+    }
+
+    /// Remove a panel's view from the HUD. If the closed panel was
+    /// active, the caller is responsible for choosing the next active
+    /// panel and calling `setActivePanel`.
+    func removePanel(_ name: String) {
+        rendererViews[name]?.removeFromSuperview()
+        rendererViews.removeValue(forKey: name)
+        if activePanelName == name {
+            activePanelName = nil
+        }
+    }
+
+    /// Number of installed panels.
+    var panelCount: Int { rendererViews.count }
+
+    /// Refresh the tab strip from the SessionManager's ordering.
+    /// Single panel → hidden strip; multiple → all pills shown with
+    /// the active one highlighted.
+    func updateTabs(_ ordering: [String]) {
+        tabStrip.update(panels: ordering.map {
+            (name: $0, isActive: $0 == activePanelName)
+        })
     }
 
     func setPanelName(_ name: String) {
@@ -121,10 +171,10 @@ final class HUDWindow: NSWindow {
     /// initial-size limits. Keeps the top-right corner anchored so
     /// the cascade position doesn't drift on each update.
     func sizeToContent(width: Double, height: Double) {
+        let chrome = TitleBarOverlay.height + (panelCount >= 2 ? TabStripView.height : 0)
         let targetWidth = min(max(CGFloat(width), 280), Self.maxInitialSize.width)
-        // +titleBar height because content height doesn't include the chrome.
         let targetHeight = min(
-            max(CGFloat(height) + TitleBarOverlay.height, 200),
+            max(CGFloat(height) + chrome, 200),
             Self.maxInitialSize.height
         )
         let current = self.frame
@@ -142,15 +192,11 @@ final class HUDWindow: NSWindow {
     // MARK: - Cascade positioning
 
     /// Top-right corner of the main screen, with a 24 pt cascade
-    /// offset per HUD index. Phase 3 wires the index to the session
-    /// count.
+    /// offset per HUD index.
     static func cascadeTopRight(_ index: Int) -> NSPoint {
         let screen = NSScreen.main ?? NSScreen.screens.first
         let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
         let offset: CGFloat = CGFloat(index) * 24
-        // Place the *initial* top-right of the HUD at the cascaded point.
-        // `sizeToContent` later keeps the top-right anchored, so the
-        // visual top-right is the cascade anchor.
         let x = visible.maxX - defaultSize.width - 16 - offset
         let y = visible.maxY - defaultSize.height - 16 - offset
         return NSPoint(x: x, y: y)
