@@ -80,6 +80,79 @@ enum SnapshotService {
         return pngData
     }
 
+    /// Composite a set of markup strokes (in point space, with their
+    /// origin at the view's top-left in flipped Cocoa terms — i.e.,
+    /// drawn the way they appear in `MarkupOverlayView.draw(_:)`) over
+    /// an underlying PNG. The output PNG matches the underlying's
+    /// pixel dimensions so the two layers line up.
+    ///
+    /// Returns nil on any failure — the caller falls back to emitting
+    /// the underlying snapshot unchanged.
+    @MainActor
+    static func compositeMarkup(underlyingPNG: Data,
+                                strokes: [MarkupOverlayView.Stroke],
+                                viewBoundsPt: NSSize) -> Data? {
+        guard let underlyingRep = NSBitmapImageRep(data: underlyingPNG) else {
+            return nil
+        }
+        let pixelW = underlyingRep.pixelsWide
+        let pixelH = underlyingRep.pixelsHigh
+        guard pixelW > 0, pixelH > 0 else { return nil }
+        guard viewBoundsPt.width > 0, viewBoundsPt.height > 0 else { return nil }
+
+        // Build a new bitmap rep at the underlying's pixel size and
+        // draw both layers into it. The bitmap context's coordinate
+        // system has its origin at top-left when we paint a previous
+        // NSImage via `draw(in:)`, so we mirror that for the overlay
+        // by drawing it in the same downward-Y orientation: an
+        // explicit Y-flip transform after scaling.
+        guard let outRep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelW,
+            pixelsHigh: pixelH,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 32
+        ) else { return nil }
+
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        guard let ctx = NSGraphicsContext(bitmapImageRep: outRep) else { return nil }
+        NSGraphicsContext.current = ctx
+
+        let outRect = NSRect(x: 0, y: 0, width: pixelW, height: pixelH)
+        // 1. Underlying snapshot fills the whole canvas.
+        let underlyingImage = NSImage(size: NSSize(width: pixelW, height: pixelH))
+        underlyingImage.addRepresentation(underlyingRep)
+        underlyingImage.draw(in: outRect, from: .zero, operation: .copy, fraction: 1.0)
+
+        // 2. Overlay strokes on top. The strokes were captured in the
+        //    overlay's local point space (Y-up, origin at bottom-left
+        //    of the overlay = the renderer view's bottom-left). The
+        //    underlying snapshot's bottom-left maps to (0, 0) in the
+        //    output's drawing coordinate space too, so a uniform
+        //    point→pixel scale is all that's needed.
+        let sx = CGFloat(pixelW) / viewBoundsPt.width
+        let sy = CGFloat(pixelH) / viewBoundsPt.height
+        let xform = NSAffineTransform()
+        xform.scaleX(by: sx, yBy: sy)
+        xform.concat()
+
+        for stroke in strokes {
+            stroke.color.setStroke()
+            stroke.path.lineWidth = stroke.width
+            stroke.path.lineCapStyle = .round
+            stroke.path.lineJoinStyle = .round
+            stroke.path.stroke()
+        }
+
+        return outRep.representation(using: .png, properties: [:])
+    }
+
     @MainActor
     private static func encodePNG(_ image: NSImage) throws -> Data {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {

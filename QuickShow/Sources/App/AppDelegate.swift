@@ -43,6 +43,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_MARKUP"] == "1" {
             runMarkupSmoke()
         }
+        if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_MARKUP_UI"] == "1" {
+            runMarkupUISmoke()
+        }
+        if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_HTML"] == "1" {
+            runHTMLSmoke()
+        }
+    }
+
+    /// Headless `show_html` test. Renders an HTML doc with an inline
+    /// `<script>` (which `innerHTML` would silently drop) and asserts
+    /// the script ran. Proves the loadHTMLString-bypass path is wired
+    /// end-to-end through `SessionManager.upsert` and the renderer
+    /// registry.
+    private func runHTMLSmoke() {
+        Task {
+            do {
+                let session = "html-smoke"
+                let html = """
+                <!doctype html><html><head><meta charset="utf-8">
+                <style>body{font-family:-apple-system,system-ui;color:#222;margin:24px}</style>
+                </head><body>
+                <h1 id="hd">show_html smoke</h1>
+                <p id="status">initial</p>
+                <script>document.getElementById('status').textContent='script-ran';</script>
+                </body></html>
+                """
+                let (result, snapshot) = try await sessionManager.upsert(
+                    sessionId: session,
+                    name: "design",
+                    contentType: "html",
+                    form: "inline",
+                    body: html
+                )
+                NSLog("QuickShow: TEST_HTML render width=\(result.width) height=\(result.height) snapshot_bytes=\(snapshot.count)")
+
+                // Drive the WebView to read the post-script DOM state.
+                guard let panel = sessionManager.sessions[session]?.huds.first?.panels.first,
+                      let web = panel.renderer as? WebViewPanelRenderer else {
+                    NSLog("QuickShow: TEST_HTML failed: renderer missing")
+                    return
+                }
+                let scriptRan = try await web.webView.evaluateJavaScript(
+                    "document.getElementById('status').textContent"
+                ) as? String ?? ""
+                NSLog("QuickShow: TEST_HTML script_status=\"\(scriptRan)\"")
+
+                sessionManager.closeAllPanels(in: session)
+                NSLog("QuickShow: TEST_HTML done")
+            } catch {
+                NSLog("QuickShow: TEST_HTML failed: \(error)")
+            }
+        }
     }
 
     /// Headless markup test. Renders a markdown panel, drives both the
@@ -120,6 +172,315 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSLog("QuickShow: TEST_MARKUP failed: \(error)")
             }
         }
+    }
+
+    /// Headless markup-UI test. Exercises the visible side of the
+    /// feedback loop: title-bar Send button, draw-mode overlay, the
+    /// composite snapshot path, plus the no-double-dismiss + reset-
+    /// pending-on-rerender invariants.
+    ///
+    /// Logs grep-anchors of the form `TEST_MARKUP_UI step=<n> kind=<x>`
+    /// so a shell test can pull pass/fail signals out of stderr.
+    private func runMarkupUISmoke() {
+        Task {
+            do {
+                // ---- 1. Initial-pull race ----------------------------
+                //
+                // Sidecar would call `enable_markup_events` (which sets
+                // the flag) BEFORE its first `show_*` upsert. Simulate
+                // that order so the HUD must pull the armed-state
+                // synchronously when it's born.
+                let s1 = "markup-ui-initial"
+                sessionManager.setFlag(
+                    sessionId: s1,
+                    key: "markup_events_armed",
+                    value: .bool(true)
+                )
+                _ = try await sessionManager.upsert(
+                    sessionId: s1, name: "design",
+                    contentType: "markdown",
+                    form: "inline",
+                    body: "# initial pull race\n"
+                )
+                guard let hud1 = sessionManager.sessions[s1]?.huds.first?.window else {
+                    NSLog("QuickShow: TEST_MARKUP_UI failed step=1 kind=no-hud")
+                    return
+                }
+                NSLog("QuickShow: TEST_MARKUP_UI step=1 kind=initial-pull sendVisible=\(hud1.isSendButtonVisibleForTest) markupVisible=\(hud1.isMarkupButtonVisibleForTest)")
+
+                // ---- 2. Notification path ---------------------------
+                //
+                // Reverse order: upsert FIRST, then setFlag. Title bar
+                // should pick up the visibility change via the
+                // quickShowSessionFlagChanged notification.
+                let s2 = "markup-ui-notification"
+                _ = try await sessionManager.upsert(
+                    sessionId: s2, name: "design",
+                    contentType: "markdown",
+                    form: "inline",
+                    body: "# notification path\n"
+                )
+                guard let hud2 = sessionManager.sessions[s2]?.huds.first?.window else {
+                    NSLog("QuickShow: TEST_MARKUP_UI failed step=2 kind=no-hud")
+                    return
+                }
+                let beforeArm = hud2.isSendButtonVisibleForTest
+                sessionManager.setFlag(
+                    sessionId: s2,
+                    key: "markup_events_armed",
+                    value: .bool(true)
+                )
+                // Notification dispatch is synchronous on the main run
+                // loop, but the title bar's handler may dispatch async
+                // — give it a tick.
+                try await Task.sleep(nanoseconds: 100_000_000)
+                NSLog("QuickShow: TEST_MARKUP_UI step=2 kind=notification beforeArm=\(beforeArm) afterArm=\(hud2.isSendButtonVisibleForTest)")
+
+                // ---- 3. Send flow -----------------------------------
+                //
+                // Click Send programmatically; assert NDJSON line +
+                // artifact land in the session's events dir.
+                let s3 = "markup-ui-send"
+                sessionManager.setFlag(
+                    sessionId: s3,
+                    key: "markup_events_armed",
+                    value: .bool(true)
+                )
+                _ = try await sessionManager.upsert(
+                    sessionId: s3, name: "design",
+                    contentType: "markdown",
+                    form: "inline",
+                    body: "# send flow\n\nclick send.\n"
+                )
+                guard let hud3 = sessionManager.sessions[s3]?.huds.first?.window else {
+                    NSLog("QuickShow: TEST_MARKUP_UI failed step=3 kind=no-hud")
+                    return
+                }
+                hud3.performSendForTest()
+                try await Task.sleep(nanoseconds: 600_000_000)
+                let s3Log = (try? String(contentsOf: MarkupPaths.eventsLog(s3), encoding: .utf8)) ?? ""
+                let s3Lines = s3Log.split(separator: "\n").map(String.init)
+                let s3Artifacts = ((try? FileManager.default.contentsOfDirectory(atPath: MarkupPaths.artifactsDir(s3).path)) ?? []).filter { $0.hasSuffix(".png") }
+                NSLog("QuickShow: TEST_MARKUP_UI step=3 kind=send lines=\(s3Lines.count) artifacts=\(s3Artifacts.count)")
+                for (i, line) in s3Lines.enumerated() {
+                    NSLog("QuickShow: TEST_MARKUP_UI step=3 line[\(i)]=\(line)")
+                }
+
+                // ---- 4. Draw + send composite -----------------------
+                //
+                // Enter draw mode, append a stroke directly into the
+                // overlay (skipping mouse synthesis), click Send. The
+                // composite PNG must include red pixels — the stroke
+                // color — proving the overlay layer made it through
+                // the composite into the artifact bytes.
+                let s4 = "markup-ui-draw"
+                sessionManager.setFlag(
+                    sessionId: s4,
+                    key: "markup_events_armed",
+                    value: .bool(true)
+                )
+                _ = try await sessionManager.upsert(
+                    sessionId: s4, name: "design",
+                    contentType: "markdown",
+                    form: "inline",
+                    body: "# draw + composite\n"
+                )
+                guard let hud4 = sessionManager.sessions[s4]?.huds.first?.window else {
+                    NSLog("QuickShow: TEST_MARKUP_UI failed step=4 kind=no-hud")
+                    return
+                }
+                hud4.toggleDrawMode()
+                let path = NSBezierPath()
+                path.move(to: NSPoint(x: 30, y: 30))
+                path.line(to: NSPoint(x: 120, y: 30))
+                path.line(to: NSPoint(x: 120, y: 120))
+                hud4.markupOverlay.appendStrokeForTest(
+                    MarkupOverlayView.Stroke(
+                        path: path,
+                        color: .systemRed,
+                        width: 8.0
+                    )
+                )
+                hud4.performSendForTest()
+                try await Task.sleep(nanoseconds: 800_000_000)
+                let s4Artifacts = ((try? FileManager.default.contentsOfDirectory(atPath: MarkupPaths.artifactsDir(s4).path)) ?? []).filter { $0.hasSuffix(".png") }
+                var s4LowerLeftRed = false
+                var s4UpperRightRed = false
+                if let first = s4Artifacts.first,
+                   let data = try? Data(contentsOf: MarkupPaths.artifactsDir(s4).appendingPathComponent(first)),
+                   let rep = NSBitmapImageRep(data: data) {
+                    // Stroke was drawn at overlay points (30,30)→(120,30)→(120,120),
+                    // which is the BOTTOM-LEFT quadrant of the overlay
+                    // (NSView Y-up). After compositing into a Y-up
+                    // bitmap context and PNG-encoding, that quadrant
+                    // appears at the BOTTOM-LEFT of the image — which
+                    // in `colorAt(x:y:)` (Y-down per pixel index) is
+                    // the LOWER-LEFT region. Assert red there AND
+                    // assert the UPPER-RIGHT region is clean. The
+                    // asymmetric expectation catches any orientation
+                    // flip we might have introduced.
+                    s4LowerLeftRed = detectsRedInRegion(
+                        rep,
+                        xRange: 0 ..< (rep.pixelsWide / 2),
+                        yRange: (rep.pixelsHigh / 2) ..< rep.pixelsHigh
+                    )
+                    s4UpperRightRed = detectsRedInRegion(
+                        rep,
+                        xRange: (rep.pixelsWide / 2) ..< rep.pixelsWide,
+                        yRange: 0 ..< (rep.pixelsHigh / 2)
+                    )
+                    NSLog("QuickShow: TEST_MARKUP_UI step=4 kind=draw artifact_bytes=\(data.count) px=\(rep.pixelsWide)x\(rep.pixelsHigh) llRed=\(s4LowerLeftRed) urRed=\(s4UpperRightRed)")
+                } else {
+                    NSLog("QuickShow: TEST_MARKUP_UI step=4 kind=draw artifact_missing")
+                }
+
+                // ---- 5. No-double-dismiss ---------------------------
+                //
+                // Sent already in step 3; close the panel and assert
+                // log still has 0 markup_dismissed for it.
+                sessionManager.close(sessionId: s3, name: "design")
+                try await Task.sleep(nanoseconds: 200_000_000)
+                let s3LogAfter = (try? String(contentsOf: MarkupPaths.eventsLog(s3), encoding: .utf8)) ?? ""
+                let s3LinesAfter = s3LogAfter.split(separator: "\n").map(String.init)
+                let s3Sent = s3LinesAfter.filter { $0.contains("\"markup_sent\"") }.count
+                let s3Dismissed = s3LinesAfter.filter { $0.contains("\"markup_dismissed\"") }.count
+                NSLog("QuickShow: TEST_MARKUP_UI step=5 kind=no-double-dismiss sent=\(s3Sent) dismissed=\(s3Dismissed) total_lines=\(s3LinesAfter.count)")
+
+                // ---- 6. Re-render resets pending --------------------
+                //
+                // Send → re-upsert same name → close should produce a
+                // fresh dismiss (the re-render cleared the pending
+                // flag — see SessionManager.renderPanel).
+                let s6 = "markup-ui-rerender"
+                sessionManager.setFlag(
+                    sessionId: s6,
+                    key: "markup_events_armed",
+                    value: .bool(true)
+                )
+                _ = try await sessionManager.upsert(
+                    sessionId: s6, name: "design",
+                    contentType: "markdown",
+                    form: "inline",
+                    body: "# rerender baseline\n"
+                )
+                guard let hud6 = sessionManager.sessions[s6]?.huds.first?.window else {
+                    NSLog("QuickShow: TEST_MARKUP_UI failed step=6 kind=no-hud")
+                    return
+                }
+                hud6.performSendForTest()
+                try await Task.sleep(nanoseconds: 600_000_000)
+                _ = try await sessionManager.upsert(
+                    sessionId: s6, name: "design",
+                    contentType: "markdown",
+                    form: "inline",
+                    body: "# rerender new content\n"
+                )
+                sessionManager.close(sessionId: s6, name: "design")
+                try await Task.sleep(nanoseconds: 200_000_000)
+                let s6Log = (try? String(contentsOf: MarkupPaths.eventsLog(s6), encoding: .utf8)) ?? ""
+                let s6Lines = s6Log.split(separator: "\n").map(String.init)
+                let s6Sent = s6Lines.filter { $0.contains("\"markup_sent\"") }.count
+                let s6Dismissed = s6Lines.filter { $0.contains("\"markup_dismissed\"") }.count
+                NSLog("QuickShow: TEST_MARKUP_UI step=6 kind=rerender sent=\(s6Sent) dismissed=\(s6Dismissed)")
+
+                // ---- 7. Inactive-tab stroke wipe on re-render -------
+                //
+                // Open two panels in one HUD, draw on b, switch to a
+                // (b commits + becomes inactive), re-render b while a
+                // is active. Switch back to b — overlay must be empty.
+                // Catches a bug where the wipe was gated on
+                // `activePanelName == name`, leaving inactive tabs'
+                // strokes stale.
+                let s7 = "markup-ui-inactive-wipe"
+                sessionManager.setFlag(
+                    sessionId: s7,
+                    key: "markup_events_armed",
+                    value: .bool(true)
+                )
+                _ = try await sessionManager.upsert(
+                    sessionId: s7, name: "a",
+                    contentType: "markdown",
+                    form: "inline",
+                    body: "# panel a\n"
+                )
+                _ = try await sessionManager.upsert(
+                    sessionId: s7, name: "b",
+                    contentType: "markdown",
+                    form: "inline",
+                    body: "# panel b\n"
+                )
+                guard let hud7 = sessionManager.sessions[s7]?.huds.first?.window,
+                      let session7 = sessionManager.sessions[s7],
+                      let bPanel = session7.huds.first?.panels.first(where: { $0.name == "b" }) else {
+                    NSLog("QuickShow: TEST_MARKUP_UI failed step=7 kind=no-panel")
+                    return
+                }
+                // After the second upsert, "b" is active. Add a
+                // stroke into b's overlay, then switch to a so the
+                // stroke commits into bPanel.strokes.
+                let bPath = NSBezierPath()
+                bPath.move(to: NSPoint(x: 40, y: 40))
+                bPath.line(to: NSPoint(x: 100, y: 100))
+                hud7.markupOverlay.appendStrokeForTest(
+                    MarkupOverlayView.Stroke(path: bPath, color: .systemRed, width: 5.0)
+                )
+                sessionManager.switchTab(in: s7, to: "a")
+                let bStrokesAfterSwitch = bPanel.strokes.count
+                // Re-render b while a is active. Per the wipe rule,
+                // bPanel.strokes should be cleared even though b isn't
+                // visible — content changed underneath.
+                _ = try await sessionManager.upsert(
+                    sessionId: s7, name: "b",
+                    contentType: "markdown",
+                    form: "inline",
+                    body: "# panel b updated\n"
+                )
+                let bStrokesAfterReRender = bPanel.strokes.count
+                // Switch back to b — overlay should pull empty
+                // strokes from the wiped panel.
+                sessionManager.switchTab(in: s7, to: "b")
+                let overlayStrokesOnReturn = hud7.markupOverlay.currentStrokes().count
+                NSLog("QuickShow: TEST_MARKUP_UI step=7 kind=inactive-wipe afterCommit=\(bStrokesAfterSwitch) afterReRender=\(bStrokesAfterReRender) overlayOnReturn=\(overlayStrokesOnReturn)")
+
+                // Cleanup.
+                for s in [s1, s2, s3, s4, s6, s7] {
+                    sessionManager.closeAllPanels(in: s)
+                }
+                NSLog("QuickShow: TEST_MARKUP_UI done")
+            } catch {
+                NSLog("QuickShow: TEST_MARKUP_UI failed: \(error)")
+            }
+        }
+    }
+
+    /// Region-scoped red detector. Returns true if any sampled pixel
+    /// inside `xRange × yRange` has the red marker color (R dominant
+    /// by ≥ 80 over G/B with non-zero alpha). Sampling is sparse for
+    /// speed — at 1px stride we'd touch ~640K pixels per region;
+    /// stride 8 keeps it under 10K which is plenty for stroke
+    /// detection at width 8pt.
+    private func detectsRedInRegion(_ rep: NSBitmapImageRep,
+                                    xRange: Range<Int>,
+                                    yRange: Range<Int>) -> Bool {
+        let stride = 8
+        var y = yRange.lowerBound
+        while y < yRange.upperBound {
+            var x = xRange.lowerBound
+            while x < xRange.upperBound {
+                if let c = rep.colorAt(x: x, y: y) {
+                    let r = Int(c.redComponent * 255)
+                    let g = Int(c.greenComponent * 255)
+                    let b = Int(c.blueComponent * 255)
+                    let a = Int(c.alphaComponent * 255)
+                    if a > 0 && r > 150 && (r - g) > 80 && (r - b) > 80 {
+                        return true
+                    }
+                }
+                x += stride
+            }
+            y += stride
+        }
+        return false
     }
 
     /// Headless pan/zoom test. Renders a mermaid panel + an image

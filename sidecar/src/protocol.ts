@@ -27,7 +27,7 @@ export type UpsertRequest = {
   kind: "upsert";
   session: string;
   name: string;
-  content_type: "markdown" | "svg" | "image" | "mermaid";
+  content_type: "markdown" | "svg" | "image" | "mermaid" | "html";
   form: "inline" | "path";
   body: string;
 };

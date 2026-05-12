@@ -29,6 +29,7 @@ final class RendererRegistry {
         registry.register(SVGRenderer.self) { SVGRenderer() }
         registry.register(MermaidRenderer.self) { MermaidRenderer() }
         registry.register(ImageRenderer.self) { ImageRenderer() }
+        registry.register(HTMLRenderer.self) { HTMLRenderer() }
         return registry
     }
 }

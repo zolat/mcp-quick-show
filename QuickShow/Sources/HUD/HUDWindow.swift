@@ -22,12 +22,21 @@ final class HUDWindow: NSWindow {
     private let titleBar = TitleBarOverlay()
     private let tabStrip = TabStripView()
     let resizeHandle = ResizeHandle()
+    /// Markup drawing overlay — sits topmost in `contentHost`,
+    /// `isHidden = true` by default so mouse events pass through to
+    /// the active renderer view below. Visible while in draw mode.
+    let markupOverlay = MarkupOverlayView()
 
     /// Currently-installed renderer views, keyed by panel name.
     /// At most one is visible at a time; the others are hidden in
     /// place so their state (scroll position, JS context) survives.
     private var rendererViews: [String: NSView] = [:]
     private(set) var activePanelName: String?
+
+    /// Per-HUD draw-mode flag. `true` while the user is annotating;
+    /// `false` is the normal mouse-passes-through state. Tear-out
+    /// spawns new HUDs with this off.
+    private(set) var isInDrawMode: Bool = false
 
     var onCloseRequested: (() -> Void)?
     var onSelectTab: ((String) -> Void)?
@@ -47,6 +56,27 @@ final class HUDWindow: NSWindow {
     var onTitleBarDragStart: (() -> Void)?
     var onTitleBarDragMove: ((NSPoint) -> Void)?
     var onTitleBarDragEnd: ((NSPoint) -> Void)?
+    /// Markup pencil click in the title bar (visible only when the
+    /// owning session is armed for markup events). Wired by
+    /// SessionManager to call `toggleDrawMode()` on this HUD.
+    var onToggleDrawMode: (() -> Void)?
+    /// Send check-mark click in the title bar — fires the composite
+    /// snapshot + `markup_sent` emission flow on the active panel.
+    var onSendActivePanelMarkup: (() -> Void)?
+    /// SessionManager owns the per-panel stroke array. The HUD calls
+    /// these on tab switch / draw-mode toggle so strokes survive
+    /// inactive tabs and tear-out/reattach.
+    /// - `onCommitStrokes(panel, strokes)`: persist overlay → panel.
+    /// - `onLoadStrokes(panel) -> [Stroke]`: read panel → overlay.
+    var onCommitStrokes: ((String, [MarkupOverlayView.Stroke]) -> Void)?
+    var onLoadStrokes: ((String) -> [MarkupOverlayView.Stroke])?
+    /// Reports the session's current `markup_events_armed` flag. Used
+    /// by the title bar's flag-change observer to refresh button
+    /// visibility without poking through SessionManager directly.
+    var onResolveArmedFlag: (() -> Bool)?
+    /// Reports draw-mode toggles to SessionManager so it can suspend
+    /// or resume panzoom on the active renderer.
+    var onDrawModeChanged: ((Bool) -> Void)?
 
     /// Bound by `SessionManager` so right-click handlers can find
     /// their owning session.
@@ -168,6 +198,9 @@ final class HUDWindow: NSWindow {
         titleBar.onDragStart = { [weak self] in self?.onTitleBarDragStart?() }
         titleBar.onDragMove = { [weak self] loc in self?.onTitleBarDragMove?(loc) }
         titleBar.onDragEnd = { [weak self] loc in self?.onTitleBarDragEnd?(loc) }
+        titleBar.onToggleDrawMode = { [weak self] in self?.toggleDrawMode() }
+        titleBar.onSend = { [weak self] in self?.onSendActivePanelMarkup?() }
+        titleBar.onClearMarkup = { [weak self] in self?.clearActivePanelMarkup() }
         root.addSubview(titleBar)
         NSLayoutConstraint.activate([
             titleBar.topAnchor.constraint(equalTo: root.topAnchor),
@@ -187,6 +220,38 @@ final class HUDWindow: NSWindow {
             tabStrip.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 4),
             tabStrip.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -4),
             tabStrip.heightAnchor.constraint(equalToConstant: TabStripView.height),
+        ])
+
+        // Markup overlay sits inside `contentHost` as the topmost
+        // subview — strictly above every renderer view installed via
+        // `installPanel`. Hidden by default so mouse events fall
+        // through to the active renderer.
+        markupOverlay.translatesAutoresizingMaskIntoConstraints = false
+        // Overlay is ALWAYS visible — its draw method paints nothing
+        // when there are no strokes, and `isPassthrough = true`
+        // routes mouse hit-testing to the renderer below. Draw mode
+        // flips `isPassthrough` so the overlay starts capturing
+        // input. Keeping it perpetually visible is what lets sent
+        // strokes remain on screen as proof the Send action took.
+        markupOverlay.isPassthrough = true
+        markupOverlay.onStrokesChanged = { [weak self] in
+            guard let self = self else { return }
+            let strokes = self.markupOverlay.currentStrokes()
+            self.titleBar.setHasStrokes(!strokes.isEmpty)
+            if let active = self.activePanelName {
+                self.onCommitStrokes?(active, strokes)
+            }
+        }
+        markupOverlay.onEscape = { [weak self] in
+            guard let self = self, self.isInDrawMode else { return }
+            self.toggleDrawMode()
+        }
+        contentHost.addSubview(markupOverlay)
+        NSLayoutConstraint.activate([
+            markupOverlay.topAnchor.constraint(equalTo: contentHost.topAnchor),
+            markupOverlay.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor),
+            markupOverlay.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor),
+            markupOverlay.bottomAnchor.constraint(equalTo: contentHost.bottomAnchor),
         ])
 
         resizeHandle.translatesAutoresizingMaskIntoConstraints = false
@@ -209,7 +274,9 @@ final class HUDWindow: NSWindow {
         }
         view.translatesAutoresizingMaskIntoConstraints = false
         if view.superview == nil {
-            contentHost.addSubview(view)
+            // Insert below the markup overlay so the overlay stays
+            // topmost regardless of how many panels we install.
+            contentHost.addSubview(view, positioned: .below, relativeTo: markupOverlay)
             NSLayoutConstraint.activate([
                 view.topAnchor.constraint(equalTo: contentHost.topAnchor),
                 view.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor),
@@ -222,13 +289,24 @@ final class HUDWindow: NSWindow {
     }
 
     /// Make `name` the visible panel; hide the others in place. The
-    /// title bar updates to show the active name.
+    /// title bar updates to show the active name. Markup strokes for
+    /// the outgoing panel are committed back to its store, and the
+    /// new panel's strokes are loaded into the overlay so per-panel
+    /// markup state survives tab switches.
     func setActivePanel(_ name: String) {
         guard rendererViews[name] != nil else { return }
+        // Commit overlay state to the panel we're leaving before
+        // swapping in the new panel's strokes.
+        if let outgoing = activePanelName, outgoing != name {
+            onCommitStrokes?(outgoing, markupOverlay.currentStrokes())
+        }
         activePanelName = name
         for (n, v) in rendererViews {
             v.isHidden = (n != name)
         }
+        let incomingStrokes = onLoadStrokes?(name) ?? []
+        markupOverlay.loadStrokes(incomingStrokes)
+        titleBar.setHasStrokes(!incomingStrokes.isEmpty)
         titleBar.setTitle(name)
     }
 
@@ -265,6 +343,69 @@ final class HUDWindow: NSWindow {
     /// reconnects (cleared).
     func setSessionEnded(_ ended: Bool) {
         titleBar.setSessionEnded(ended)
+    }
+
+    /// Forwarder for the title-bar's armed-flag visibility. Called
+    /// synchronously from SessionManager right after `sessionId` is
+    /// bound, so the buttons reflect the *current* flag state even
+    /// when the flag was armed before the HUD existed (the common
+    /// case: sidecar calls `enable_markup_events` before its first
+    /// `upsert`).
+    func setArmed(_ armed: Bool) {
+        titleBar.setArmed(armed)
+    }
+
+    /// Bind the title bar to its owning session id so its
+    /// flag-change notification observer can filter to "our" session.
+    func setOwningSessionId(_ id: String) {
+        titleBar.setOwningSessionId(id)
+    }
+
+    /// Called by the title bar's notification observer when the
+    /// `markup_events_armed` flag flips for *this* session. Resolves
+    /// the new value through `onResolveArmedFlag` (which goes through
+    /// SessionManager) so the source of truth stays one place.
+    func syncArmedFromSession() {
+        let armed = onResolveArmedFlag?() ?? false
+        setArmed(armed)
+        // Flipping armed -> false while in draw mode auto-exits so
+        // strokes don't get stranded behind an invisible Send button.
+        if !armed && isInDrawMode {
+            toggleDrawMode()
+        }
+    }
+
+    /// Test-only accessors mirroring `TitleBarOverlay`'s test hooks
+    /// so the QUICKSHOW_TEST_MARKUP_UI smoke can assert visibility
+    /// + click Send without poking at private state.
+    var isSendButtonVisibleForTest: Bool { titleBar.isSendButtonVisibleForTest }
+    var isMarkupButtonVisibleForTest: Bool { titleBar.isMarkupButtonVisibleForTest }
+    func performSendForTest() { titleBar.performSendForTest() }
+
+    /// Wipe the active panel's strokes — local UI escape hatch
+    /// (no event emission). Triggered by the title-bar ⌫ button.
+    /// `MarkupOverlayView.clear()` fires `onStrokesChanged`, which
+    /// commits the empty array back to the Panel via SessionManager.
+    func clearActivePanelMarkup() {
+        markupOverlay.clear()
+    }
+
+    /// Flip draw-mode on/off. The overlay stays *visible* either
+    /// way — what changes is whether it captures mouse events
+    /// (`isPassthrough = false` when drawing, `true` otherwise so
+    /// clicks hit the panel content). First-responder status moves
+    /// to the overlay during draw mode so Cmd+Z / Esc reach it, and
+    /// SessionManager gets notified to suspend/resume panzoom.
+    func toggleDrawMode() {
+        isInDrawMode.toggle()
+        markupOverlay.isPassthrough = !isInDrawMode
+        titleBar.setDrawModeActive(isInDrawMode)
+        if isInDrawMode {
+            makeFirstResponder(markupOverlay)
+        } else if firstResponder === markupOverlay {
+            makeFirstResponder(nil)
+        }
+        onDrawModeChanged?(isInDrawMode)
     }
 
     /// During a drag-to-reattach gesture (the inverse of tear-out),

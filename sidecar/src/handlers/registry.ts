@@ -18,7 +18,7 @@ import type { SocketClient } from "../socket.ts";
 
 /** Normalized payload bound for the control socket. */
 export type NormalizedUpsert = {
-  contentType: "markdown" | "svg" | "image" | "mermaid";
+  contentType: "markdown" | "svg" | "image" | "mermaid" | "html";
   name: string;
   form: "inline" | "path";
   body: string;

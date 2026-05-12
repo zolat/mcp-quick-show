@@ -66,6 +66,18 @@ final class SessionManager: NSObject {
         let contentType: String
         let renderer: any PanelRenderer
         let view: NSView
+        /// Markup strokes the user has drawn over this panel. Lives on
+        /// Panel (the unit that travels under tear-out/reattach) so
+        /// annotations follow the content across HUDs. Loaded into the
+        /// owning HUD's overlay on activation, committed back on
+        /// deactivation, and cleared by the Send flow.
+        var strokes: [MarkupOverlayView.Stroke] = []
+        /// True while a `markup_sent` artifact has been recorded for
+        /// this panel's current render and the panel hasn't been
+        /// re-rendered yet. Suppresses the close → `markup_dismissed`
+        /// emission that would otherwise double-fire after Send.
+        /// Reset to false on each re-render in `renderPanel`.
+        var markupSentPending: Bool = false
 
         init(name: String, contentType: String, renderer: any PanelRenderer, view: NSView) {
             self.name = name
@@ -205,6 +217,28 @@ final class SessionManager: NSObject {
                              body: String) async throws -> (RenderResult, Data) {
         hud.window.setActivePanel(name)
         hud.window.updateTabs(hud.panels.map(\.name))
+        // Re-render means the content has changed underneath any
+        // previously-drawn strokes — wipe them so the next close
+        // is again a "dismiss without send", and so stale strokes
+        // don't fight the new content.
+        //
+        // The mid-stroke guard applies ONLY when the user is actively
+        // drawing on THIS panel right now (active + mid-drag). In that
+        // case, dropping their stroke mid-gesture would feel like a
+        // glitch — keep their work; their mouseUp will commit and the
+        // next re-render will wipe normally. For inactive tabs, the
+        // wipe always proceeds — the user isn't watching, so stale
+        // strokes would just resurface on next tab switch.
+        panel.markupSentPending = false
+        let overlay = hud.window.markupOverlay
+        let isActiveAndDragging =
+            hud.window.activePanelName == name && overlay.isCurrentlyDragging
+        if !isActiveAndDragging {
+            panel.strokes = []
+            if hud.window.activePanelName == name {
+                overlay.loadStrokes([])
+            }
+        }
         let payload = PanelPayload(name: name, contentType: contentType, form: form, body: body)
         do {
             let result = try await panel.renderer.update(payload: payload)
@@ -222,10 +256,14 @@ final class SessionManager: NSObject {
         guard let (hud, _) = locate(in: session, name: name) else { return }
         let wasActive = hud.window.activePanelName == name
         let panelIdx = hud.panels.firstIndex(where: { $0.name == name })!
+        let closingPanel = hud.panels[panelIdx]
         // Until per-panel `accept_markup` lands, a close in an armed
         // session = a markup dismissed. Refines once the show_* tools
-        // gain the opt-in argument.
-        if session.flags["markup_events_armed"]?.asBool == true {
+        // gain the opt-in argument. Skip when a markup_sent is already
+        // pending for this panel — that close is the user clearing the
+        // window after sending, not a dismissal.
+        if session.flags["markup_events_armed"]?.asBool == true,
+           !closingPanel.markupSentPending {
             recordMarkupDismissed(sessionId: sessionId, panel: name)
         }
         hud.panels.remove(at: panelIdx)
@@ -268,9 +306,10 @@ final class SessionManager: NSObject {
               let hud = session.huds.first(where: { $0.id == hudId }) else { return }
         // Emit a markup_dismissed for each panel in the HUD when the
         // session is armed — title-bar × counts as "user closed
-        // without sending markup" for every panel inside.
+        // without sending markup" for every panel inside — but skip
+        // any panel whose current render has already been sent.
         if session.flags["markup_events_armed"]?.asBool == true {
-            for panel in hud.panels {
+            for panel in hud.panels where !panel.markupSentPending {
                 recordMarkupDismissed(sessionId: sessionId, panel: panel.name)
             }
         }
@@ -316,6 +355,10 @@ final class SessionManager: NSObject {
     /// `get_markup`). Errors surface as a `nil` return + NSLog so the
     /// renderer can decide how loud to be — the JS bridge already
     /// considers the press "delivered" once it hands off the PNG.
+    ///
+    /// Side effect: marks the panel's `markupSentPending = true` so
+    /// the close-on-armed path doesn't double-emit a `markup_dismissed`
+    /// for the same render.
     @discardableResult
     func recordMarkupSent(sessionId: String, panel: String, pngBytes: Data) -> String? {
         let session = ensureSession(sessionId)
@@ -328,8 +371,61 @@ final class SessionManager: NSObject {
             return nil
         }
         session.eventWriter.emitMarkupSent(panel: panel, artifact: artifactId)
+        // Mark the panel so a subsequent close in an armed session
+        // doesn't double-fire a `markup_dismissed`.
+        if let (_, panelObj) = locate(in: session, name: panel) {
+            panelObj.markupSentPending = true
+        }
         NSLog("QuickShow: markup_sent session=\(sessionId) panel=\(panel) artifact=\(artifactId)")
         return artifactId
+    }
+
+    /// Take a snapshot of the active panel inside `hudId`, composite
+    /// any overlay strokes on top, emit `markup_sent`, then exit draw
+    /// mode and clear the overlay. Wired to the title-bar Send button
+    /// in `wireHudCallbacks`.
+    func sendActivePanelMarkup(sessionId: String, hudId: UUID) {
+        guard let session = sessions[sessionId],
+              let hud = session.huds.first(where: { $0.id == hudId }),
+              let activeName = hud.window.activePanelName,
+              let panel = hud.panels.first(where: { $0.name == activeName }) else {
+            return
+        }
+        let overlay = hud.window.markupOverlay
+        let strokesAtSend = overlay.currentStrokes()
+
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            do {
+                let underlying = try await panel.renderer.snapshot()
+                let composite = SnapshotService.compositeMarkup(
+                    underlyingPNG: underlying,
+                    strokes: strokesAtSend,
+                    viewBoundsPt: panel.view.bounds.size
+                ) ?? underlying
+                _ = self.recordMarkupSent(
+                    sessionId: sessionId,
+                    panel: activeName,
+                    pngBytes: composite
+                )
+                // Leave strokes on screen so the user sees their
+                // annotation was captured (otherwise the screen
+                // snaps clean and feels like the send didn't take).
+                // The next agent re-render of this panel is what
+                // wipes them (see renderPanel).
+                //
+                // Exit draw mode though — the gesture is complete; if
+                // the user wants to add more strokes they'll re-enter
+                // explicitly. Cmd+Z still pops strokes one at a time
+                // for manual cleanup if they want a clean slate
+                // without waiting for the agent.
+                if hud.window.isInDrawMode {
+                    hud.window.toggleDrawMode()
+                }
+            } catch {
+                NSLog("QuickShow: sendActivePanelMarkup snapshot failed: \(error)")
+            }
+        }
     }
 
     /// Emit a `markup_dismissed` line for a panel that was closed
@@ -509,6 +605,81 @@ final class SessionManager: NSObject {
         }
         window.onTitleBarDragEnd = { [weak self] cursor in
             self?.handleHudDragEnd(sessionId: sessionId, hudId: hudId, cursor: cursor)
+        }
+        // Markup: title-bar Send button → composite + emit; draw mode
+        // toggle → suspend/resume renderer interaction on the active
+        // panel so panning doesn't drift the underlying content while
+        // strokes are being drawn.
+        window.onSendActivePanelMarkup = { [weak self] in
+            self?.sendActivePanelMarkup(sessionId: sessionId, hudId: hudId)
+        }
+        window.onDrawModeChanged = { [weak self] on in
+            self?.handleDrawModeChanged(sessionId: sessionId, hudId: hudId, on: on)
+        }
+        window.onCommitStrokes = { [weak self] name, strokes in
+            self?.commitStrokes(sessionId: sessionId, hudId: hudId,
+                                panel: name, strokes: strokes)
+        }
+        window.onLoadStrokes = { [weak self] name in
+            return self?.loadStrokes(sessionId: sessionId, hudId: hudId, panel: name) ?? []
+        }
+        window.onResolveArmedFlag = { [weak self] in
+            return self?.flag(sessionId: sessionId, key: "markup_events_armed")?.asBool == true
+        }
+        // Bind the title bar to its owning session and pull the
+        // current armed-flag state SYNCHRONOUSLY. This covers the
+        // common race: sidecar calls `enable_markup_events` (which
+        // sets the flag) BEFORE its first `upsert`, so the flag is
+        // already true by the time this HUD is born — the
+        // notification observer alone would miss it.
+        window.setOwningSessionId(sessionId)
+        let armed = flag(sessionId: sessionId, key: "markup_events_armed")?.asBool == true
+        window.setArmed(armed)
+    }
+
+    /// Persist the overlay's strokes back onto the Panel that owns
+    /// them. Called on tab switch + every onStrokesChanged event.
+    private func commitStrokes(sessionId: String,
+                               hudId: UUID,
+                               panel: String,
+                               strokes: [MarkupOverlayView.Stroke]) {
+        guard let session = sessions[sessionId],
+              let hud = session.huds.first(where: { $0.id == hudId }),
+              let p = hud.panels.first(where: { $0.name == panel }) else {
+            return
+        }
+        p.strokes = strokes
+    }
+
+    /// Fetch the strokes currently stored on a panel so the overlay
+    /// can re-load them when the panel becomes active again.
+    private func loadStrokes(sessionId: String,
+                             hudId: UUID,
+                             panel: String) -> [MarkupOverlayView.Stroke] {
+        guard let session = sessions[sessionId],
+              let hud = session.huds.first(where: { $0.id == hudId }),
+              let p = hud.panels.first(where: { $0.name == panel }) else {
+            return []
+        }
+        return p.strokes
+    }
+
+    /// Draw mode toggled on/off — fan the signal out to the active
+    /// renderer so panzoom + scroll-magnification stop fighting the
+    /// user's drawing.
+    private func handleDrawModeChanged(sessionId: String,
+                                       hudId: UUID,
+                                       on: Bool) {
+        guard let session = sessions[sessionId],
+              let hud = session.huds.first(where: { $0.id == hudId }),
+              let activeName = hud.window.activePanelName,
+              let panel = hud.panels.first(where: { $0.name == activeName }) else {
+            return
+        }
+        if on {
+            panel.renderer.suspendInteraction()
+        } else {
+            panel.renderer.resumeInteraction()
         }
     }
 

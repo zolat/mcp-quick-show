@@ -52,4 +52,19 @@ protocol PanelRenderer: AnyObject {
     /// Capture a PNG snapshot of the renderer's current visual state.
     /// Includes any error UI if the last update failed.
     func snapshot() async throws -> Data
+
+    /// Suspend interactive transforms (pan, zoom, scroll-magnification)
+    /// while the user is drawing markup strokes on top. Keeps the
+    /// strokes coherent with the content underneath. Default is a
+    /// no-op for renderers that have nothing to suspend.
+    func suspendInteraction()
+
+    /// Resume interactive transforms after draw mode exits.
+    func resumeInteraction()
+}
+
+extension PanelRenderer {
+    /// Default no-ops — only renderers with pan/zoom override these.
+    func suspendInteraction() {}
+    func resumeInteraction() {}
 }

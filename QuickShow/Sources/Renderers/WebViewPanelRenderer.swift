@@ -31,6 +31,17 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
     /// `Resources/templates/`. Subclasses set this to e.g. "markdown".
     var templateName: String { fatalError("subclass must override templateName") }
 
+    /// Whether the renderer mounts a bundled HTML template at view
+    /// creation time and drives updates through the
+    /// `__quickshow_render(body)` JS bridge.
+    ///
+    /// Default is `true` (markdown / svg / mermaid). `HTMLRenderer`
+    /// returns `false` and overrides `update(payload:)` to drive the
+    /// WebView via `loadHTMLString` directly — that's the only way to
+    /// execute `<script>` tags in agent-supplied HTML, since
+    /// `innerHTML` silently drops them per the DOM spec.
+    var useTemplate: Bool { true }
+
     /// Subclasses can override to escape / transform the body before
     /// it lands in the JS bridge. Default = identity (raw string).
     func prepareBody(_ body: String, form: String) throws -> String { body }
@@ -84,6 +95,14 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
     }
 
     private func loadTemplate() {
+        // Renderers that drive the WebView directly (HTMLRenderer for
+        // agent-supplied HTML where `<script>` must execute) opt out
+        // here. The WebView starts empty; the subclass's
+        // `update(payload:)` is responsible for loading content.
+        if !useTemplate {
+            loadState = .ready
+            return
+        }
         let bundle = Bundle.main
         guard
             let templateURL = bundle.url(
@@ -302,6 +321,28 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
 
     func snapshot() async throws -> Data {
         try await SnapshotService.snapshotWebView(webView)
+    }
+
+    /// Freeze panzoom in the embedded template so user strokes stay
+    /// aligned with the content underneath while draw mode is active.
+    /// No-op for templates that didn't install panzoom (the JS hook
+    /// short-circuits when no controller exists yet).
+    func suspendInteraction() {
+        guard webView != nil else { return }
+        Task { @MainActor in
+            _ = try? await self.webView.evaluateJavaScript(
+                "window.__quickshow_panzoom_suspend && window.__quickshow_panzoom_suspend();"
+            )
+        }
+    }
+
+    func resumeInteraction() {
+        guard webView != nil else { return }
+        Task { @MainActor in
+            _ = try? await self.webView.evaluateJavaScript(
+                "window.__quickshow_panzoom_resume && window.__quickshow_panzoom_resume();"
+            )
+        }
     }
 
     // MARK: - WKNavigationDelegate

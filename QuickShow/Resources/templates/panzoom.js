@@ -65,6 +65,10 @@
     targetEl.style.height = natH + 'px';
 
     var state = { zoom: 1, panX: 0, panY: 0 };
+    // `disabled` short-circuits wheel + drag handlers so the markup
+    // overlay can freeze the content while the user is drawing on top.
+    // Toggled via the controller's `suspend()` / `resume()` methods.
+    var disabled = false;
 
     function apply() {
       wrap.style.transform =
@@ -95,6 +99,7 @@
 
     // ---------- wheel: zoom centered on cursor ----------
     function onWheel(ev) {
+      if (disabled) return;
       ev.preventDefault();
       var rect = wrap.getBoundingClientRect();
       // Cursor in container-local coords.
@@ -119,6 +124,7 @@
     var dragging = false;
     var dragStart = { x: 0, y: 0, panX: 0, panY: 0 };
     function onMouseDown(ev) {
+      if (disabled) return;
       if (ev.button !== 0) return;
       dragging = true;
       dragStart.x = ev.clientX;
@@ -142,6 +148,7 @@
 
     // ---------- dblclick: reset ----------
     function onDblClick(ev) {
+      if (disabled) return;
       ev.preventDefault();
       reset();
     }
@@ -160,6 +167,11 @@
     return {
       reset: reset,
       state: function() { return { zoom: state.zoom, panX: state.panX, panY: state.panY }; },
+      // Markup-overlay coordination: freeze + thaw interactive
+      // transforms so user strokes stay aligned with the underlying
+      // content while drawing.
+      suspend: function() { disabled = true; wrap.style.cursor = 'default'; },
+      resume: function() { disabled = false; wrap.style.cursor = 'grab'; },
       // Test affordance — invoke the handlers directly without
       // dispatching real events (which is finicky inside WK from JS).
       _wheel: function(deltaY, clientX, clientY) {
@@ -178,5 +190,16 @@
     var ctrl = rawInstall(el, opts);
     window.__quickshow_panzoom_latest = ctrl;
     return ctrl;
+  };
+  // Global accessors so Swift can suspend/resume from
+  // `evaluateJavaScript` without DOM-walking. No-ops if no controller
+  // has been installed yet (e.g., before the SVG mounts).
+  window.__quickshow_panzoom_suspend = function() {
+    var c = window.__quickshow_panzoom_latest;
+    if (c && typeof c.suspend === 'function') c.suspend();
+  };
+  window.__quickshow_panzoom_resume = function() {
+    var c = window.__quickshow_panzoom_latest;
+    if (c && typeof c.resume === 'function') c.resume();
   };
 })();

@@ -27,6 +27,7 @@ import "./handlers/markdown.ts";
 import "./handlers/svg.ts";
 import "./handlers/mermaid.ts";
 import "./handlers/image.ts";
+import "./handlers/html.ts";
 import "./handlers/enableMarkupEvents.ts";
 import "./handlers/getMarkup.ts";
 
