@@ -24,6 +24,7 @@ Package.resolved
 node_modules/
 sidecar/dist/
 sidecar/.cache/
+sidecar/.*.bun-build
 
 # Test artifacts
 /tmp-test/
