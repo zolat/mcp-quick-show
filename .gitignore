@@ -1,0 +1,29 @@
+# Xcode
+build/
+DerivedData/
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+
+# Swift
+.build/
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
+
+# Local logs / scratch
+*.log
+*.swp
+*.swo
+
+# Node / Bun
+node_modules/
+sidecar/dist/
+sidecar/.cache/
+
+# Test artifacts
+/tmp-test/
