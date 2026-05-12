@@ -18,6 +18,9 @@ import { allHandlers, findHandler } from "./handlers/registry.ts";
 // Side-effect import: each handler module calls `registerHandler()`
 // on load. Adding a new type is a single import line here.
 import "./handlers/markdown.ts";
+import "./handlers/svg.ts";
+import "./handlers/mermaid.ts";
+import "./handlers/image.ts";
 
 async function ensureConnected(client: SocketClient): Promise<void> {
   try {

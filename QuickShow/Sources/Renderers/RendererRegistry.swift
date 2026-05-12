@@ -26,6 +26,9 @@ final class RendererRegistry {
     static func makeDefault() -> RendererRegistry {
         let registry = RendererRegistry()
         registry.register(MarkdownRenderer.self) { MarkdownRenderer() }
+        registry.register(SVGRenderer.self) { SVGRenderer() }
+        registry.register(MermaidRenderer.self) { MermaidRenderer() }
+        registry.register(ImageRenderer.self) { ImageRenderer() }
         return registry
     }
 }

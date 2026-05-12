@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline'; connect-src 'none'; img-src 'self' file: data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'">
+<!--QS_THEME-->
+<style>
+  body {
+    padding: 16px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+  }
+  #qs-content {
+    max-width: 100%;
+  }
+  #qs-content > svg {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+</style>
+</head>
+<body>
+<div id="qs-content"></div>
+<div id="qs-error"></div>
+<!--QS_MERMAID-->
+<script>
+(function() {
+  "use strict";
+
+  // Mermaid in strict security level: blocks all HTML-in-labels +
+  // disallows clickable elements. Matches the PRD's
+  // `securityLevel: 'strict'` directive.
+  if (typeof mermaid !== 'undefined') {
+    const darkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      theme: darkMode ? 'dark' : 'default',
+    });
+  }
+
+  function measure() {
+    const w = Math.ceil(document.documentElement.scrollWidth);
+    const h = Math.ceil(document.documentElement.scrollHeight);
+    return { width: w, height: h };
+  }
+
+  function showError(title, detail, line) {
+    const ec = document.getElementById('qs-error');
+    const c = document.getElementById('qs-content');
+    c.style.display = 'none';
+    ec.innerHTML = '';
+    const titleEl = document.createElement('div');
+    titleEl.className = 'qs-error-title';
+    titleEl.textContent = title;
+    ec.appendChild(titleEl);
+    if (typeof line === 'number') {
+      const ln = document.createElement('div');
+      ln.className = 'qs-error-line';
+      ln.textContent = 'line ' + line;
+      ec.appendChild(ln);
+    }
+    const detailEl = document.createElement('div');
+    detailEl.textContent = detail;
+    ec.appendChild(detailEl);
+    ec.classList.add('visible');
+  }
+
+  // Parse a mermaid error message for a line number, if present.
+  // Format examples:
+  //   "Parse error on line 3: ..."
+  //   "Lexical error on line 5: ..."
+  function extractLine(msg) {
+    const m = /on line (\d+)/i.exec(msg || '');
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  let counter = 0;
+
+  window.__quickshow_render = async function(body) {
+    try {
+      const ec = document.getElementById('qs-error');
+      const c = document.getElementById('qs-content');
+      ec.classList.remove('visible');
+      c.style.display = '';
+
+      if (typeof mermaid === 'undefined') {
+        throw new Error('mermaid library not loaded');
+      }
+
+      counter += 1;
+      const id = 'qs-mermaid-' + counter;
+      const { svg } = await mermaid.render(id, body || '');
+      c.innerHTML = svg;
+
+      const m = measure();
+      window.webkit.messageHandlers.renderComplete.postMessage({
+        ok: true, width: m.width, height: m.height
+      });
+    } catch (err) {
+      const msg = (err && err.message) || String(err);
+      const line = extractLine(msg);
+      showError('Mermaid render error', msg, line || undefined);
+      const m = measure();
+      window.webkit.messageHandlers.renderComplete.postMessage({
+        ok: false, error: msg, line: line, width: m.width, height: m.height
+      });
+    }
+  };
+
+  window.__quickshow_error = function(title, detail, line) {
+    showError(title || 'Error', detail || '', typeof line === 'number' ? line : undefined);
+    const m = measure();
+    window.webkit.messageHandlers.renderComplete.postMessage({
+      ok: false, error: detail || title, line: line, width: m.width, height: m.height
+    });
+  };
+
+  document.addEventListener('DOMContentLoaded', function() {
+    window.webkit.messageHandlers.renderComplete.postMessage({
+      ok: true, ready: true, width: 0, height: 0
+    });
+  });
+})();
+</script>
+</body>
+</html>
