@@ -13,6 +13,10 @@ final class TabStripView: NSView {
 
     var onSelect: ((String) -> Void)?
     var onClose: ((String) -> Void)?
+    /// PRD user story #27. Fired when a pill's drag distance crosses
+    /// the tear-out threshold. The event is forwarded so the receiver
+    /// can read NSEvent.mouseLocation if needed.
+    var onTearOut: ((String, NSEvent) -> Void)?
 
     private let stack = NSStackView()
     private var pills: [TabPillView] = []
@@ -65,6 +69,7 @@ final class TabStripView: NSView {
             let pill = TabPillView()
             pill.onClick = { [weak self] name in self?.onSelect?(name) }
             pill.onClose = { [weak self] name in self?.onClose?(name) }
+            pill.onTearOut = { [weak self] name, event in self?.onTearOut?(name, event) }
             pills.append(pill)
             stack.addArrangedSubview(pill)
         }
@@ -110,12 +115,21 @@ final class TabStripView: NSView {
 /// One pill in the tab strip. Shows the panel name + a close button.
 /// Active state changes the background.
 final class TabPillView: NSView {
+    /// Threshold (points, vertical) past which a drag commits to a
+    /// tear-out. Chosen to be tolerant of jittery clicks but
+    /// reachable with a casual flick.
+    static let tearOutThreshold: CGFloat = 12
+
     var onClick: ((String) -> Void)?
     var onClose: ((String) -> Void)?
+    var onTearOut: ((String, NSEvent) -> Void)?
 
     private let label = NSTextField(labelWithString: "")
     private let closeButton = NSButton(title: "×", target: nil, action: nil)
     private var panelName: String = ""
+
+    private var mouseDownPoint: NSPoint = .zero
+    private var didTearOut = false
 
     var currentName: String { panelName }
 
@@ -170,7 +184,23 @@ final class TabPillView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        mouseDownPoint = NSEvent.mouseLocation
+        didTearOut = false
+        // Eager Cocoa-style tab activation. Tear-out (if it fires)
+        // moves the panel out of this HUD; the source's active-panel
+        // reselect runs inside SessionManager.handleTearOut, so any
+        // visual blip from this eager switch self-corrects.
         onClick?(panelName)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !didTearOut else { return }
+        let now = NSEvent.mouseLocation
+        let dy = abs(now.y - mouseDownPoint.y)
+        if dy > Self.tearOutThreshold {
+            didTearOut = true
+            onTearOut?(panelName, event)
+        }
     }
 
     @objc private func handleClose() {

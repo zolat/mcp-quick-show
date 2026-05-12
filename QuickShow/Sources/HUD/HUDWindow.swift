@@ -35,10 +35,17 @@ final class HUDWindow: NSWindow {
     /// Title-bar snapshot button (user story #30). Saves a fresh PNG
     /// of the active panel to ~/Downloads.
     var onSnapshotActivePanel: (() -> Void)?
+    /// Tab drag-out (PRD user story #27). `TabPillView` fires this
+    /// when the drag distance crosses the tear-out threshold.
+    var onTearOutTab: ((String, NSEvent) -> Void)?
 
     /// Bound by `SessionManager` so right-click handlers can find
     /// their owning session.
     var sessionId: String?
+    /// Unique HUD identity within a session — referenced by menu
+    /// payloads so opacity / close-all target the right window when
+    /// a session has multiple sibling HUDs (post-Phase-3 tear-out).
+    let hudInstanceId: UUID = UUID()
 
     init(initialPosition: NSPoint? = nil) {
         let settings = Settings.shared
@@ -75,6 +82,11 @@ final class HUDWindow: NSWindow {
         isMovableByWindowBackground = true
         hasShadow = true
         ignoresMouseEvents = false
+        // Borderless NSWindow defaults to isReleasedWhenClosed = true,
+        // which would dangle pointers when SessionManager holds the
+        // window in `session.huds[idx].window` after a close. Mirror
+        // PromotedWindow's pattern: lifetime is managed by the array.
+        isReleasedWhenClosed = false
     }
 
     override var canBecomeKey: Bool { true }
@@ -135,6 +147,7 @@ final class HUDWindow: NSWindow {
         tabStrip.translatesAutoresizingMaskIntoConstraints = false
         tabStrip.onSelect = { [weak self] name in self?.onSelectTab?(name) }
         tabStrip.onClose = { [weak self] name in self?.onCloseTab?(name) }
+        tabStrip.onTearOut = { [weak self] name, event in self?.onTearOutTab?(name, event) }
         root.addSubview(tabStrip)
         NSLayoutConstraint.activate([
             tabStrip.topAnchor.constraint(equalTo: titleBar.bottomAnchor),

@@ -1,14 +1,20 @@
 import Cocoa
 
-/// Tracks panels per session. Phase 3: multi-panel per HUD.
-/// Phase 4: orphan-on-disconnect with a 60 s same-UUID reconnect
-/// window, then a persistent "session ended" badge.
+/// Tracks panels per session. Phase 3 base: multi-panel per HUD.
+/// Phase 4: orphan-on-disconnect with a 60 s same-UUID reconnect window.
+/// Tear-out (PRD #27): a session can own multiple sibling HUDs after
+/// the user drags a tab pill outside its host.
+///
+/// Invariants:
+///  1. `upsert` never creates a new HUD when `session.huds` is non-empty.
+///     It locates the named panel across all HUDs (in-place update) or
+///     appends to `huds[0]` (the primary).
+///  2. New HUDs spawned by tear-out ignore `cascadeIndex` — they land
+///     under the cursor at the moment of tear-out.
+///  3. `HUDWindow.isReleasedWhenClosed = false` so the order of
+///     `window.close()` vs `session.huds.remove(...)` doesn't matter.
 @MainActor
 final class SessionManager: NSObject {
-    /// Reconnect grace window. A sidecar that drops and reconnects
-    /// with the same `session_id` inside this window reattaches
-    /// silently; after it expires the badge is visible.
-    /// Overridable via `QUICKSHOW_RECONNECT_GRACE_SECONDS` for tests.
     static var reconnectGraceSeconds: TimeInterval {
         if let raw = ProcessInfo.processInfo.environment["QUICKSHOW_RECONNECT_GRACE_SECONDS"],
            let v = Double(raw), v > 0 {
@@ -18,23 +24,16 @@ final class SessionManager: NSObject {
     }
 
     private let renderers: RendererRegistry
-    /// Owned by AppDelegate; injected so the SessionManager can
-    /// hand panels off for promote-to-window.
     weak var promoteController: PromoteToWindowController?
 
-    /// One MCP-session's worth of state.
+    /// One MCP-session's worth of state. After tear-out a session can
+    /// host multiple HUDs; `huds[0]` is the "primary" — the one new
+    /// `upsert(name)`-with-novel-name calls append to.
     final class SessionState {
         let id: String
-        var hud: HUDWindow?
-        var panels: [Panel] = []
         let cascadeIndex: Int
-        /// `nil` when the sidecar is currently connected; populated
-        /// when it disconnects with a Task that fires the "session
-        /// ended" badge after `reconnectGraceSeconds`.
+        var huds: [HUDInstance] = []
         var orphanTimerTask: Task<Void, Never>?
-        /// True once the grace window has fully elapsed. The badge is
-        /// visible; further upserts from a new sidecar with the same
-        /// UUID still work (treated as a reconnect).
         var orphaned: Bool = false
 
         init(id: String, cascadeIndex: Int) {
@@ -43,7 +42,19 @@ final class SessionManager: NSObject {
         }
     }
 
-    /// One rendered panel inside a HUD.
+    /// One HUD window inside a session, with its own ordered panels.
+    final class HUDInstance {
+        let id: UUID
+        let window: HUDWindow
+        var panels: [Panel]
+
+        init(window: HUDWindow, panels: [Panel] = []) {
+            self.id = window.hudInstanceId
+            self.window = window
+            self.panels = panels
+        }
+    }
+
     final class Panel {
         let name: String
         let contentType: String
@@ -61,6 +72,11 @@ final class SessionManager: NSObject {
     private(set) var sessions: [String: SessionState] = [:]
     private var sessionsRegisteredOrder = 0
 
+    /// Held during an active tear-out drag so events keep flowing to
+    /// the follow-the-cursor frame translator instead of the source
+    /// pill's tracking machinery.
+    private var dragMonitor: Any?
+
     init(renderers: RendererRegistry) {
         self.renderers = renderers
         super.init()
@@ -68,19 +84,13 @@ final class SessionManager: NSObject {
 
     // MARK: - Session lifecycle
 
-    /// Register a session on `hello`. Reserves a cascade index even
-    /// before any panels open. If the session already exists (e.g.
-    /// a reconnect), cancels any pending orphan timer and clears the
-    /// badge.
     func registerSession(_ sessionId: String) {
         if let existing = sessions[sessionId] {
-            // Reconnect path: cancel any pending orphan timer, clear
-            // the badge if it was set, keep the HUD + panels in place.
             existing.orphanTimerTask?.cancel()
             existing.orphanTimerTask = nil
             if existing.orphaned {
                 existing.orphaned = false
-                existing.hud?.setSessionEnded(false)
+                for hud in existing.huds { hud.window.setSessionEnded(false) }
                 NSLog("QuickShow: session \(sessionId) reattached (orphan badge cleared)")
             }
             return
@@ -90,15 +100,9 @@ final class SessionManager: NSObject {
         sessions[sessionId] = SessionState(id: sessionId, cascadeIndex: idx)
     }
 
-    /// Called by `ControlServer` when a sidecar connection drops.
-    /// Starts the grace-window timer; if `registerSession` arrives
-    /// for the same UUID before the timer fires, the timer is
-    /// cancelled. Otherwise the HUD gets the badge and stays put.
     func sidecarDisconnected(sessionId: String) {
         guard let session = sessions[sessionId] else { return }
-        // If there's no HUD, nothing user-visible to orphan.
-        guard session.hud != nil else { return }
-        // Replace any in-flight orphan timer (multiple rapid drops).
+        guard !session.huds.isEmpty else { return }
         session.orphanTimerTask?.cancel()
         let grace = Self.reconnectGraceSeconds
         session.orphanTimerTask = Task { [weak self, weak session] in
@@ -108,8 +112,8 @@ final class SessionManager: NSObject {
                 guard let self = self, let session = session,
                       self.sessions[session.id] === session else { return }
                 session.orphaned = true
-                session.hud?.setSessionEnded(true)
-                NSLog("QuickShow: session \(session.id) orphan grace expired — badge visible")
+                for hud in session.huds { hud.window.setSessionEnded(true) }
+                NSLog("QuickShow: session \(session.id) orphan grace expired — badge on \(session.huds.count) HUD(s)")
             }
         }
     }
@@ -123,59 +127,15 @@ final class SessionManager: NSObject {
                 body: String) async throws -> (RenderResult, Data) {
         let session = ensureSession(sessionId)
 
-        let hud: HUDWindow
-        if let existing = session.hud {
-            hud = existing
-        } else {
-            let h = HUDWindow(initialPosition: HUDWindow.cascadeTopRight(session.cascadeIndex))
-            h.onCloseRequested = { [weak self] in
-                self?.closeAllPanels(in: sessionId)
+        // Locate the panel across all HUDs first (in-place update path).
+        if let (hud, panel) = locate(in: session, name: name) {
+            if panel.contentType == contentType {
+                return try await renderPanel(panel: panel, hud: hud,
+                                             name: name, contentType: contentType,
+                                             form: form, body: body)
             }
-            h.onSelectTab = { [weak self] name in
-                self?.switchTab(in: sessionId, to: name)
-            }
-            h.onCloseTab = { [weak self] name in
-                self?.close(sessionId: sessionId, name: name)
-            }
-            h.onTabContextMenu = { [weak self] name, event in
-                self?.showTabMenu(sessionId: sessionId, name: name, event: event, on: h)
-            }
-            h.onHudContextMenu = { [weak self] event in
-                self?.showHudMenu(sessionId: sessionId, event: event, on: h)
-            }
-            h.onSnapshotActivePanel = { [weak self, weak h] in
-                guard let self = self, let activeName = h?.activePanelName else { return }
-                let item = NSMenuItem(title: "Snapshot", action: nil, keyEquivalent: "")
-                item.representedObject = MenuPayload(sessionId: sessionId, name: activeName)
-                self.handleSnapshotToDownloads(item)
-            }
-            h.sessionId = sessionId
-            h.makeKeyAndOrderFront(nil)
-            session.hud = h
-            hud = h
-        }
-
-        // Find existing panel for this name in this session.
-        var panel: Panel
-        if let existing = session.panels.first(where: { $0.name == name }) {
-            if existing.contentType == contentType {
-                panel = existing
-            } else {
-                hud.removePanel(name)
-                guard let renderer = renderers.make(forContentType: contentType) else {
-                    throw RenderFailure(
-                        message: "no renderer registered for content_type '\(contentType)'",
-                        line: nil
-                    )
-                }
-                let view = renderer.makeView()
-                let newPanel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
-                let idx = session.panels.firstIndex(where: { $0.name == name })!
-                session.panels[idx] = newPanel
-                hud.installPanel(name: name, view: view)
-                panel = newPanel
-            }
-        } else {
+            // Same name, different type → swap the renderer in-place.
+            hud.window.removePanel(name)
             guard let renderer = renderers.make(forContentType: contentType) else {
                 throw RenderFailure(
                     message: "no renderer registered for content_type '\(contentType)'",
@@ -184,18 +144,43 @@ final class SessionManager: NSObject {
             }
             let view = renderer.makeView()
             let newPanel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
-            session.panels.append(newPanel)
-            hud.installPanel(name: name, view: view)
-            panel = newPanel
+            let idx = hud.panels.firstIndex(where: { $0.name == name })!
+            hud.panels[idx] = newPanel
+            hud.window.installPanel(name: name, view: view)
+            return try await renderPanel(panel: newPanel, hud: hud,
+                                         name: name, contentType: contentType,
+                                         form: form, body: body)
         }
 
-        hud.setActivePanel(name)
-        hud.updateTabs(session.panels.map(\.name))
+        // Novel name → ensure primary HUD exists, append there.
+        let primary = ensurePrimaryHud(in: session)
+        guard let renderer = renderers.make(forContentType: contentType) else {
+            throw RenderFailure(
+                message: "no renderer registered for content_type '\(contentType)'",
+                line: nil
+            )
+        }
+        let view = renderer.makeView()
+        let panel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
+        primary.panels.append(panel)
+        primary.window.installPanel(name: name, view: view)
+        return try await renderPanel(panel: panel, hud: primary,
+                                     name: name, contentType: contentType,
+                                     form: form, body: body)
+    }
 
+    private func renderPanel(panel: Panel,
+                             hud: HUDInstance,
+                             name: String,
+                             contentType: String,
+                             form: String,
+                             body: String) async throws -> (RenderResult, Data) {
+        hud.window.setActivePanel(name)
+        hud.window.updateTabs(hud.panels.map(\.name))
         let payload = PanelPayload(name: name, contentType: contentType, form: form, body: body)
         do {
             let result = try await panel.renderer.update(payload: payload)
-            hud.sizeToContent(width: result.width, height: result.height)
+            hud.window.sizeToContent(width: result.width, height: result.height)
             let snapshot = try await panel.renderer.snapshot()
             return (result, snapshot)
         } catch let renderFailure as RenderFailure {
@@ -206,60 +191,205 @@ final class SessionManager: NSObject {
 
     func close(sessionId: String, name: String) {
         guard let session = sessions[sessionId] else { return }
-        guard let idx = session.panels.firstIndex(where: { $0.name == name }) else { return }
-        let wasActive = session.hud?.activePanelName == name
-        session.panels.remove(at: idx)
-        session.hud?.removePanel(name)
-        if session.panels.isEmpty {
-            session.hud?.close()
-            session.hud = nil
+        guard let (hud, _) = locate(in: session, name: name) else { return }
+        let wasActive = hud.window.activePanelName == name
+        let panelIdx = hud.panels.firstIndex(where: { $0.name == name })!
+        hud.panels.remove(at: panelIdx)
+        hud.window.removePanel(name)
+        if hud.panels.isEmpty {
+            closeHudInstance(hud, in: session)
             return
         }
-        session.hud?.updateTabs(session.panels.map(\.name))
+        hud.window.updateTabs(hud.panels.map(\.name))
         if wasActive {
-            let nextIdx = min(idx, session.panels.count - 1)
-            session.hud?.setActivePanel(session.panels[nextIdx].name)
-            session.hud?.updateTabs(session.panels.map(\.name))
+            let nextIdx = min(panelIdx, hud.panels.count - 1)
+            hud.window.setActivePanel(hud.panels[nextIdx].name)
+            hud.window.updateTabs(hud.panels.map(\.name))
         }
     }
 
     func switchTab(in sessionId: String, to name: String) {
         guard let session = sessions[sessionId],
-              session.panels.contains(where: { $0.name == name }) else { return }
-        session.hud?.setActivePanel(name)
-        session.hud?.updateTabs(session.panels.map(\.name))
+              let (hud, _) = locate(in: session, name: name) else { return }
+        hud.window.setActivePanel(name)
+        hud.window.updateTabs(hud.panels.map(\.name))
     }
 
+    /// Close every HUD belonging to the session.
     func closeAllPanels(in sessionId: String) {
         guard let session = sessions[sessionId] else { return }
-        session.hud?.close()
-        session.hud = nil
-        session.panels = []
+        for hud in session.huds {
+            hud.window.close()
+        }
+        session.huds.removeAll()
         session.orphanTimerTask?.cancel()
         session.orphanTimerTask = nil
         session.orphaned = false
     }
 
+    /// Close just one HUD's worth of panels — leaves siblings (if any)
+    /// intact. Called from a HUD's title-bar × button.
+    func closeHud(sessionId: String, hudId: UUID) {
+        guard let session = sessions[sessionId],
+              let hud = session.huds.first(where: { $0.id == hudId }) else { return }
+        closeHudInstance(hud, in: session)
+    }
+
     func inspect(sessionId: String, name: String) async throws -> (RenderResult, Data)? {
         guard let session = sessions[sessionId],
-              let panel = session.panels.first(where: { $0.name == name }) else {
+              let (hud, panel) = locate(in: session, name: name) else {
             return nil
         }
         let snapshot = try await panel.renderer.snapshot()
-        let size = session.hud?.frame.size ?? .zero
+        let size = hud.window.frame.size
         return (RenderResult(width: Double(size.width), height: Double(size.height)), snapshot)
     }
 
     func list(sessionId: String) -> [PanelDescriptor] {
         guard let session = sessions[sessionId] else { return [] }
-        let size = session.hud?.frame.size ?? .zero
-        return session.panels.map { panel in
-            PanelDescriptor(
-                name: panel.name,
-                contentType: panel.contentType,
-                width: Double(size.width),
-                height: Double(size.height)
-            )
+        var out: [PanelDescriptor] = []
+        for hud in session.huds {
+            let size = hud.window.frame.size
+            for panel in hud.panels {
+                out.append(PanelDescriptor(
+                    name: panel.name,
+                    contentType: panel.contentType,
+                    width: Double(size.width),
+                    height: Double(size.height)
+                ))
+            }
+        }
+        return out
+    }
+
+    // MARK: - Tear-out
+
+    /// PRD user story #27. Detach `name` from its current HUD and
+    /// spawn a sibling HUD containing just that panel, positioned
+    /// under the cursor, with a drag-follow monitor that keeps the
+    /// new HUD pinned to the cursor until mouseUp.
+    func handleTearOut(sessionId: String, hudId: UUID, name: String, event: NSEvent) {
+        guard let session = sessions[sessionId],
+              let source = session.huds.first(where: { $0.id == hudId }),
+              source.panels.count > 1,
+              let panelIdx = source.panels.firstIndex(where: { $0.name == name }) else {
+            return
+        }
+        let panel = source.panels[panelIdx]
+        let wasActive = source.window.activePanelName == name
+
+        // 1. Detach from source — mirror close's active-panel reselect.
+        source.panels.remove(at: panelIdx)
+        source.window.removePanel(name)
+        source.window.updateTabs(source.panels.map(\.name))
+        if wasActive, !source.panels.isEmpty {
+            let nextIdx = min(panelIdx, source.panels.count - 1)
+            source.window.setActivePanel(source.panels[nextIdx].name)
+            source.window.updateTabs(source.panels.map(\.name))
+        }
+
+        // 2. Spawn new HUD with the panel's view re-housed in it.
+        //    Position so the title-bar area lands roughly under the
+        //    cursor — feels natural for the drag-follow that starts
+        //    immediately after.
+        let mouseLoc = NSEvent.mouseLocation
+        let initialSize = HUDWindow.defaultSize
+        let origin = NSPoint(
+            x: mouseLoc.x - initialSize.width / 2,
+            y: mouseLoc.y - initialSize.height + TitleBarOverlay.height / 2
+        )
+        let newWindow = HUDWindow(initialPosition: origin)
+        newWindow.sessionId = sessionId
+        let newHud = HUDInstance(window: newWindow, panels: [panel])
+        session.huds.append(newHud)
+        wireHudCallbacks(newHud, sessionId: sessionId)
+        newWindow.installPanel(name: name, view: panel.view)
+        newWindow.updateTabs([name])
+        newWindow.setSessionEnded(session.orphaned)
+        newWindow.makeKeyAndOrderFront(nil)
+
+        // 3. Drag-follow until mouseUp.
+        beginDragFollow(window: newWindow, mouseDownPoint: mouseLoc)
+    }
+
+    private func beginDragFollow(window: HUDWindow, mouseDownPoint: NSPoint) {
+        // Stop any prior drag-follow defensively (shouldn't happen
+        // because mouseUp removes the monitor, but be paranoid).
+        if let prev = dragMonitor {
+            NSEvent.removeMonitor(prev)
+            dragMonitor = nil
+        }
+        let originOffset = NSPoint(
+            x: window.frame.origin.x - mouseDownPoint.x,
+            y: window.frame.origin.y - mouseDownPoint.y
+        )
+        // Local monitors preempt the responder chain; returning nil
+        // swallows the event so the source pill's tracking can't
+        // double-fire while we follow the cursor.
+        dragMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDragged, .leftMouseUp]
+        ) { [weak self, weak window] event in
+            guard let self = self else { return event }
+            guard let window = window else {
+                // Window vanished mid-drag — clean up and let events through.
+                if let mon = self.dragMonitor {
+                    NSEvent.removeMonitor(mon)
+                    self.dragMonitor = nil
+                }
+                return event
+            }
+            let m = NSEvent.mouseLocation
+            if event.type == .leftMouseDragged {
+                window.setFrameOrigin(NSPoint(x: m.x + originOffset.x,
+                                              y: m.y + originOffset.y))
+                return nil
+            }
+            if event.type == .leftMouseUp {
+                if let mon = self.dragMonitor {
+                    NSEvent.removeMonitor(mon)
+                    self.dragMonitor = nil
+                }
+                // Let the mouseUp through so Cocoa's tracking
+                // bookkeeping for the source pill's mouseDown gets
+                // cleaned up properly (the pill captured the event
+                // stream when its mouseDown fired).
+                return event
+            }
+            return event
+        }
+    }
+
+    // MARK: - HUD wiring
+
+    /// Single point for hooking all of a HUD's callbacks. Used by
+    /// both `ensurePrimaryHud` (first-upsert in a session) and
+    /// `handleTearOut` (sibling HUD creation).
+    private func wireHudCallbacks(_ hud: HUDInstance, sessionId: String) {
+        let window = hud.window
+        let hudId = hud.id
+        window.onCloseRequested = { [weak self] in
+            self?.closeHud(sessionId: sessionId, hudId: hudId)
+        }
+        window.onSelectTab = { [weak self] name in
+            self?.switchTab(in: sessionId, to: name)
+        }
+        window.onCloseTab = { [weak self] name in
+            self?.close(sessionId: sessionId, name: name)
+        }
+        window.onTabContextMenu = { [weak self] name, event in
+            self?.showTabMenu(sessionId: sessionId, name: name, event: event, on: window)
+        }
+        window.onHudContextMenu = { [weak self] event in
+            self?.showHudMenu(sessionId: sessionId, hudId: hudId, event: event, on: window)
+        }
+        window.onSnapshotActivePanel = { [weak self, weak window] in
+            guard let self = self, let activeName = window?.activePanelName else { return }
+            let item = NSMenuItem(title: "Snapshot", action: nil, keyEquivalent: "")
+            item.representedObject = MenuPayload(sessionId: sessionId, name: activeName)
+            self.handleSnapshotToDownloads(item)
+        }
+        window.onTearOutTab = { [weak self] name, event in
+            self?.handleTearOut(sessionId: sessionId, hudId: hudId, name: name, event: event)
         }
     }
 
@@ -273,51 +403,42 @@ final class SessionManager: NSObject {
     @objc func handlePromote(_ sender: NSMenuItem) {
         guard let payload = sender.representedObject as? MenuPayload,
               let session = sessions[payload.sessionId],
-              let panel = session.panels.first(where: { $0.name == payload.name }),
-              let hud = session.hud,
+              let (sourceHud, panel) = locate(in: session, name: payload.name),
               let promoteController = promoteController else { return }
-        let panelSize = hud.frame.size
+        let panelSize = sourceHud.window.frame.size
         promoteController.promote(
             name: payload.name,
             sessionId: payload.sessionId,
-            detachFrom: hud,
+            detachFrom: sourceHud.window,
             view: panel.view,
             panelSize: panelSize
         ) { [weak self] in
-            // When the promoted window closes, drop the panel from
-            // the session list — it can't be reinstated into the HUD
-            // because the view's already been re-housed.
             self?.removePanelAfterPromote(sessionId: payload.sessionId, name: payload.name)
         }
-        // The view is now in the promoted window; remove from the HUD
-        // and update tab strip.
-        hud.removePanel(payload.name)
-        if let idx = session.panels.firstIndex(where: { $0.name == payload.name }) {
-            session.panels.remove(at: idx)
+        // View is now in the promoted window; remove from the source HUD.
+        sourceHud.window.removePanel(payload.name)
+        if let idx = sourceHud.panels.firstIndex(where: { $0.name == payload.name }) {
+            sourceHud.panels.remove(at: idx)
         }
-        if session.panels.isEmpty {
-            session.hud?.close()
-            session.hud = nil
+        if sourceHud.panels.isEmpty {
+            closeHudInstance(sourceHud, in: session)
         } else {
-            hud.updateTabs(session.panels.map(\.name))
-            if hud.activePanelName == nil, let first = session.panels.first {
-                hud.setActivePanel(first.name)
+            sourceHud.window.updateTabs(sourceHud.panels.map(\.name))
+            if sourceHud.window.activePanelName == nil, let first = sourceHud.panels.first {
+                sourceHud.window.setActivePanel(first.name)
             }
         }
     }
 
     private func removePanelAfterPromote(sessionId: String, name: String) {
-        // No-op for now; the panel is already removed from session.panels
-        // in `handlePromote`. The hook exists so future Phase 5 polish
-        // can implement "demote back to HUD."
-        _ = sessionId
-        _ = name
+        // No-op for now. Placeholder for v0.2 "demote back to HUD."
+        _ = sessionId; _ = name
     }
 
     @objc func handleSnapshotToDownloads(_ sender: NSMenuItem) {
         guard let payload = sender.representedObject as? MenuPayload,
               let session = sessions[payload.sessionId],
-              let panel = session.panels.first(where: { $0.name == payload.name }) else { return }
+              let (_, panel) = locate(in: session, name: payload.name) else { return }
         Task {
             do {
                 let data = try await panel.renderer.snapshot()
@@ -336,15 +457,15 @@ final class SessionManager: NSObject {
     }
 
     @objc func handleCloseAll(_ sender: NSMenuItem) {
-        guard let payload = sender.representedObject as? MenuPayload else { return }
-        closeAllPanels(in: payload.sessionId)
+        guard let payload = sender.representedObject as? HudPayload else { return }
+        closeHud(sessionId: payload.sessionId, hudId: payload.hudId)
     }
 
     @objc func handleOpacity(_ sender: NSMenuItem) {
         guard let payload = sender.representedObject as? OpacityPayload,
               let session = sessions[payload.sessionId],
-              let hud = session.hud else { return }
-        hud.alphaValue = CGFloat(payload.percent) / 100.0
+              let hud = session.huds.first(where: { $0.id == payload.hudId }) else { return }
+        hud.window.alphaValue = CGFloat(payload.percent) / 100.0
     }
 
     private func showTabMenu(sessionId: String, name: String, event: NSEvent, on hud: HUDWindow) {
@@ -361,9 +482,10 @@ final class SessionManager: NSObject {
         }
     }
 
-    private func showHudMenu(sessionId: String, event: NSEvent, on hud: HUDWindow) {
+    private func showHudMenu(sessionId: String, hudId: UUID, event: NSEvent, on hud: HUDWindow) {
         let menu = HUDContextMenu.hudMenu(
             sessionId: sessionId,
+            hudId: hudId,
             target: self,
             closeAll: #selector(handleCloseAll(_:)),
             opacity: #selector(handleOpacity(_:))
@@ -373,17 +495,49 @@ final class SessionManager: NSObject {
         }
     }
 
+    // MARK: - Helpers
+
+    /// Find the panel and its owning HUD anywhere in a session. Used
+    /// by every verb that operates on a named panel.
+    private func locate(in session: SessionState, name: String) -> (HUDInstance, Panel)? {
+        for hud in session.huds {
+            if let p = hud.panels.first(where: { $0.name == name }) {
+                return (hud, p)
+            }
+        }
+        return nil
+    }
+
+    /// Get or create the primary HUD for a session. Called only from
+    /// `upsert` when the named slot doesn't yet exist anywhere.
+    private func ensurePrimaryHud(in session: SessionState) -> HUDInstance {
+        if let primary = session.huds.first { return primary }
+        let window = HUDWindow(initialPosition: HUDWindow.cascadeTopRight(session.cascadeIndex))
+        window.sessionId = session.id
+        let hud = HUDInstance(window: window)
+        session.huds.append(hud)
+        wireHudCallbacks(hud, sessionId: session.id)
+        window.setSessionEnded(session.orphaned)
+        window.makeKeyAndOrderFront(nil)
+        return hud
+    }
+
+    /// Close a HUD: tear down its window and remove from `session.huds`.
+    /// `isReleasedWhenClosed = false` on HUDWindow means this order is
+    /// safe — the window won't dangle even if removed before close.
+    private func closeHudInstance(_ hud: HUDInstance, in session: SessionState) {
+        hud.window.close()
+        session.huds.removeAll(where: { $0.id == hud.id })
+    }
+
     private func ensureSession(_ sessionId: String) -> SessionState {
         if let s = sessions[sessionId] {
-            // Treat an upsert as a reconnect signal — if the sidecar
-            // was previously marked orphaned and is now sending, the
-            // badge should clear.
             if s.orphanTimerTask != nil || s.orphaned {
                 s.orphanTimerTask?.cancel()
                 s.orphanTimerTask = nil
                 if s.orphaned {
                     s.orphaned = false
-                    s.hud?.setSessionEnded(false)
+                    for hud in s.huds { hud.window.setSessionEnded(false) }
                 }
             }
             return s
@@ -396,7 +550,6 @@ final class SessionManager: NSObject {
     }
 }
 
-/// Plain wire-side panel info for `list` responses.
 struct PanelDescriptor: Sendable {
     let name: String
     let contentType: String
@@ -404,8 +557,6 @@ struct PanelDescriptor: Sendable {
     let height: Double
 }
 
-/// Internal error wrapper that bundles a `RenderFailure` with the
-/// snapshot of the error UI.
 struct RenderFailureWithSnapshot: Error {
     let failure: RenderFailure
     let snapshot: Data

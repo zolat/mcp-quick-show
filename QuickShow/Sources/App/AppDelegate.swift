@@ -28,6 +28,96 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_PREFS"] == "1" {
             runPrefsSmoke()
         }
+        if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_TEAROUT"] == "1" {
+            runTearOutSmoke()
+        }
+    }
+
+    /// Headless tear-out test. Renders three panels in one session,
+    /// programmatically invokes the tear-out path on the middle one,
+    /// and asserts the resulting multi-HUD state matches the plan's
+    /// 9-check spec.
+    private func runTearOutSmoke() {
+        Task {
+            do {
+                for (name, body) in [("A", "# Panel A"), ("B", "# Panel B"), ("C", "# Panel C")] {
+                    _ = try await sessionManager.upsert(
+                        sessionId: "tearout-smoke",
+                        name: name,
+                        contentType: "markdown",
+                        form: "inline",
+                        body: body
+                    )
+                }
+                guard let session = sessionManager.sessions["tearout-smoke"] else {
+                    NSLog("QuickShow: TEST_TEAROUT failed: session missing")
+                    return
+                }
+                NSLog("QuickShow: TEST_TEAROUT step=initial huds=\(session.huds.count) panels=\(session.huds.first?.panels.count ?? -1)")
+
+                // Tear out B.
+                let primary = session.huds[0]
+                let primaryId = primary.id
+                let fakeEvent = NSEvent.mouseEvent(
+                    with: .leftMouseDragged,
+                    location: NSEvent.mouseLocation,
+                    modifierFlags: [],
+                    timestamp: 0,
+                    windowNumber: primary.window.windowNumber,
+                    context: nil,
+                    eventNumber: 0,
+                    clickCount: 0,
+                    pressure: 0
+                ) ?? NSEvent()
+                sessionManager.handleTearOut(
+                    sessionId: "tearout-smoke",
+                    hudId: primaryId,
+                    name: "B",
+                    event: fakeEvent
+                )
+                try await Task.sleep(nanoseconds: 200_000_000)
+
+                let source = session.huds.first(where: { $0.id == primaryId })
+                let torn = session.huds.first(where: { $0.id != primaryId })
+                NSLog("QuickShow: TEST_TEAROUT step=after huds=\(session.huds.count) source_panels=\(source?.panels.map(\.name).joined(separator: ",") ?? "?") torn_panels=\(torn?.panels.map(\.name).joined(separator: ",") ?? "?")")
+                if let s = source {
+                    NSLog("QuickShow: TEST_TEAROUT source_active=\(s.window.activePanelName ?? "nil")")
+                }
+
+                // Verify orphan badge applies to both HUDs after grace.
+                let originalGrace = ProcessInfo.processInfo.environment["QUICKSHOW_RECONNECT_GRACE_SECONDS"] ?? "60"
+                NSLog("QuickShow: TEST_TEAROUT grace=\(originalGrace)s — triggering disconnect")
+                sessionManager.sidecarDisconnected(sessionId: "tearout-smoke")
+                let waitNs = UInt64((Double(originalGrace) ?? 60) * 1_000_000_000) + 200_000_000
+                try await Task.sleep(nanoseconds: waitNs)
+                NSLog("QuickShow: TEST_TEAROUT step=orphan orphaned=\(session.orphaned) huds=\(session.huds.count)")
+                sessionManager.registerSession("tearout-smoke")
+                try await Task.sleep(nanoseconds: 100_000_000)
+                NSLog("QuickShow: TEST_TEAROUT step=reattach orphaned=\(session.orphaned)")
+
+                // Opacity targeting: dispatch to the torn HUD only.
+                if let tornHud = torn {
+                    let beforeSource = source?.window.alphaValue ?? -1
+                    let item = NSMenuItem(title: "Op", action: nil, keyEquivalent: "")
+                    item.representedObject = OpacityPayload(sessionId: "tearout-smoke", hudId: tornHud.id, percent: 50)
+                    sessionManager.handleOpacity(item)
+                    NSLog("QuickShow: TEST_TEAROUT step=opacity source_alpha=\(source?.window.alphaValue ?? -1) torn_alpha=\(tornHud.window.alphaValue) (source-before=\(beforeSource))")
+                }
+
+                // Close torn panel → its HUD should go away.
+                sessionManager.close(sessionId: "tearout-smoke", name: "B")
+                try await Task.sleep(nanoseconds: 100_000_000)
+                NSLog("QuickShow: TEST_TEAROUT step=close-torn huds=\(session.huds.count)")
+
+                // Close all.
+                sessionManager.closeAllPanels(in: "tearout-smoke")
+                try await Task.sleep(nanoseconds: 100_000_000)
+                NSLog("QuickShow: TEST_TEAROUT step=close-all huds=\(session.huds.count)")
+                NSLog("QuickShow: TEST_TEAROUT done")
+            } catch {
+                NSLog("QuickShow: TEST_TEAROUT failed: \(error)")
+            }
+        }
     }
 
     /// Headless prefs test: verifies that Settings overrides land on
@@ -56,14 +146,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     """
                 )
                 if let session = sessionManager.sessions["prefs-smoke"],
-                   let hud = session.hud {
+                   let hud = session.huds.first?.window {
                     NSLog("QuickShow: TEST_PREFS opacity alphaValue=\(hud.alphaValue)")
                     NSLog("QuickShow: TEST_PREFS sizeCap frame=\(hud.frame.size.width)x\(hud.frame.size.height)")
                 }
                 // Exercise the copy bridge: pull the renderer for the
                 // panel and invoke its bridge with a {copy: ...} payload.
                 if let session = sessionManager.sessions["prefs-smoke"],
-                   let panel = session.panels.first,
+                   let panel = session.huds.first?.panels.first,
                    let webRenderer = panel.renderer as? WebViewPanelRenderer {
                     // The bridge handler is private; route through the
                     // public message-handler relay by simulating what

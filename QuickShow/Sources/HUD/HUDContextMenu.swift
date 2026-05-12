@@ -6,6 +6,9 @@ import Cocoa
 ///     window, Re-snapshot (saves a fresh PNG to ~/Downloads).
 ///   - Per-HUD (right-click on background): Close all tabs, Opacity
 ///     submenu (25 / 50 / 75 / 100 %).
+///
+/// Per-HUD actions thread `hudId` so they target the right sibling
+/// when a session has multiple HUDs (post-tear-out).
 @MainActor
 enum HUDContextMenu {
     static func tabMenu(sessionId: String,
@@ -37,14 +40,15 @@ enum HUDContextMenu {
     }
 
     static func hudMenu(sessionId: String,
+                        hudId: UUID,
                         target: AnyObject?,
                         closeAll: Selector,
                         opacity: Selector) -> NSMenu {
         let menu = NSMenu()
 
-        let closeAllItem = NSMenuItem(title: "Close all tabs", action: closeAll, keyEquivalent: "")
+        let closeAllItem = NSMenuItem(title: "Close all tabs in this HUD", action: closeAll, keyEquivalent: "")
         closeAllItem.target = target
-        closeAllItem.representedObject = MenuPayload(sessionId: sessionId, name: "")
+        closeAllItem.representedObject = HudPayload(sessionId: sessionId, hudId: hudId)
         menu.addItem(closeAllItem)
 
         menu.addItem(.separator())
@@ -54,7 +58,7 @@ enum HUDContextMenu {
         for pct in [25, 50, 75, 100] {
             let item = NSMenuItem(title: "\(pct) %", action: opacity, keyEquivalent: "")
             item.target = target
-            item.representedObject = OpacityPayload(sessionId: sessionId, percent: pct)
+            item.representedObject = OpacityPayload(sessionId: sessionId, hudId: hudId, percent: pct)
             opacitySubmenu.addItem(item)
         }
         opacityHeader.submenu = opacitySubmenu
@@ -65,6 +69,7 @@ enum HUDContextMenu {
 }
 
 /// Payload riding on `NSMenuItem.representedObject` for per-tab actions.
+/// The owning HUD is implicit (located by panel name in the session).
 final class MenuPayload: NSObject {
     let sessionId: String
     let name: String
@@ -74,12 +79,25 @@ final class MenuPayload: NSObject {
     }
 }
 
+/// Payload for per-HUD-background actions that need to target a
+/// specific sibling HUD within the session.
+final class HudPayload: NSObject {
+    let sessionId: String
+    let hudId: UUID
+    init(sessionId: String, hudId: UUID) {
+        self.sessionId = sessionId
+        self.hudId = hudId
+    }
+}
+
 /// Payload for opacity-submenu items.
 final class OpacityPayload: NSObject {
     let sessionId: String
+    let hudId: UUID
     let percent: Int
-    init(sessionId: String, percent: Int) {
+    init(sessionId: String, hudId: UUID, percent: Int) {
         self.sessionId = sessionId
+        self.hudId = hudId
         self.percent = percent
     }
 }
