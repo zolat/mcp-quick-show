@@ -1,8 +1,8 @@
 import Darwin
 import Foundation
 
-// Per-kind dispatch. Phase 0: hello + ping only. Subsequent phases
-// add upsert / close / list / inspect.
+// Per-kind dispatch. Phase 0: hello + ping. Phase 1: + upsert / close
+// (real handlers wired through SessionManager).
 
 @MainActor
 enum ControlHandlers {
@@ -15,12 +15,14 @@ enum ControlHandlers {
                 return try encode(handlePing(req: req))
             case "hello":
                 return try encode(try handleHello(req: req))
-            case "upsert", "close", "list", "inspect":
-                // Phase 0 stubs — Phase 1+ wires real handlers.
-                return try encode(ControlProtocolError(
-                    id: req.id,
-                    error: "kind '\(req.kind)' not implemented in Phase 0"
-                ))
+            case "upsert":
+                return try await handleUpsert(req: req, delegate: delegate)
+            case "close":
+                return try encode(try handleClose(req: req, delegate: delegate))
+            case "list":
+                return try encode(try handleList(req: req, delegate: delegate))
+            case "inspect":
+                return try await handleInspect(req: req, delegate: delegate)
             default:
                 return try encode(ControlProtocolError(
                     id: req.id,
@@ -57,4 +59,95 @@ enum ControlHandlers {
             pid: getpid()
         ))
     }
+
+    // MARK: - upsert
+
+    private static func handleUpsert(req: ControlRequest, delegate: AppDelegate?) async throws -> Data {
+        let payload = try req.decodePayload(UpsertRequest.self)
+        guard let manager = delegate?.sessionManager else {
+            return try encode(ControlProtocolError(
+                id: req.id,
+                error: "session manager unavailable"
+            ))
+        }
+        do {
+            let (result, snapshot) = try await manager.upsert(
+                sessionId: payload.session,
+                name: payload.name,
+                contentType: payload.contentType,
+                form: payload.form,
+                body: payload.body
+            )
+            let upsertResult = UpsertResult(
+                width: result.width,
+                height: result.height,
+                screenshotB64: snapshot.base64EncodedString()
+            )
+            return try encode(ControlOk(id: req.id, result: upsertResult))
+        } catch let wrapped as RenderFailureWithSnapshot {
+            return try encode(ControlRenderError(
+                id: req.id,
+                error: wrapped.failure.message,
+                line: wrapped.failure.line,
+                screenshotB64: wrapped.snapshot.base64EncodedString()
+            ))
+        } catch let failure as RenderFailure {
+            return try encode(ControlRenderError(
+                id: req.id,
+                error: failure.message,
+                line: failure.line,
+                screenshotB64: nil
+            ))
+        }
+    }
+
+    // MARK: - close
+
+    private static func handleClose(req: ControlRequest, delegate: AppDelegate?) throws -> ControlOk {
+        let payload = try req.decodePayload(CloseRequest.self)
+        delegate?.sessionManager.close(sessionId: payload.session, name: payload.name)
+        return ControlOk(id: req.id, result: EmptyOk())
+    }
+
+    // MARK: - list
+
+    private static func handleList(req: ControlRequest, delegate: AppDelegate?) throws -> ControlOk {
+        let payload = try req.decodePayload(ListRequest.self)
+        let panels = delegate?.sessionManager.list(sessionId: payload.session) ?? []
+        let infos = panels.map { panel in
+            PanelInfo(name: panel.name,
+                      contentType: panel.contentType,
+                      width: panel.width,
+                      height: panel.height)
+        }
+        return ControlOk(id: req.id, result: infos)
+    }
+
+    // MARK: - inspect
+
+    private static func handleInspect(req: ControlRequest, delegate: AppDelegate?) async throws -> Data {
+        let payload = try req.decodePayload(InspectRequest.self)
+        guard let manager = delegate?.sessionManager else {
+            return try encode(ControlProtocolError(
+                id: req.id,
+                error: "session manager unavailable"
+            ))
+        }
+        guard let (result, snapshot) = try await manager.inspect(
+            sessionId: payload.session,
+            name: payload.name
+        ) else {
+            return try encode(ControlProtocolError(
+                id: req.id,
+                error: "no panel named '\(payload.name)' in session"
+            ))
+        }
+        return try encode(ControlOk(id: req.id, result: UpsertResult(
+            width: result.width,
+            height: result.height,
+            screenshotB64: snapshot.base64EncodedString()
+        )))
+    }
 }
+
+private struct EmptyOk: Encodable {}

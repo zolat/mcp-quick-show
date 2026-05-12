@@ -113,7 +113,7 @@ agent fix and retry without asking the user.
 |---|---|---|
 | `hello` | 0 | ✅ implemented |
 | `ping` | 0 | ✅ implemented |
-| `upsert` | 1 | 🔄 in-progress (markdown only) |
-| `close` | 1 | ⏳ pending |
-| `list` | 3 | ⏳ pending |
-| `inspect` | 3 | ⏳ pending |
+| `upsert` | 1 | ✅ markdown — svg/mermaid/image pending |
+| `close` | 1 | ✅ implemented |
+| `list` | 1 | ✅ implemented |
+| `inspect` | 1 | ✅ implemented |

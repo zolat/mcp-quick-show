@@ -46,6 +46,10 @@ targets:
         INFOPLIST_KEY_LSUIElement: YES
         INFOPLIST_KEY_NSPrincipalClass: NSApplication
     postCompileScripts:
+      - name: Copy QuickShow resources (templates, libs)
+        script: |
+          "${SRCROOT}/tools/copy-resources.sh"
+        showEnvVarsInLog: false
       - name: Build mcp-quick-show sidecar (bun)
         script: |
           "${SRCROOT}/tools/build-sidecar.sh"

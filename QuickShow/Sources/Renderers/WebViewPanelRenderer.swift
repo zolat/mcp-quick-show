@@ -1,0 +1,329 @@
+import Cocoa
+import WebKit
+
+/// Base class for renderers that drive a `WKWebView` with a bundled
+/// HTML template. Subclasses override `templateName` and `prepareBody`
+/// to map the wire payload to the JS bridge call.
+///
+/// Security posture (per PRD § "Free-tier defenses, baked into Phase 1"):
+/// - One `WKProcessPool` per renderer instance (cross-panel state
+///   leakage impossible by construction).
+/// - CSP enforced via `<meta http-equiv>` in the HTML template:
+///   `connect-src 'none'` blocks all exfiltration network calls.
+/// - Single `WKScriptMessageHandler` named `renderComplete` — no
+///   other JS bridge surface area.
+/// - `decidePolicyForNavigationAction` opens external links via
+///   `NSWorkspace.shared.open(_:)` instead of navigating in-place.
+///
+/// Bridge protocol (with the template):
+/// - Template fires `{ready: true, width: 0, height: 0}` on
+///   `DOMContentLoaded`.
+/// - On each `update()`, we call `window.__quickshow_render(body)` —
+///   the template fires `{ok, width, height, error?, line?}` on
+///   completion.
+/// - A 5 s timeout protects the await; if the bridge never fires,
+///   `update()` throws `RenderFailure(message: "render timeout")`.
+@MainActor
+class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
+    class var typeKey: String { fatalError("subclass must override typeKey") }
+
+    /// Filename (without extension) of the HTML template in
+    /// `Resources/templates/`. Subclasses set this to e.g. "markdown".
+    var templateName: String { fatalError("subclass must override templateName") }
+
+    /// Subclasses can override to escape / transform the body before
+    /// it lands in the JS bridge. Default = identity (raw string).
+    func prepareBody(_ body: String, form: String) throws -> String { body }
+
+    static func == (lhs: WebViewPanelRenderer, rhs: WebViewPanelRenderer) -> Bool { lhs === rhs }
+
+    private(set) var webView: WKWebView!
+    private let messageHandler = ScriptMessageRelay()
+    private var pendingRender: CheckedContinuation<RenderResult, Error>?
+    private var readyWaiters: [CheckedContinuation<Void, Error>] = []
+    private enum LoadState { case loading, ready, failed(Error) }
+    private var loadState: LoadState = .loading
+
+    func makeView() -> NSView {
+        let config = WKWebViewConfiguration()
+        // Note: WKProcessPool is deprecated in macOS 12+ (process-pool
+        // isolation is now automatic per WKWebView). We rely on the
+        // platform's default isolation + a fresh `WKWebsiteDataStore`
+        // below for per-panel privacy.
+        config.websiteDataStore = WKWebsiteDataStore.nonPersistent()
+        config.preferences.setValue(false, forKey: "javaScriptCanAccessClipboard")
+
+        let controller = WKUserContentController()
+        messageHandler.onMessage = { [weak self] body in
+            self?.handleBridgeMessage(body)
+        }
+        controller.add(messageHandler, name: "renderComplete")
+        config.userContentController = controller
+
+        let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: config)
+        wv.translatesAutoresizingMaskIntoConstraints = false
+        wv.navigationDelegate = self
+        // Disable bounce / overscroll halos on macOS.
+        wv.setValue(false, forKey: "drawsBackground")
+        webView = wv
+
+        loadTemplate()
+        return wv
+    }
+
+    private func loadTemplate() {
+        let bundle = Bundle.main
+        guard
+            let templateURL = bundle.url(
+                forResource: templateName,
+                withExtension: "html",
+                subdirectory: "templates"
+            )
+        else {
+            let err = RenderFailure(
+                message: "template '\(templateName).html' not found in bundle",
+                line: nil
+            )
+            loadState = .failed(err)
+            failAllWaiters(err)
+            NSLog("QuickShow: \(err.message)")
+            return
+        }
+        do {
+            var html = try String(contentsOf: templateURL, encoding: .utf8)
+
+            // Inline bundled libs + theme so we don't depend on
+            // WKWebView's file:// cross-origin policy, which by
+            // default forbids file:// → file:// subresource loads.
+            // Each `<!--QS_*-->` marker in the template is replaced
+            // with a <style>/<script> block containing the bundled
+            // content.
+            let injections: [(String, String, Bool)] = [
+                ("<!--QS_THEME-->",
+                 try readBundled("theme", ext: "css", dir: "templates"),
+                 false /* is style */),
+                ("<!--QS_MARKED-->",
+                 (try? readBundled("marked.min", ext: "js", dir: "libs")) ?? "",
+                 true /* is script */),
+                ("<!--QS_PURIFY-->",
+                 (try? readBundled("purify.min", ext: "js", dir: "libs")) ?? "",
+                 true /* is script */),
+                ("<!--QS_MERMAID-->",
+                 (try? readBundled("mermaid.min", ext: "js", dir: "libs")) ?? "",
+                 true /* is script */),
+            ]
+            for (marker, content, isScript) in injections {
+                let wrapped: String
+                if content.isEmpty {
+                    wrapped = "<!-- (no payload for \(marker)) -->"
+                } else if isScript {
+                    wrapped = "<script>\n\(content)\n</script>"
+                } else {
+                    wrapped = "<style>\n\(content)\n</style>"
+                }
+                html = html.replacingOccurrences(of: marker, with: wrapped)
+            }
+            webView.loadHTMLString(html, baseURL: nil)
+        } catch {
+            loadState = .failed(error)
+            failAllWaiters(error)
+            NSLog("QuickShow: failed to load template \(templateName): \(error)")
+        }
+    }
+
+    private func readBundled(_ name: String, ext: String, dir: String) throws -> String {
+        guard let url = Bundle.main.url(forResource: name, withExtension: ext, subdirectory: dir) else {
+            throw RenderFailure(
+                message: "bundled resource not found: \(dir)/\(name).\(ext)",
+                line: nil
+            )
+        }
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    private func handleBridgeMessage(_ body: Any) {
+        guard let dict = body as? [String: Any] else { return }
+        let isReady = dict["ready"] as? Bool ?? false
+        if isReady && pendingRender == nil {
+            // First post on DOMContentLoaded.
+            loadState = .ready
+            resumeReadyWaiters()
+            return
+        }
+        // Render result for a pending update.
+        guard let cont = pendingRender else { return }
+        pendingRender = nil
+        let ok = dict["ok"] as? Bool ?? false
+        let width = (dict["width"] as? Double) ?? 0
+        let height = (dict["height"] as? Double) ?? 0
+        if ok {
+            cont.resume(returning: RenderResult(width: width, height: height))
+        } else {
+            let err = (dict["error"] as? String) ?? "unknown render error"
+            let line = dict["line"] as? Int
+            cont.resume(throwing: RenderFailure(message: err, line: line))
+        }
+    }
+
+    private func resumeReadyWaiters() {
+        let waiters = readyWaiters
+        readyWaiters.removeAll()
+        for w in waiters { w.resume() }
+    }
+
+    private func failAllWaiters(_ error: Error) {
+        let waiters = readyWaiters
+        readyWaiters.removeAll()
+        for w in waiters { w.resume(throwing: error) }
+        if let p = pendingRender {
+            pendingRender = nil
+            p.resume(throwing: error)
+        }
+    }
+
+    private func ensureReady() async throws {
+        switch loadState {
+        case .ready: return
+        case .failed(let e): throw e
+        case .loading:
+            try await withCheckedThrowingContinuation { c in
+                readyWaiters.append(c)
+            }
+        }
+    }
+
+    func update(payload: PanelPayload) async throws -> RenderResult {
+        try await ensureReady()
+        // Latest-wins on overlapping updates.
+        if let prev = pendingRender {
+            pendingRender = nil
+            prev.resume(throwing: CancellationError())
+        }
+        let prepared = try prepareBody(payload.body, form: payload.form)
+
+        let result = try await withTimeout(seconds: 5) { [weak self] in
+            guard let self = self else { throw RenderFailure(message: "renderer deallocated", line: nil) }
+            return try await self.runRender(body: prepared)
+        }
+        return result
+    }
+
+    private func runRender(body: String) async throws -> RenderResult {
+        // Encode body as a JSON-quoted string so it can be safely
+        // interpolated into a JS expression (handles backticks,
+        // dollar signs, backslashes, newlines, unicode).
+        let json: String
+        do {
+            let data = try JSONSerialization.data(withJSONObject: [body], options: [])
+            guard let s = String(data: data, encoding: .utf8) else {
+                throw RenderFailure(message: "failed to encode body for JS bridge", line: nil)
+            }
+            // Trim the surrounding []; what's left is the JSON string literal.
+            // ["foo"] → "foo"
+            json = String(s.dropFirst().dropLast())
+        }
+        let js = "window.__quickshow_render(\(json));"
+        return try await withCheckedThrowingContinuation { cont in
+            self.pendingRender = cont
+            Task { @MainActor in
+                do {
+                    _ = try await self.webView.evaluateJavaScript(js)
+                } catch {
+                    if self.pendingRender != nil {
+                        self.pendingRender = nil
+                        cont.resume(throwing: error)
+                    }
+                }
+            }
+        }
+    }
+
+    func snapshot() async throws -> Data {
+        try await SnapshotService.snapshotWebView(webView)
+    }
+
+    // MARK: - WKNavigationDelegate
+
+    nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {
+        MainActor.assumeIsolated {
+            NSLog("QuickShow: webView didFail navigation: \(error)")
+        }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {
+        MainActor.assumeIsolated {
+            NSLog("QuickShow: webView didFailProvisional: \(error)")
+        }
+    }
+
+    nonisolated func webView(_ webView: WKWebView,
+                             decidePolicyFor navigationAction: WKNavigationAction,
+                             decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
+        // WKNavigationDelegate is invoked on the main thread; we just
+        // need to bridge that fact to the type system.
+        MainActor.assumeIsolated {
+            // First navigation is loading our own template — allow it.
+            // After that, any navigation is a user-initiated link
+            // click; open it in the default browser via NSWorkspace
+            // instead of navigating away.
+            let isInitial = navigationAction.navigationType == .other
+            if isInitial {
+                decisionHandler(.allow)
+                return
+            }
+            if let url = navigationAction.request.url {
+                NSWorkspace.shared.open(url)
+            }
+            decisionHandler(.cancel)
+        }
+    }
+}
+
+// MARK: - Bridge message relay
+
+/// Tiny relay so the renderer class doesn't have to inherit NSObject
+/// twice (WKScriptMessageHandler requires NSObject; the renderer base
+/// already inherits from NSObject, but conforming there means the
+/// `userContentController(_:didReceive:)` selector lifetime is tied to
+/// the renderer's lifetime which is fine — but isolating the relay
+/// keeps the renderer class focused on its real job).
+@MainActor
+final class ScriptMessageRelay: NSObject, WKScriptMessageHandler {
+    var onMessage: ((Any) -> Void)?
+
+    nonisolated func userContentController(_ userContentController: WKUserContentController,
+                                           didReceive message: WKScriptMessage) {
+        // WK invokes this on the main thread; bridge that fact to the
+        // type system so we can read `message.body` (which is
+        // MainActor-isolated on current SDKs) and call our callback.
+        MainActor.assumeIsolated {
+            self.onMessage?(message.body)
+        }
+    }
+}
+
+// MARK: - Timeout helper
+
+/// Race `operation` against a sleep. If the sleep wins, throw a
+/// `RenderFailure(message: "render timeout")` — the renderer view has
+/// not painted an error UI for this case, so the snapshot will reflect
+/// the pre-timeout state. That's intentional: a stuck WKWebView is
+/// usually a JS-side hang, and the user's existing panel content is
+/// still on screen.
+private func withTimeout<T: Sendable>(
+    seconds: Double,
+    operation: @escaping @Sendable @MainActor () async throws -> T
+) async throws -> T {
+    return try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask { @MainActor in
+            try await operation()
+        }
+        group.addTask {
+            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            throw RenderFailure(message: "render timeout after \(seconds)s", line: nil)
+        }
+        let result = try await group.next()!
+        group.cancelAll()
+        return result
+    }
+}

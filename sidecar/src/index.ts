@@ -1,14 +1,23 @@
-// MCP server bootstrap. Phase 0: connects to the control socket,
-// handshakes, registers no tools. The MCP transport stays alive over
-// stdio so Claude Code keeps the process around; future phases hang
-// real tools off the registry.
+// MCP server bootstrap. Phase 1: registers content-type tools from
+// the handler registry, routes each call into a control-socket upsert,
+// and returns the rendered screenshot (PNG) as an MCP image content
+// block alongside the textual confirmation.
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+  type CallToolResult,
+} from "@modelcontextprotocol/sdk/types.js";
 import { SocketClient, DEFAULT_SOCKET_PATH } from "./socket.ts";
 import { getOrCreateSessionId } from "./session.ts";
 import { locateAppBundle, launchAndWaitFor } from "./autolaunch.ts";
+import { allHandlers, findHandler } from "./handlers/registry.ts";
+
+// Side-effect import: each handler module calls `registerHandler()`
+// on load. Adding a new type is a single import line here.
+import "./handlers/markdown.ts";
 
 async function ensureConnected(client: SocketClient): Promise<void> {
   try {
@@ -42,6 +51,10 @@ async function ensureConnected(client: SocketClient): Promise<void> {
   );
 }
 
+function asString(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined;
+}
+
 async function main() {
   const socketPath = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
   const client = new SocketClient(socketPath);
@@ -49,39 +62,107 @@ async function main() {
 
   await ensureConnected(client);
 
-  // Handshake — identifies this sidecar to the app.
+  // Handshake.
   const helloResp = await client.request({
     kind: "hello",
     session_id: sessionId,
     client: process.env.MCP_CLIENT_ID ?? "claude-code",
   });
   if (helloResp.kind !== "ok") {
-    throw new Error(`hello rejected: ${"error" in helloResp ? helloResp.error : helloResp.kind}`);
+    const err = "error" in helloResp ? helloResp.error : helloResp.kind;
+    throw new Error(`hello rejected: ${err}`);
   }
   console.error(`[mcp-quick-show] connected (session=${sessionId})`);
 
-  // Set up MCP server. Phase 0: no tools registered yet; the server
-  // exists so Claude Code's MCP transport stays alive and we can prove
-  // the install/wiring works end-to-end.
   const server = new Server(
     { name: "mcp-quick-show", version: "0.1.0" },
     { capabilities: { tools: {} } },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    return {
+      tools: allHandlers().map((h) => ({
+        name: h.toolName,
+        description: h.description,
+        inputSchema: h.inputSchema,
+      })),
+    };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const handler = findHandler(request.params.name);
+    if (!handler) {
+      return {
+        content: [{ type: "text", text: `unknown tool: ${request.params.name}` }],
+        isError: true,
+      } as CallToolResult;
+    }
+    const args = (request.params.arguments ?? {}) as Record<string, unknown>;
+    const validation = await handler.validate(args);
+    if (!validation.ok) {
+      return {
+        content: [{ type: "text", text: `invalid arguments: ${validation.error}` }],
+        isError: true,
+      } as CallToolResult;
+    }
+    const payload = validation.payload;
+    const resp = await client.request({
+      kind: "upsert",
+      session: sessionId,
+      name: payload.name,
+      content_type: payload.contentType,
+      form: payload.form,
+      body: payload.body,
+    });
+
+    if (resp.kind === "ok") {
+      const result = resp.result as { width: number; height: number; screenshot_b64?: string };
+      const content: CallToolResult["content"] = [
+        {
+          type: "text",
+          text: `Rendered '${payload.name}' (${payload.contentType}) — ${result.width}×${result.height}.`,
+        },
+      ];
+      if (payload.returnScreenshot && result.screenshot_b64) {
+        content.push({
+          type: "image",
+          data: result.screenshot_b64,
+          mimeType: "image/png",
+        });
+      }
+      return { content };
+    }
+
+    if (resp.kind === "render_error") {
+      const content: CallToolResult["content"] = [
+        {
+          type: "text",
+          text: `render error: ${resp.error}${typeof resp.line === "number" ? ` (line ${resp.line})` : ""}`,
+        },
+      ];
+      if (payload.returnScreenshot && resp.screenshot_b64) {
+        content.push({
+          type: "image",
+          data: resp.screenshot_b64,
+          mimeType: "image/png",
+        });
+      }
+      return { content, isError: true };
+    }
+
+    // protocol_error or anything else.
     return {
-      content: [{ type: "text", text: `Tool '${request.params.name}' not yet implemented (Phase 0).` }],
+      content: [{
+        type: "text",
+        text: `protocol error: ${"error" in resp ? resp.error : resp.kind}`,
+      }],
       isError: true,
-    };
+    } as CallToolResult;
   });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  // Keep the process alive until stdin closes; MCP transport handles
-  // the actual lifecycle. Cleanup on SIGINT/SIGTERM.
   const shutdown = () => {
     client.close();
     process.exit(0);
@@ -94,3 +175,7 @@ main().catch((err) => {
   console.error(`[mcp-quick-show] fatal: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
 });
+
+// Silence unused-import warnings for asString — kept for future
+// handlers that need to coerce optional string fields.
+void asString;

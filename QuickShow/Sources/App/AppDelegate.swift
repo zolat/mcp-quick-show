@@ -7,14 +7,54 @@ import Cocoa
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controlServer: ControlServer?
     private var statusItem: NSStatusItem?
+    private(set) var sessionManager: SessionManager!
+    private(set) var rendererRegistry: RendererRegistry!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        rendererRegistry = RendererRegistry.makeDefault()
+        sessionManager = SessionManager(renderers: rendererRegistry)
         installMenuBarItem()
         startControlServer()
+        if ProcessInfo.processInfo.environment["QUICKSHOW_AUTO_PANEL"] == "1" {
+            runAutoPanelSmoke()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         controlServer?.stop()
+    }
+
+    /// Headless smoke hook: open a fixture markdown panel at launch.
+    /// Parallel to PipAnything's `PIP_AUTO_CAPTURE` family.
+    private func runAutoPanelSmoke() {
+        let fixture = """
+        # QuickShow auto-panel smoke
+
+        This is a **markdown** panel rendered on launch via
+        `QUICKSHOW_AUTO_PANEL=1`.
+
+        - tables, lists, code blocks all work
+        - dark / light theme follows `prefers-color-scheme`
+
+        ```swift
+        let app = NSApplication.shared
+        app.run()
+        ```
+        """
+        Task {
+            do {
+                _ = try await sessionManager.upsert(
+                    sessionId: "smoke-session",
+                    name: "smoke",
+                    contentType: "markdown",
+                    form: "inline",
+                    body: fixture
+                )
+                NSLog("QuickShow: auto-panel smoke rendered")
+            } catch {
+                NSLog("QuickShow: auto-panel smoke failed: \(error)")
+            }
+        }
     }
 
     private func installMenuBarItem() {
