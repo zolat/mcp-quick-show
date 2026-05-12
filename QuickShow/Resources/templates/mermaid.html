@@ -26,6 +26,7 @@
 <div id="qs-content"></div>
 <div id="qs-error"></div>
 <!--QS_MERMAID-->
+<!--QS_PANZOOM-->
 <script>
 (function() {
   "use strict";
@@ -95,6 +96,10 @@
       const id = 'qs-mermaid-' + counter;
       const { svg } = await mermaid.render(id, body || '');
       c.innerHTML = svg;
+      const svgEl = c.querySelector('svg');
+      if (svgEl && typeof window.__quickshow_install_panzoom === 'function') {
+        window.__quickshow_install_panzoom(svgEl);
+      }
 
       const m = measure();
       window.webkit.messageHandlers.renderComplete.postMessage({

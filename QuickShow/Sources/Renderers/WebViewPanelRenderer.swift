@@ -111,6 +111,9 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
                 ("<!--QS_MERMAID-->",
                  (try? readBundled("mermaid.min", ext: "js", dir: "libs")) ?? "",
                  true /* is script */),
+                ("<!--QS_PANZOOM-->",
+                 (try? readBundled("panzoom", ext: "js", dir: "templates")) ?? "",
+                 true /* is script */),
             ]
             for (marker, content, isScript) in injections {
                 let wrapped: String

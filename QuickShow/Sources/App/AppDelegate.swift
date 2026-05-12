@@ -37,6 +37,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_FUSED"] == "1" {
             runFusedSmoke()
         }
+        if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_PANZOOM"] == "1" {
+            runPanZoomSmoke()
+        }
+    }
+
+    /// Headless pan/zoom test. Renders a mermaid panel + an image
+    /// panel; pokes the JS panzoom controller via evaluateJavaScript;
+    /// drives the image scroll view's magnification API. Logs the
+    /// observed state so a shell test can grep for assertions.
+    private func runPanZoomSmoke() {
+        Task {
+            do {
+                // --- Mermaid (WebKit pipeline) ---
+                _ = try await sessionManager.upsert(
+                    sessionId: "panzoom-smoke",
+                    name: "diagram",
+                    contentType: "mermaid",
+                    form: "inline",
+                    body: "flowchart LR\nA-->B-->C-->D"
+                )
+                try await Task.sleep(nanoseconds: 500_000_000)
+                guard let session = sessionManager.sessions["panzoom-smoke"],
+                      let mermaidPanel = session.huds.first?.panels.first(where: { $0.name == "diagram" }),
+                      let webRenderer = mermaidPanel.renderer as? WebViewPanelRenderer else {
+                    NSLog("QuickShow: TEST_PANZOOM failed: no mermaid panel/renderer")
+                    return
+                }
+
+                let initial: Any? = try await webRenderer.webView.evaluateJavaScript(
+                    "JSON.stringify(window.__quickshow_panzoom_latest && window.__quickshow_panzoom_latest.state())"
+                )
+                NSLog("QuickShow: TEST_PANZOOM mermaid_initial=\(initial ?? "nil")")
+
+                _ = try await webRenderer.webView.evaluateJavaScript(
+                    "window.__quickshow_panzoom_latest._wheel(-200, 100, 100)"
+                )
+                try await Task.sleep(nanoseconds: 100_000_000)
+                let zoomed: Any? = try await webRenderer.webView.evaluateJavaScript(
+                    "JSON.stringify(window.__quickshow_panzoom_latest.state())"
+                )
+                NSLog("QuickShow: TEST_PANZOOM mermaid_zoomed=\(zoomed ?? "nil")")
+
+                _ = try await webRenderer.webView.evaluateJavaScript(
+                    "window.__quickshow_panzoom_latest._resetForTest()"
+                )
+                try await Task.sleep(nanoseconds: 100_000_000)
+                let resetState: Any? = try await webRenderer.webView.evaluateJavaScript(
+                    "JSON.stringify(window.__quickshow_panzoom_latest.state())"
+                )
+                NSLog("QuickShow: TEST_PANZOOM mermaid_reset=\(resetState ?? "nil")")
+
+                // --- Image (NSScrollView pipeline) ---
+                let fixturePath = "/tmp/qs-phase1-render.png"
+                if FileManager.default.fileExists(atPath: fixturePath) {
+                    _ = try await sessionManager.upsert(
+                        sessionId: "panzoom-smoke",
+                        name: "picture",
+                        contentType: "image",
+                        form: "path",
+                        body: fixturePath
+                    )
+                    try await Task.sleep(nanoseconds: 300_000_000)
+                    if let imgPanel = session.huds.first?.panels.first(where: { $0.name == "picture" }),
+                       let scroll = imgPanel.view as? ZoomableImageScrollView {
+                        let before = scroll.magnification
+                        scroll.setMagnification(2.0, centeredAt: NSPoint(x: scroll.bounds.midX, y: scroll.bounds.midY))
+                        let zoomed = scroll.magnification
+                        scroll.fitToContainer()
+                        let after = scroll.magnification
+                        NSLog("QuickShow: TEST_PANZOOM image initial=\(before) zoomed=\(zoomed) reset=\(after)")
+                    } else {
+                        NSLog("QuickShow: TEST_PANZOOM image_skipped: no scroll view")
+                    }
+                } else {
+                    NSLog("QuickShow: TEST_PANZOOM image_skipped: fixture missing")
+                }
+
+                sessionManager.closeAllPanels(in: "panzoom-smoke")
+                NSLog("QuickShow: TEST_PANZOOM done")
+            } catch {
+                NSLog("QuickShow: TEST_PANZOOM failed: \(error)")
+            }
+        }
     }
 
     /// Headless test for the fused tear-out + reattach gesture path
