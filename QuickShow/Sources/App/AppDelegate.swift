@@ -22,6 +22,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ProcessInfo.processInfo.environment["QUICKSHOW_AUTO_PANEL"] == "1" {
             runAutoPanelSmoke()
         }
+        if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_PROMOTE"] == "1" {
+            runPromoteSmoke()
+        }
+    }
+
+    /// Headless promote test (parallel to PipAnything's PIP_TEST_* hooks).
+    /// Renders a panel, invokes `handlePromote`, asserts the
+    /// activationPolicy transitions to .regular; closes the promoted
+    /// window, asserts back to .accessory. Logs each step so a shell
+    /// test can grep for the expected transitions.
+    private func runPromoteSmoke() {
+        Task {
+            do {
+                _ = try await sessionManager.upsert(
+                    sessionId: "promote-smoke",
+                    name: "panel",
+                    contentType: "markdown",
+                    form: "inline",
+                    body: "# Promote smoke"
+                )
+                NSLog("QuickShow: TEST_PROMOTE step=initial activationPolicy=\(activationPolicyName())")
+                let payload = MenuPayload(sessionId: "promote-smoke", name: "panel")
+                let item = NSMenuItem(title: "Promote", action: nil, keyEquivalent: "")
+                item.representedObject = payload
+                sessionManager.handlePromote(item)
+                // Give the policy change one runloop turn to flush.
+                try await Task.sleep(nanoseconds: 200_000_000)
+                NSLog("QuickShow: TEST_PROMOTE step=after-promote activationPolicy=\(activationPolicyName())")
+                // Close the promoted window via NSApp.windows lookup.
+                if let promoted = NSApp.windows.first(where: { $0 is PromotedWindow }) {
+                    promoted.close()
+                }
+                try await Task.sleep(nanoseconds: 300_000_000)
+                NSLog("QuickShow: TEST_PROMOTE step=after-close activationPolicy=\(activationPolicyName())")
+                NSLog("QuickShow: TEST_PROMOTE done")
+            } catch {
+                NSLog("QuickShow: TEST_PROMOTE failed: \(error)")
+            }
+        }
+    }
+
+    private func activationPolicyName() -> String {
+        switch NSApp.activationPolicy() {
+        case .regular: return "regular"
+        case .accessory: return "accessory"
+        case .prohibited: return "prohibited"
+        @unknown default: return "unknown"
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

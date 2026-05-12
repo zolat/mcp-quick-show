@@ -12,9 +12,11 @@ final class TitleBarOverlay: NSView {
     static let height: CGFloat = 22
 
     var onClose: (() -> Void)?
+    var onSnapshot: (() -> Void)?
 
     private let titleLabel = NSTextField(labelWithString: "")
     private let closeButton = NSButton(title: "×", target: nil, action: nil)
+    private let snapshotButton = NSButton(title: "⇩", target: nil, action: nil)
     private let badgeView = NSTextField(labelWithString: "")
     private let backgroundLayer = CALayer()
 
@@ -38,6 +40,15 @@ final class TitleBarOverlay: NSView {
         badgeView.isHidden = true
         addSubview(badgeView)
 
+        snapshotButton.translatesAutoresizingMaskIntoConstraints = false
+        snapshotButton.isBordered = false
+        snapshotButton.font = .systemFont(ofSize: 13, weight: .medium)
+        snapshotButton.contentTintColor = .secondaryLabelColor
+        snapshotButton.target = self
+        snapshotButton.action = #selector(handleSnapshot)
+        snapshotButton.toolTip = "Save snapshot to ~/Downloads"
+        addSubview(snapshotButton)
+
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.isBordered = false
         closeButton.font = .systemFont(ofSize: 14, weight: .medium)
@@ -50,8 +61,12 @@ final class TitleBarOverlay: NSView {
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: badgeView.leadingAnchor, constant: -6),
-            badgeView.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -8),
+            badgeView.trailingAnchor.constraint(equalTo: snapshotButton.leadingAnchor, constant: -8),
             badgeView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            snapshotButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -4),
+            snapshotButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            snapshotButton.widthAnchor.constraint(equalToConstant: 18),
+            snapshotButton.heightAnchor.constraint(equalToConstant: 18),
             closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
             closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             closeButton.widthAnchor.constraint(equalToConstant: 18),
@@ -78,5 +93,9 @@ final class TitleBarOverlay: NSView {
 
     @objc private func handleClose() {
         onClose?()
+    }
+
+    @objc private func handleSnapshot() {
+        onSnapshot?()
     }
 }

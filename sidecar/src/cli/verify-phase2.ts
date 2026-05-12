@@ -96,15 +96,13 @@ async function main() {
   const imgPng = Buffer.from(imgResult.screenshot_b64!, "base64");
   assert(imgPng.subarray(0, PNG_MAGIC.length).equals(PNG_MAGIC), `Image response is a PNG`);
 
-  // === List should show 3 panels (svg, mermaid, image) ===
-  // Wait — Phase 1 only supports one panel per session. With Phase 2 still
-  // single-panel-per-session, each upsert with a different name replaces
-  // the previous one. Multi-tab is Phase 3. So we expect 1 panel here
-  // (the last one rendered: image-test).
+  // === List should show all 3 panels (svg, mermaid, image) ===
+  // Post-Phase 3 each different-named upsert opens a new tab in the
+  // session, so we expect 3 panels here.
   const listResp = await client.request({ kind: "list", session: sessionId });
   const panels = (listResp as { result: Array<{ name: string }> }).result;
   console.error(`list returned ${panels.length} panel(s): ${panels.map(p => p.name).join(", ")}`);
-  assert(panels.length === 1, `Phase 1 single-panel semantics still hold (Phase 3 turns this into multi-tab)`);
+  assert(panels.length === 3, `Phase 3 multi-tab: list shows all 3 panels (got ${panels.length})`);
 
   client.close();
   console.error("\n✅ Phase 2 verification passed.");

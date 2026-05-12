@@ -30,6 +30,9 @@ final class HUDWindow: NSWindow {
     /// context menu's actions know which session + tab they apply to.
     var onTabContextMenu: ((String, NSEvent) -> Void)?
     var onHudContextMenu: ((NSEvent) -> Void)?
+    /// Title-bar snapshot button (user story #30). Saves a fresh PNG
+    /// of the active panel to ~/Downloads.
+    var onSnapshotActivePanel: (() -> Void)?
 
     /// Bound by `SessionManager` so right-click handlers can find
     /// their owning session.
@@ -109,6 +112,7 @@ final class HUDWindow: NSWindow {
 
         titleBar.translatesAutoresizingMaskIntoConstraints = false
         titleBar.onClose = { [weak self] in self?.onCloseRequested?() }
+        titleBar.onSnapshot = { [weak self] in self?.onSnapshotActivePanel?() }
         root.addSubview(titleBar)
         NSLayoutConstraint.activate([
             titleBar.topAnchor.constraint(equalTo: root.topAnchor),

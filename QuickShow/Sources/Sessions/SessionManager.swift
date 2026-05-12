@@ -143,6 +143,12 @@ final class SessionManager: NSObject {
             h.onHudContextMenu = { [weak self] event in
                 self?.showHudMenu(sessionId: sessionId, event: event, on: h)
             }
+            h.onSnapshotActivePanel = { [weak self, weak h] in
+                guard let self = self, let activeName = h?.activePanelName else { return }
+                let item = NSMenuItem(title: "Snapshot", action: nil, keyEquivalent: "")
+                item.representedObject = MenuPayload(sessionId: sessionId, name: activeName)
+                self.handleSnapshotToDownloads(item)
+            }
             h.sessionId = sessionId
             h.makeKeyAndOrderFront(nil)
             session.hud = h
