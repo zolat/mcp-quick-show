@@ -4,7 +4,7 @@ import Cocoa
 /// Phase 4: orphan-on-disconnect with a 60 s same-UUID reconnect
 /// window, then a persistent "session ended" badge.
 @MainActor
-final class SessionManager {
+final class SessionManager: NSObject {
     /// Reconnect grace window. A sidecar that drops and reconnects
     /// with the same `session_id` inside this window reattaches
     /// silently; after it expires the badge is visible.
@@ -18,6 +18,9 @@ final class SessionManager {
     }
 
     private let renderers: RendererRegistry
+    /// Owned by AppDelegate; injected so the SessionManager can
+    /// hand panels off for promote-to-window.
+    weak var promoteController: PromoteToWindowController?
 
     /// One MCP-session's worth of state.
     final class SessionState {
@@ -60,6 +63,7 @@ final class SessionManager {
 
     init(renderers: RendererRegistry) {
         self.renderers = renderers
+        super.init()
     }
 
     // MARK: - Session lifecycle
@@ -133,6 +137,13 @@ final class SessionManager {
             h.onCloseTab = { [weak self] name in
                 self?.close(sessionId: sessionId, name: name)
             }
+            h.onTabContextMenu = { [weak self] name, event in
+                self?.showTabMenu(sessionId: sessionId, name: name, event: event, on: h)
+            }
+            h.onHudContextMenu = { [weak self] event in
+                self?.showHudMenu(sessionId: sessionId, event: event, on: h)
+            }
+            h.sessionId = sessionId
             h.makeKeyAndOrderFront(nil)
             session.hud = h
             hud = h
@@ -243,6 +254,116 @@ final class SessionManager {
                 width: Double(size.width),
                 height: Double(size.height)
             )
+        }
+    }
+
+    // MARK: - Right-click menu actions
+
+    @objc func handleCloseTab(_ sender: NSMenuItem) {
+        guard let payload = sender.representedObject as? MenuPayload else { return }
+        close(sessionId: payload.sessionId, name: payload.name)
+    }
+
+    @objc func handlePromote(_ sender: NSMenuItem) {
+        guard let payload = sender.representedObject as? MenuPayload,
+              let session = sessions[payload.sessionId],
+              let panel = session.panels.first(where: { $0.name == payload.name }),
+              let hud = session.hud,
+              let promoteController = promoteController else { return }
+        let panelSize = hud.frame.size
+        promoteController.promote(
+            name: payload.name,
+            sessionId: payload.sessionId,
+            detachFrom: hud,
+            view: panel.view,
+            panelSize: panelSize
+        ) { [weak self] in
+            // When the promoted window closes, drop the panel from
+            // the session list — it can't be reinstated into the HUD
+            // because the view's already been re-housed.
+            self?.removePanelAfterPromote(sessionId: payload.sessionId, name: payload.name)
+        }
+        // The view is now in the promoted window; remove from the HUD
+        // and update tab strip.
+        hud.removePanel(payload.name)
+        if let idx = session.panels.firstIndex(where: { $0.name == payload.name }) {
+            session.panels.remove(at: idx)
+        }
+        if session.panels.isEmpty {
+            session.hud?.close()
+            session.hud = nil
+        } else {
+            hud.updateTabs(session.panels.map(\.name))
+            if hud.activePanelName == nil, let first = session.panels.first {
+                hud.setActivePanel(first.name)
+            }
+        }
+    }
+
+    private func removePanelAfterPromote(sessionId: String, name: String) {
+        // No-op for now; the panel is already removed from session.panels
+        // in `handlePromote`. The hook exists so future Phase 5 polish
+        // can implement "demote back to HUD."
+        _ = sessionId
+        _ = name
+    }
+
+    @objc func handleSnapshotToDownloads(_ sender: NSMenuItem) {
+        guard let payload = sender.representedObject as? MenuPayload,
+              let session = sessions[payload.sessionId],
+              let panel = session.panels.first(where: { $0.name == payload.name }) else { return }
+        Task {
+            do {
+                let data = try await panel.renderer.snapshot()
+                let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+                    ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Downloads")
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+                let stamp = formatter.string(from: Date())
+                let url = downloads.appendingPathComponent("quickshow-\(payload.name)-\(stamp).png")
+                try data.write(to: url)
+                NSLog("QuickShow: snapshot saved to \(url.path)")
+            } catch {
+                NSLog("QuickShow: snapshot to Downloads failed: \(error)")
+            }
+        }
+    }
+
+    @objc func handleCloseAll(_ sender: NSMenuItem) {
+        guard let payload = sender.representedObject as? MenuPayload else { return }
+        closeAllPanels(in: payload.sessionId)
+    }
+
+    @objc func handleOpacity(_ sender: NSMenuItem) {
+        guard let payload = sender.representedObject as? OpacityPayload,
+              let session = sessions[payload.sessionId],
+              let hud = session.hud else { return }
+        hud.alphaValue = CGFloat(payload.percent) / 100.0
+    }
+
+    private func showTabMenu(sessionId: String, name: String, event: NSEvent, on hud: HUDWindow) {
+        let menu = HUDContextMenu.tabMenu(
+            sessionId: sessionId,
+            name: name,
+            target: self,
+            close: #selector(handleCloseTab(_:)),
+            promote: #selector(handlePromote(_:)),
+            snapshotToDownloads: #selector(handleSnapshotToDownloads(_:))
+        )
+        if let contentView = hud.contentView {
+            NSMenu.popUpContextMenu(menu, with: event, for: contentView)
+        }
+    }
+
+    private func showHudMenu(sessionId: String, event: NSEvent, on hud: HUDWindow) {
+        let menu = HUDContextMenu.hudMenu(
+            sessionId: sessionId,
+            target: self,
+            closeAll: #selector(handleCloseAll(_:)),
+            opacity: #selector(handleOpacity(_:))
+        )
+        if let contentView = hud.contentView {
+            NSMenu.popUpContextMenu(menu, with: event, for: contentView)
         }
     }
 

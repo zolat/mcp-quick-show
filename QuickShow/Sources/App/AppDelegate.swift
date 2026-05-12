@@ -9,10 +9,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private(set) var sessionManager: SessionManager!
     private(set) var rendererRegistry: RendererRegistry!
+    private(set) var promoteController: PromoteToWindowController!
+    private var settingsWindow: SettingsWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         rendererRegistry = RendererRegistry.makeDefault()
         sessionManager = SessionManager(renderers: rendererRegistry)
+        promoteController = PromoteToWindowController()
+        sessionManager.promoteController = promoteController
         installMenuBarItem()
         startControlServer()
         if ProcessInfo.processInfo.environment["QUICKSHOW_AUTO_PANEL"] == "1" {
@@ -66,12 +70,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "QuickShow v0.1", action: nil, keyEquivalent: ""))
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
-        for sub in menu.items where sub.action == #selector(quit) {
-            sub.target = self
-        }
+        let prefs = NSMenuItem(title: "Preferences…", action: #selector(openPreferences), keyEquivalent: ",")
+        prefs.target = self
+        menu.addItem(prefs)
+        menu.addItem(.separator())
+        let quitItem = NSMenuItem(title: "Quit QuickShow", action: #selector(quit), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
         item.menu = menu
         statusItem = item
+    }
+
+    @objc private func openPreferences() {
+        if settingsWindow == nil {
+            settingsWindow = SettingsWindow()
+        }
+        settingsWindow?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func startControlServer() {

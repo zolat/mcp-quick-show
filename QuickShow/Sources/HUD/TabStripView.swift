@@ -45,6 +45,19 @@ final class TabStripView: NSView {
     /// Background of the strip is grabbable for window drag.
     override var mouseDownCanMoveWindow: Bool { true }
 
+    /// Returns the panel name at a point inside the strip, or nil if
+    /// the point isn't over a pill. Used by `HUDWindow.sendEvent` to
+    /// route right-click events to the right context menu.
+    func pillName(at point: NSPoint) -> String? {
+        for pill in pills {
+            let local = pill.convert(point, from: self)
+            if pill.bounds.contains(local) {
+                return pill.currentName
+            }
+        }
+        return nil
+    }
+
     func update(panels: [(name: String, isActive: Bool)]) {
         isHidden = panels.count < 2
         // Reuse / create pills.
@@ -103,6 +116,8 @@ final class TabPillView: NSView {
     private let label = NSTextField(labelWithString: "")
     private let closeButton = NSButton(title: "×", target: nil, action: nil)
     private var panelName: String = ""
+
+    var currentName: String { panelName }
 
     init() {
         super.init(frame: .zero)

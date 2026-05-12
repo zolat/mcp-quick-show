@@ -26,6 +26,14 @@ final class HUDWindow: NSWindow {
     var onCloseRequested: (() -> Void)?
     var onSelectTab: ((String) -> Void)?
     var onCloseTab: ((String) -> Void)?
+    /// Right-click handlers — supplied by `SessionManager` so the
+    /// context menu's actions know which session + tab they apply to.
+    var onTabContextMenu: ((String, NSEvent) -> Void)?
+    var onHudContextMenu: ((NSEvent) -> Void)?
+
+    /// Bound by `SessionManager` so right-click handlers can find
+    /// their owning session.
+    var sessionId: String?
 
     init(initialPosition: NSPoint? = nil) {
         let frame = NSRect(
@@ -58,6 +66,30 @@ final class HUDWindow: NSWindow {
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    /// Intercept rightMouseDown at the window level — same trick as
+    /// PipAnything's OverlayWindow. Routes the click to either the
+    /// tab strip's right-click handler (if the cursor is over a pill)
+    /// or the HUD's general right-click handler.
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .rightMouseDown {
+            let locInWindow = event.locationInWindow
+            // If the cursor is over a tab pill, dispatch the tab menu.
+            if let pillName = pillNameAt(windowPoint: locInWindow) {
+                onTabContextMenu?(pillName, event)
+                return
+            }
+            onHudContextMenu?(event)
+            return
+        }
+        super.sendEvent(event)
+    }
+
+    private func pillNameAt(windowPoint: NSPoint) -> String? {
+        let local = tabStrip.convert(windowPoint, from: nil)
+        guard tabStrip.bounds.contains(local) else { return nil }
+        return tabStrip.pillName(at: local)
+    }
 
     private func configureContentView() {
         guard let root = contentView else { return }
