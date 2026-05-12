@@ -222,6 +222,12 @@ final class SessionManager: NSObject {
         guard let (hud, _) = locate(in: session, name: name) else { return }
         let wasActive = hud.window.activePanelName == name
         let panelIdx = hud.panels.firstIndex(where: { $0.name == name })!
+        // Until per-panel `accept_markup` lands, a close in an armed
+        // session = a markup dismissed. Refines once the show_* tools
+        // gain the opt-in argument.
+        if session.flags["markup_events_armed"]?.asBool == true {
+            recordMarkupDismissed(sessionId: sessionId, panel: name)
+        }
         hud.panels.remove(at: panelIdx)
         hud.window.removePanel(name)
         if hud.panels.isEmpty {
@@ -260,6 +266,14 @@ final class SessionManager: NSObject {
     func closeHud(sessionId: String, hudId: UUID) {
         guard let session = sessions[sessionId],
               let hud = session.huds.first(where: { $0.id == hudId }) else { return }
+        // Emit a markup_dismissed for each panel in the HUD when the
+        // session is armed — title-bar × counts as "user closed
+        // without sending markup" for every panel inside.
+        if session.flags["markup_events_armed"]?.asBool == true {
+            for panel in hud.panels {
+                recordMarkupDismissed(sessionId: sessionId, panel: panel.name)
+            }
+        }
         closeHudInstance(hud, in: session)
     }
 
