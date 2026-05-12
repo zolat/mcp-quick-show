@@ -31,6 +31,150 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_TEAROUT"] == "1" {
             runTearOutSmoke()
         }
+        if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_REATTACH"] == "1" {
+            runReattachSmoke()
+        }
+        if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_FUSED"] == "1" {
+            runFusedSmoke()
+        }
+    }
+
+    /// Headless test for the fused tear-out + reattach gesture path
+    /// — simulates: tear out (creates a sibling HUD under the cursor),
+    /// drag-move places cursor inside source's drop zone, drag-end
+    /// merges back. Closer to what the user does in one continuous
+    /// drag.
+    private func runFusedSmoke() {
+        Task {
+            do {
+                for (name, body) in [("A", "# A"), ("B", "# B"), ("C", "# C")] {
+                    _ = try await sessionManager.upsert(
+                        sessionId: "fused-smoke",
+                        name: name,
+                        contentType: "markdown",
+                        form: "inline",
+                        body: body
+                    )
+                }
+                guard let session = sessionManager.sessions["fused-smoke"] else { return }
+                let primary = session.huds[0]
+                let primaryId = primary.id
+                let dragEvent = NSEvent.mouseEvent(
+                    with: .leftMouseDragged,
+                    location: NSEvent.mouseLocation,
+                    modifierFlags: [], timestamp: 0,
+                    windowNumber: primary.window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 0, pressure: 0
+                ) ?? NSEvent()
+
+                // Tear out B. handleTearOut spawns new HUD AND calls
+                // handleHudDragStart for the new HUD's id.
+                sessionManager.handleTearOut(
+                    sessionId: "fused-smoke", hudId: primaryId, name: "B", event: dragEvent
+                )
+                try await Task.sleep(nanoseconds: 200_000_000)
+                guard let torn = session.huds.first(where: { $0.id != primaryId }) else { return }
+                NSLog("QuickShow: TEST_FUSED step=after-tearout huds=\(session.huds.count)")
+
+                // Drag the new HUD's cursor toward primary's title bar
+                // — simulates the user's continued drag.
+                let dropPoint = NSPoint(
+                    x: primary.window.frame.midX,
+                    y: primary.window.frame.maxY - 8
+                )
+                sessionManager.handleHudDragMove(sessionId: "fused-smoke", hudId: torn.id, cursor: dropPoint)
+                NSLog("QuickShow: TEST_FUSED step=during-drag highlight=\(primary.window.contentView?.layer?.borderWidth ?? 0)")
+                sessionManager.handleHudDragEnd(sessionId: "fused-smoke", hudId: torn.id, cursor: dropPoint)
+                try await Task.sleep(nanoseconds: 200_000_000)
+
+                NSLog("QuickShow: TEST_FUSED step=after-drop huds=\(session.huds.count) primary_panels=\(session.huds.first?.panels.map(\.name).joined(separator: ",") ?? "?")")
+                sessionManager.closeAllPanels(in: "fused-smoke")
+                NSLog("QuickShow: TEST_FUSED done")
+            } catch {
+                NSLog("QuickShow: TEST_FUSED failed: \(error)")
+            }
+        }
+    }
+
+    /// Headless reattach test (separate title-bar drag, post-tear-out).
+    /// The fused gesture covers the same surface but this proves the
+    /// title-bar drag handlers work standalone.
+    private func runReattachSmoke() {
+        Task {
+            do {
+                for (name, body) in [("A", "# A"), ("B", "# B"), ("C", "# C")] {
+                    _ = try await sessionManager.upsert(
+                        sessionId: "reattach-smoke",
+                        name: name,
+                        contentType: "markdown",
+                        form: "inline",
+                        body: body
+                    )
+                }
+                guard let session = sessionManager.sessions["reattach-smoke"] else {
+                    NSLog("QuickShow: TEST_REATTACH failed: session missing")
+                    return
+                }
+                let primary = session.huds[0]
+                let primaryId = primary.id
+
+                // Tear B out into its own sibling HUD.
+                let dragEvent = NSEvent.mouseEvent(
+                    with: .leftMouseDragged,
+                    location: NSEvent.mouseLocation,
+                    modifierFlags: [],
+                    timestamp: 0,
+                    windowNumber: primary.window.windowNumber,
+                    context: nil,
+                    eventNumber: 0,
+                    clickCount: 0,
+                    pressure: 0
+                ) ?? NSEvent()
+                sessionManager.handleTearOut(
+                    sessionId: "reattach-smoke",
+                    hudId: primaryId,
+                    name: "B",
+                    event: dragEvent
+                )
+                try await Task.sleep(nanoseconds: 200_000_000)
+                NSLog("QuickShow: TEST_REATTACH step=after-tearout huds=\(session.huds.count)")
+
+                // Identify the torn HUD.
+                guard let torn = session.huds.first(where: { $0.id != primaryId }) else {
+                    NSLog("QuickShow: TEST_REATTACH failed: torn HUD missing")
+                    return
+                }
+
+                // Pick a target point inside the source HUD's title bar
+                // (always present, always in the drop zone).
+                let sourceTitleBarRect = primary.window.frame
+                let dropPoint = NSPoint(
+                    x: sourceTitleBarRect.midX,
+                    y: sourceTitleBarRect.maxY - 8  // ~inside title bar
+                )
+                NSLog("QuickShow: TEST_REATTACH dropPoint=\(dropPoint) sourceFrame=\(sourceTitleBarRect)")
+
+                // Drive the drag handlers as if the user dragged the
+                // torn HUD's title bar to the source's drop zone.
+                sessionManager.handleHudDragStart(sessionId: "reattach-smoke", hudId: torn.id)
+                sessionManager.handleHudDragMove(sessionId: "reattach-smoke", hudId: torn.id, cursor: dropPoint)
+                // Verify the target was lit before drop.
+                let primaryAfterMove = session.huds.first(where: { $0.id == primaryId })
+                NSLog("QuickShow: TEST_REATTACH highlight_set=\(primaryAfterMove?.window.contentView?.layer?.borderWidth ?? 0)")
+
+                sessionManager.handleHudDragEnd(sessionId: "reattach-smoke", hudId: torn.id, cursor: dropPoint)
+                try await Task.sleep(nanoseconds: 200_000_000)
+
+                NSLog("QuickShow: TEST_REATTACH step=after-reattach huds=\(session.huds.count) primary_panels=\(session.huds.first(where: { $0.id == primaryId })?.panels.map(\.name).joined(separator: ",") ?? "?")")
+                NSLog("QuickShow: TEST_REATTACH torn_still_present=\(session.huds.contains(where: { $0.id == torn.id }))")
+
+                sessionManager.closeAllPanels(in: "reattach-smoke")
+                try await Task.sleep(nanoseconds: 100_000_000)
+                NSLog("QuickShow: TEST_REATTACH done")
+            } catch {
+                NSLog("QuickShow: TEST_REATTACH failed: \(error)")
+            }
+        }
     }
 
     /// Headless tear-out test. Renders three panels in one session,

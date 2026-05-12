@@ -38,6 +38,11 @@ final class HUDWindow: NSWindow {
     /// Tab drag-out (PRD user story #27). `TabPillView` fires this
     /// when the drag distance crosses the tear-out threshold.
     var onTearOutTab: ((String, NSEvent) -> Void)?
+    /// Title-bar drag: SessionManager hooks these to detect drop
+    /// targets for drag-to-reattach (the inverse of tear-out).
+    var onTitleBarDragStart: (() -> Void)?
+    var onTitleBarDragMove: ((NSPoint) -> Void)?
+    var onTitleBarDragEnd: ((NSPoint) -> Void)?
 
     /// Bound by `SessionManager` so right-click handlers can find
     /// their owning session.
@@ -135,6 +140,9 @@ final class HUDWindow: NSWindow {
         titleBar.translatesAutoresizingMaskIntoConstraints = false
         titleBar.onClose = { [weak self] in self?.onCloseRequested?() }
         titleBar.onSnapshot = { [weak self] in self?.onSnapshotActivePanel?() }
+        titleBar.onDragStart = { [weak self] in self?.onTitleBarDragStart?() }
+        titleBar.onDragMove = { [weak self] loc in self?.onTitleBarDragMove?(loc) }
+        titleBar.onDragEnd = { [weak self] loc in self?.onTitleBarDragEnd?(loc) }
         root.addSubview(titleBar)
         NSLayoutConstraint.activate([
             titleBar.topAnchor.constraint(equalTo: root.topAnchor),
@@ -232,6 +240,34 @@ final class HUDWindow: NSWindow {
     /// reconnects (cleared).
     func setSessionEnded(_ ended: Bool) {
         titleBar.setSessionEnded(ended)
+    }
+
+    /// During a drag-to-reattach gesture (the inverse of tear-out),
+    /// HUDs that would accept the drop highlight their chrome with
+    /// an accent border. Called by `SessionManager.handleHudDragMove`.
+    func setReattachHighlight(_ on: Bool) {
+        guard let root = contentView else { return }
+        root.layer?.borderWidth = on ? 2.5 : 0
+        root.layer?.borderColor = on
+            ? NSColor.controlAccentColor.cgColor
+            : NSColor.clear.cgColor
+    }
+
+    /// Does the given screen-coord point land on this HUD's
+    /// drop-target zone? Drop zone = the tab strip when visible, or
+    /// the title bar (always). Used for drag-to-reattach detection.
+    func containsDropPoint(_ screenPoint: NSPoint) -> Bool {
+        // Title bar in screen coords — always part of the drop zone.
+        let titleWindowFrame = titleBar.convert(titleBar.bounds, to: nil)
+        let titleScreenFrame = convertToScreen(titleWindowFrame)
+        if titleScreenFrame.contains(screenPoint) { return true }
+        // Tab strip in screen coords — only when shown (≥2 panels).
+        if !tabStrip.isHidden {
+            let stripWindowFrame = tabStrip.convert(tabStrip.bounds, to: nil)
+            let stripScreenFrame = convertToScreen(stripWindowFrame)
+            if stripScreenFrame.contains(screenPoint) { return true }
+        }
+        return false
     }
 
     /// Resize the window to fit the rendered content, capped at the

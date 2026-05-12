@@ -84,6 +84,13 @@ mcp-quick-show/
 └── README.md
 ```
 
+## Shipping
+
+Direct push to `main`. No PRs, no feature branches — commit on
+`main`, `git push origin main`. Force-push is not allowed (use
+`git filter-repo` + a fresh push only for one-time history fixes
+agreed with the human).
+
 ## Wire-protocol mirror discipline
 
 `QuickShow/Sources/Server/ControlProtocol.swift` and

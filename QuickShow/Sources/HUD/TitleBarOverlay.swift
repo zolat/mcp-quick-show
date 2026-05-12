@@ -13,12 +13,26 @@ final class TitleBarOverlay: NSView {
 
     var onClose: (() -> Void)?
     var onSnapshot: (() -> Void)?
+    /// Fired once when a drag gesture starts (after a 3-pt threshold,
+    /// so a click on the title bar doesn't accidentally trigger a
+    /// "drag" with zero movement).
+    var onDragStart: (() -> Void)?
+    /// Fired on every drag event; argument is the cursor's screen
+    /// location. SessionManager uses this to detect drop targets.
+    var onDragMove: ((NSPoint) -> Void)?
+    /// Fired on mouseUp after a drag; argument is the cursor's final
+    /// screen location.
+    var onDragEnd: ((NSPoint) -> Void)?
 
     private let titleLabel = NSTextField(labelWithString: "")
     private let closeButton = NSButton(title: "×", target: nil, action: nil)
     private let snapshotButton = NSButton(title: "⇩", target: nil, action: nil)
     private let badgeView = NSTextField(labelWithString: "")
     private let backgroundLayer = CALayer()
+
+    private var mouseDownPoint: NSPoint = .zero
+    private var initialWindowFrame: NSRect = .zero
+    private var isDragging = false
 
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: 400, height: Self.height))
@@ -84,8 +98,43 @@ final class TitleBarOverlay: NSView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    /// Background of the title bar drags the window.
-    override var mouseDownCanMoveWindow: Bool { true }
+    /// We take over the window-drag manually so we can observe the
+    /// cursor during drag (for reattach drop-target detection). The
+    /// strip background still has `mouseDownCanMoveWindow = true` as
+    /// an escape hatch that uses AppKit's native drag (no drop
+    /// detection, but always works as plain move).
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        mouseDownPoint = NSEvent.mouseLocation
+        initialWindowFrame = window?.frame ?? .zero
+        isDragging = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let now = NSEvent.mouseLocation
+        if !isDragging {
+            let dx = now.x - mouseDownPoint.x
+            let dy = now.y - mouseDownPoint.y
+            if hypot(dx, dy) < 3 { return }   // dead zone — treat as click
+            isDragging = true
+            onDragStart?()
+        }
+        let dx = now.x - mouseDownPoint.x
+        let dy = now.y - mouseDownPoint.y
+        window?.setFrameOrigin(NSPoint(
+            x: initialWindowFrame.origin.x + dx,
+            y: initialWindowFrame.origin.y + dy
+        ))
+        onDragMove?(now)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if isDragging {
+            onDragEnd?(NSEvent.mouseLocation)
+        }
+        isDragging = false
+    }
 
     func setTitle(_ title: String) {
         titleLabel.stringValue = title

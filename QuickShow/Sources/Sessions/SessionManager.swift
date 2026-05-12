@@ -77,6 +77,10 @@ final class SessionManager: NSObject {
     /// pill's tracking machinery.
     private var dragMonitor: Any?
 
+    /// Active drag-to-reattach state. Populated on title-bar mouseDown
+    /// for the source HUD; cleared on mouseUp.
+    private var reattachTarget: (sessionId: String, hudId: UUID)?
+
     init(renderers: RendererRegistry) {
         self.renderers = renderers
         super.init()
@@ -308,13 +312,25 @@ final class SessionManager: NSObject {
         newWindow.setSessionEnded(session.orphaned)
         newWindow.makeKeyAndOrderFront(nil)
 
-        // 3. Drag-follow until mouseUp.
-        beginDragFollow(window: newWindow, mouseDownPoint: mouseLoc)
+        // 3. Drag-follow + simultaneous reattach detection until mouseUp.
+        //    Letting reattach run alongside tear-out means the user
+        //    can drop a torn pill directly onto a sibling HUD's
+        //    strip without releasing first — and dropping back over
+        //    the source HUD's strip cancels the tear-out (the just-
+        //    spawned new HUD merges right back where it came from).
+        handleHudDragStart(sessionId: sessionId, hudId: newWindow.hudInstanceId)
+        beginDragFollow(
+            window: newWindow,
+            mouseDownPoint: mouseLoc,
+            sessionId: sessionId,
+            hudId: newWindow.hudInstanceId
+        )
     }
 
-    private func beginDragFollow(window: HUDWindow, mouseDownPoint: NSPoint) {
-        // Stop any prior drag-follow defensively (shouldn't happen
-        // because mouseUp removes the monitor, but be paranoid).
+    private func beginDragFollow(window: HUDWindow,
+                                 mouseDownPoint: NSPoint,
+                                 sessionId: String,
+                                 hudId: UUID) {
         if let prev = dragMonitor {
             NSEvent.removeMonitor(prev)
             dragMonitor = nil
@@ -331,7 +347,6 @@ final class SessionManager: NSObject {
         ) { [weak self, weak window] event in
             guard let self = self else { return event }
             guard let window = window else {
-                // Window vanished mid-drag — clean up and let events through.
                 if let mon = self.dragMonitor {
                     NSEvent.removeMonitor(mon)
                     self.dragMonitor = nil
@@ -342,6 +357,10 @@ final class SessionManager: NSObject {
             if event.type == .leftMouseDragged {
                 window.setFrameOrigin(NSPoint(x: m.x + originOffset.x,
                                               y: m.y + originOffset.y))
+                // Also probe for a sibling drop target on every
+                // drag tick. This is what fuses tear-out + reattach
+                // into one gesture.
+                self.handleHudDragMove(sessionId: sessionId, hudId: hudId, cursor: m)
                 return nil
             }
             if event.type == .leftMouseUp {
@@ -349,10 +368,10 @@ final class SessionManager: NSObject {
                     NSEvent.removeMonitor(mon)
                     self.dragMonitor = nil
                 }
-                // Let the mouseUp through so Cocoa's tracking
-                // bookkeeping for the source pill's mouseDown gets
-                // cleaned up properly (the pill captured the event
-                // stream when its mouseDown fired).
+                // Trigger reattach if a target was lit. May close
+                // the new HUD entirely, which is what we want for a
+                // direct pill-to-sibling-strip drop.
+                self.handleHudDragEnd(sessionId: sessionId, hudId: hudId, cursor: m)
                 return event
             }
             return event
@@ -391,6 +410,91 @@ final class SessionManager: NSObject {
         window.onTearOutTab = { [weak self] name, event in
             self?.handleTearOut(sessionId: sessionId, hudId: hudId, name: name, event: event)
         }
+        window.onTitleBarDragStart = { [weak self] in
+            self?.handleHudDragStart(sessionId: sessionId, hudId: hudId)
+        }
+        window.onTitleBarDragMove = { [weak self] cursor in
+            self?.handleHudDragMove(sessionId: sessionId, hudId: hudId, cursor: cursor)
+        }
+        window.onTitleBarDragEnd = { [weak self] cursor in
+            self?.handleHudDragEnd(sessionId: sessionId, hudId: hudId, cursor: cursor)
+        }
+    }
+
+    // MARK: - Drag-to-reattach
+
+    /// Called when a HUD's title-bar drag gesture starts. Wipes any
+    /// stale reattach target so the new drag begins clean.
+    func handleHudDragStart(sessionId: String, hudId: UUID) {
+        reattachTarget = nil
+    }
+
+    /// Called on every drag event with the cursor in screen coords.
+    /// Finds a sibling HUD (same session, different id) whose drop
+    /// zone contains the cursor; highlights it; un-highlights any
+    /// previous candidate.
+    func handleHudDragMove(sessionId: String, hudId: UUID, cursor: NSPoint) {
+        guard let session = sessions[sessionId] else { return }
+        let candidate = session.huds.first(where: { hud in
+            hud.id != hudId && hud.window.containsDropPoint(cursor)
+        })
+        let newTarget: (sessionId: String, hudId: UUID)? = candidate.map {
+            (sessionId: sessionId, hudId: $0.id)
+        }
+        // Detect target change → toggle highlights.
+        let prev = reattachTarget
+        if prev?.hudId != newTarget?.hudId {
+            if let prev = prev,
+               let prevHud = session.huds.first(where: { $0.id == prev.hudId }) {
+                prevHud.window.setReattachHighlight(false)
+            }
+            if let cand = candidate {
+                cand.window.setReattachHighlight(true)
+            }
+        }
+        reattachTarget = newTarget
+    }
+
+    /// Called on mouseUp at the drag's final cursor location. If a
+    /// drop target was lit, merges all of the source HUD's panels
+    /// into the target and closes the source HUD. Otherwise, the
+    /// HUD just stays where it was dropped (the move already happened
+    /// during the drag).
+    func handleHudDragEnd(sessionId: String, hudId: UUID, cursor: NSPoint) {
+        guard let session = sessions[sessionId] else {
+            reattachTarget = nil
+            return
+        }
+        // Clear all highlights defensively.
+        for hud in session.huds { hud.window.setReattachHighlight(false) }
+        defer { reattachTarget = nil }
+        guard let target = reattachTarget,
+              target.sessionId == sessionId,
+              let sourceHud = session.huds.first(where: { $0.id == hudId }),
+              let targetHud = session.huds.first(where: { $0.id == target.hudId }),
+              sourceHud.id != targetHud.id else {
+            return
+        }
+        performReattach(source: sourceHud, target: targetHud, in: session)
+    }
+
+    /// Move all panels from `source` into `target`, then close
+    /// `source`. The last-merged panel becomes the active one in the
+    /// target (so the user sees what they just dropped).
+    private func performReattach(source: HUDInstance, target: HUDInstance, in session: SessionState) {
+        let movedPanels = source.panels
+        source.panels.removeAll()
+        for panel in movedPanels {
+            source.window.removePanel(panel.name)
+            target.window.installPanel(name: panel.name, view: panel.view)
+            target.panels.append(panel)
+        }
+        target.window.updateTabs(target.panels.map(\.name))
+        if let last = movedPanels.last {
+            target.window.setActivePanel(last.name)
+        }
+        closeHudInstance(source, in: session)
+        NSLog("QuickShow: reattached \(movedPanels.count) panel(s) into HUD \(target.id)")
     }
 
     // MARK: - Right-click menu actions
