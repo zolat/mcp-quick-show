@@ -70,6 +70,10 @@ final class HUDWindow: NSWindow {
     /// - `onLoadStrokes(panel) -> [Stroke]`: read panel → overlay.
     var onCommitStrokes: ((String, [MarkupOverlayView.Stroke]) -> Void)?
     var onLoadStrokes: ((String) -> [MarkupOverlayView.Stroke])?
+    /// Resolves the active panel's current WebView scroll position
+    /// (CSS px) so the overlay can re-anchor existing strokes when
+    /// the user switches tabs.
+    var onResolveActivePanelScroll: ((String) -> NSPoint)?
     /// Reports the session's current `markup_events_armed` flag. Used
     /// by the title bar's flag-change observer to refresh button
     /// visibility without poking through SessionManager directly.
@@ -306,6 +310,11 @@ final class HUDWindow: NSWindow {
         }
         let incomingStrokes = onLoadStrokes?(name) ?? []
         markupOverlay.loadStrokes(incomingStrokes)
+        // Sync the overlay's scroll tracking to the new active
+        // panel's WebView so the strokes render at the right
+        // viewport positions against its current scroll state.
+        let scroll = onResolveActivePanelScroll?(name) ?? .zero
+        markupOverlay.setCurrentScroll(scroll)
         titleBar.setHasStrokes(!incomingStrokes.isEmpty)
         titleBar.setTitle(name)
     }

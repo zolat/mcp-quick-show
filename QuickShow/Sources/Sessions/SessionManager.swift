@@ -195,7 +195,9 @@ final class SessionManager: NSObject {
 
     /// Hook a WebView-based renderer's `markupEvent` bridge so user
     /// actions on the panel turn into NDJSON events + on-disk artifacts.
-    /// No-op for image renderers (no markup surface).
+    /// No-op for image renderers (no markup surface). Also wires the
+    /// scroll bridge so the markup overlay can keep strokes anchored
+    /// to content when the active panel scrolls.
     private func wireMarkupCallback(renderer: any PanelRenderer, sessionId: String, panelName: String) {
         guard let web = renderer as? WebViewPanelRenderer else { return }
         web.onMarkupEvent = { [weak self] action in
@@ -205,6 +207,31 @@ final class SessionManager: NSObject {
                 _ = self.recordMarkupSent(sessionId: sessionId, panel: panelName, pngBytes: pngBytes)
             case .dismiss:
                 self.recordMarkupDismissed(sessionId: sessionId, panel: panelName)
+            }
+        }
+        web.onScrollChanged = { [weak self] scroll in
+            self?.forwardScrollToOverlay(
+                sessionId: sessionId,
+                panelName: panelName,
+                scroll: scroll
+            )
+        }
+    }
+
+    /// Forward a panel's scroll-change event to its HUD's markup
+    /// overlay — but ONLY when the panel is the active one. Background
+    /// panels' scrolls don't repaint anything; their strokes already
+    /// carry their own `anchorScroll` and will re-anchor correctly
+    /// when activated.
+    private func forwardScrollToOverlay(sessionId: String,
+                                        panelName: String,
+                                        scroll: NSPoint) {
+        guard let session = sessions[sessionId] else { return }
+        for hud in session.huds {
+            if hud.window.activePanelName == panelName,
+               hud.panels.contains(where: { $0.name == panelName }) {
+                hud.window.markupOverlay.setCurrentScroll(scroll)
+                return
             }
         }
     }
@@ -397,12 +424,30 @@ final class SessionManager: NSObject {
         Task { @MainActor [weak self] in
             guard let self = self else { return }
             do {
-                let underlying = try await panel.renderer.snapshot()
-                let composite = SnapshotService.compositeMarkup(
-                    underlyingPNG: underlying,
-                    strokes: strokesAtSend,
-                    viewBoundsPt: panel.view.bounds.size
-                ) ?? underlying
+                let composite: Data
+                // WebView-backed renderers get a full-document snapshot
+                // (everything, not just the visible scrolled region)
+                // with strokes translated from viewport→document
+                // coords. ImageRenderer + anything else falls back to
+                // the visible-bounds path.
+                if let web = panel.renderer as? WebViewPanelRenderer,
+                   let webView = web.webView {
+                    let (docPNG, docSize, viewBounds, _) =
+                        try await SnapshotService.snapshotFullDocument(webView)
+                    composite = SnapshotService.compositeMarkupFullPage(
+                        documentPNG: docPNG,
+                        strokes: strokesAtSend,
+                        viewBoundsPt: viewBounds,
+                        docSizePt: docSize
+                    ) ?? docPNG
+                } else {
+                    let underlying = try await panel.renderer.snapshot()
+                    composite = SnapshotService.compositeMarkup(
+                        underlyingPNG: underlying,
+                        strokes: strokesAtSend,
+                        viewBoundsPt: panel.view.bounds.size
+                    ) ?? underlying
+                }
                 _ = self.recordMarkupSent(
                     sessionId: sessionId,
                     panel: activeName,
@@ -623,6 +668,13 @@ final class SessionManager: NSObject {
         window.onLoadStrokes = { [weak self] name in
             return self?.loadStrokes(sessionId: sessionId, hudId: hudId, panel: name) ?? []
         }
+        window.onResolveActivePanelScroll = { [weak self] name in
+            return self?.resolveActivePanelScroll(
+                sessionId: sessionId,
+                hudId: hudId,
+                panel: name
+            ) ?? .zero
+        }
         window.onResolveArmedFlag = { [weak self] in
             return self?.flag(sessionId: sessionId, key: "markup_events_armed")?.asBool == true
         }
@@ -662,6 +714,22 @@ final class SessionManager: NSObject {
             return []
         }
         return p.strokes
+    }
+
+    /// Read the active panel's current WebView scroll position so the
+    /// overlay re-anchors loaded strokes against it. Returns zero for
+    /// non-WebView renderers (ImageRenderer) — scroll-following is a
+    /// WebView-only feature today.
+    private func resolveActivePanelScroll(sessionId: String,
+                                          hudId: UUID,
+                                          panel: String) -> NSPoint {
+        guard let session = sessions[sessionId],
+              let hud = session.huds.first(where: { $0.id == hudId }),
+              let p = hud.panels.first(where: { $0.name == panel }),
+              let web = p.renderer as? WebViewPanelRenderer else {
+            return .zero
+        }
+        return web.currentScroll
     }
 
     /// Draw mode toggled on/off — fan the signal out to the active

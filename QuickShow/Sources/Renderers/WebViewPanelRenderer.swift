@@ -51,12 +51,23 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
     private(set) var webView: WKWebView!
     private let messageHandler = ScriptMessageRelay()
     private let markupHandler = ScriptMessageRelay()
+    private let scrollHandler = ScriptMessageRelay()
 
     /// Hooked by `SessionManager` at panel creation time. Fired when a
     /// markup-capable panel's WebView posts `{action, ...}` on the
     /// `markupEvent` bridge. The closure already knows session + panel
     /// name, so the renderer stays content-agnostic.
     var onMarkupEvent: ((MarkupAction) -> Void)?
+
+    /// Fired when the WebView's content scrolls. The markup overlay
+    /// uses this to keep already-drawn strokes anchored to the
+    /// content beneath them.
+    var onScrollChanged: ((NSPoint) -> Void)?
+
+    /// Latest scroll position reported by the page (CSS px, X + Y-down).
+    /// Updated synchronously when the JS bridge fires; new strokes
+    /// captured against this value.
+    private(set) var currentScroll: NSPoint = .zero
 
     private var pendingRender: CheckedContinuation<RenderResult, Error>?
     private var readyWaiters: [CheckedContinuation<Void, Error>] = []
@@ -81,6 +92,41 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
             self?.handleMarkupBridgeMessage(body)
         }
         controller.add(markupHandler, name: "markupEvent")
+        scrollHandler.onMessage = { [weak self] body in
+            self?.handleScrollBridgeMessage(body)
+        }
+        controller.add(scrollHandler, name: "scrollEvent")
+        // Inject a passive scroll listener into every loaded page so
+        // we don't have to modify the bundled templates (and so
+        // show_html's agent-supplied HTML benefits automatically).
+        // The script posts the current scrollX/scrollY back via the
+        // `scrollEvent` bridge. Initial emit fires on DOMContentLoaded
+        // so we have a real value before the user can draw.
+        let scrollScript = WKUserScript(
+            source: """
+            (function(){
+              var post = function(){
+                try {
+                  var de = document.documentElement;
+                  var b = document.body || de;
+                  window.webkit.messageHandlers.scrollEvent.postMessage({
+                    x: window.scrollX || de.scrollLeft || b.scrollLeft || 0,
+                    y: window.scrollY || de.scrollTop || b.scrollTop || 0
+                  });
+                } catch(e) {}
+              };
+              window.addEventListener('scroll', post, { passive: true });
+              if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', post);
+              } else {
+                post();
+              }
+            })();
+            """,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true
+        )
+        controller.addUserScript(scrollScript)
         config.userContentController = controller
 
         let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: config)
@@ -187,6 +233,19 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
     /// `testInvokeBridge` but routes through the `markupEvent` channel.
     func testInvokeMarkupBridge(_ payload: [String: Any]) {
         handleMarkupBridgeMessage(payload)
+    }
+
+    /// Parse a `{x, y}` scroll payload from the injected listener,
+    /// update the cached scroll position, and fan out to
+    /// `onScrollChanged` so the markup overlay re-renders strokes
+    /// against the new scroll position.
+    private func handleScrollBridgeMessage(_ body: Any) {
+        guard let dict = body as? [String: Any] else { return }
+        let x = (dict["x"] as? NSNumber)?.doubleValue ?? 0
+        let y = (dict["y"] as? NSNumber)?.doubleValue ?? 0
+        let p = NSPoint(x: x, y: y)
+        currentScroll = p
+        onScrollChanged?(p)
     }
 
     /// Parse a payload from the `markupEvent` bridge and fan it out to

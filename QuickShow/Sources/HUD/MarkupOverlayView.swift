@@ -16,10 +16,19 @@ final class MarkupOverlayView: NSView {
     /// many segments it contains. Not `Sendable` — NSBezierPath isn't,
     /// and we deliberately keep strokes on the MainActor where the
     /// owning Panel + overlay live.
+    ///
+    /// `anchorScroll` is the WebView's scroll position (CSS pixels, X
+    /// + Y-down) AT THE MOMENT THE STROKE WAS DRAWN. The path's points
+    /// are in viewport-local overlay coords (Cocoa Y-up) at that same
+    /// moment. When `currentScroll` differs from `anchorScroll`, the
+    /// overlay translates the stroke during rendering so it tracks the
+    /// content beneath it: scroll down → content moves up → stroke
+    /// moves up by the same amount.
     struct Stroke {
         var path: NSBezierPath
         var color: NSColor
         var width: CGFloat
+        var anchorScroll: NSPoint = .zero
     }
 
     /// Visual defaults — single-color freehand for v0.1.
@@ -59,6 +68,13 @@ final class MarkupOverlayView: NSView {
         }
     }
 
+    /// The current scroll position of the underlying renderer
+    /// (CSS pixels, X + Y-down). Updated by the host whenever the
+    /// renderer's WebView reports a scroll event. Used to translate
+    /// stored strokes so they appear anchored to the content under
+    /// them rather than fixed to the screen.
+    private(set) var currentScroll: NSPoint = .zero
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
@@ -79,6 +95,18 @@ final class MarkupOverlayView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         if isPassthrough { return nil }
         return super.hitTest(point)
+    }
+
+    /// In draw mode (overlay capturing input), absorb scroll wheel
+    /// events so the WebView below stays frozen — strokes captured
+    /// during scroll would visually drift from the cursor. Matches
+    /// the "content is suspended while drawing" mental model
+    /// already enforced by `suspendInteraction()` for panzoom.
+    /// In pass-through mode, `hitTest` returns nil so this method
+    /// isn't even routed to us; the WebView gets scroll wheel
+    /// directly, as expected.
+    override func scrollWheel(with event: NSEvent) {
+        // intentional no-op while we have input focus
     }
 
     /// Crosshair cursor only while we're capturing input (draw mode).
@@ -135,36 +163,63 @@ final class MarkupOverlayView: NSView {
         onStrokesChanged?()
     }
 
+    /// Update the cached scroll position of the underlying renderer.
+    /// Called by the host whenever the WebView posts a scroll event.
+    /// Triggers a redraw so existing strokes shift to stay anchored
+    /// to their content.
+    func setCurrentScroll(_ scroll: NSPoint) {
+        guard scroll != currentScroll else { return }
+        currentScroll = scroll
+        needsDisplay = true
+    }
+
     // MARK: - Drawing
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         for stroke in strokes {
-            stroke.color.setStroke()
-            stroke.path.lineWidth = stroke.width
-            stroke.path.lineCapStyle = .round
-            stroke.path.lineJoinStyle = .round
-            stroke.path.stroke()
+            drawStroke(stroke)
         }
         if let current = currentStroke {
-            current.color.setStroke()
-            current.path.lineWidth = current.width
-            current.path.lineCapStyle = .round
-            current.path.lineJoinStyle = .round
-            current.path.stroke()
+            drawStroke(current)
         }
+    }
+
+    /// Draw one stroke with its scroll-following translation applied.
+    /// `dx = anchor.x - current.x` (so a scroll-right shifts the
+    /// stroke left), and `dy = current.y - anchor.y` because overlay
+    /// space is Y-up while scroll is reported Y-down — a positive
+    /// scroll delta moves content up, which is +Y in overlay coords.
+    private func drawStroke(_ stroke: Stroke) {
+        NSGraphicsContext.current?.saveGraphicsState()
+        defer { NSGraphicsContext.current?.restoreGraphicsState() }
+        let dx = stroke.anchorScroll.x - currentScroll.x
+        let dy = currentScroll.y - stroke.anchorScroll.y
+        let xform = NSAffineTransform()
+        xform.translateX(by: dx, yBy: dy)
+        xform.concat()
+        stroke.color.setStroke()
+        stroke.path.lineWidth = stroke.width
+        stroke.path.lineCapStyle = .round
+        stroke.path.lineJoinStyle = .round
+        stroke.path.stroke()
     }
 
     // MARK: - Mouse handling
 
     override func mouseDown(with event: NSEvent) {
+        // The mouseDown point is in window coords; convert to local.
+        // We also snapshot the scroll *now* so the stroke remembers
+        // where in the document it was drawn, even if the user
+        // scrolls before mouseUp.
         let point = convert(event.locationInWindow, from: nil)
         let path = NSBezierPath()
         path.move(to: point)
         currentStroke = Stroke(
             path: path,
             color: Self.defaultColor,
-            width: Self.defaultWidth
+            width: Self.defaultWidth,
+            anchorScroll: currentScroll
         )
         isCurrentlyDragging = true
         needsDisplay = true
