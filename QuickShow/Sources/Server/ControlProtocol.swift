@@ -5,7 +5,7 @@ import Foundation
 // same commit.
 //
 // Envelope shape (per PRD § "Wire-protocol envelope"):
-//   sidecar → app:  {"id", "kind":"hello|ping|upsert|close|list|inspect", ...}
+//   sidecar → app:  {"id", "kind":"hello|ping|upsert|close|list|inspect|set_session_flag", ...}
 //   app → sidecar:  {"id", "kind":"ok|render_error|protocol_error", ...}
 //
 // The discriminator and payload fields are flat at the same level;
@@ -201,4 +201,57 @@ struct InspectRequest: Decodable {
     let kind: String
     let session: String
     let name: String
+}
+
+/// `kind: "set_session_flag"` — set a per-session flag on the app. The
+/// first consumer is `markup_events_armed`, gating the HUD's Send
+/// button on markup-capable panels. The value column accepts bool /
+/// string / number / null to keep the verb generic for future flags.
+struct SetSessionFlagRequest: Decodable {
+    let id: String?
+    let kind: String
+    let session: String
+    let key: String
+    let value: SessionFlagValue
+}
+
+/// Loose-typed value column for `set_session_flag`. Decoded into the
+/// app's `[String: AnyHashable]` flag dictionary.
+enum SessionFlagValue: Decodable, Hashable {
+    case bool(Bool)
+    case string(String)
+    case number(Double)
+    case null
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() {
+            self = .null
+        } else if let b = try? c.decode(Bool.self) {
+            self = .bool(b)
+        } else if let n = try? c.decode(Double.self) {
+            self = .number(n)
+        } else if let s = try? c.decode(String.self) {
+            self = .string(s)
+        } else {
+            throw DecodingError.dataCorruptedError(
+                in: c,
+                debugDescription: "expected bool, number, string, or null"
+            )
+        }
+    }
+
+    var asAny: AnyHashable {
+        switch self {
+        case .bool(let b): return AnyHashable(b)
+        case .string(let s): return AnyHashable(s)
+        case .number(let n): return AnyHashable(n)
+        case .null: return AnyHashable("")
+        }
+    }
+
+    var asBool: Bool? {
+        if case .bool(let b) = self { return b }
+        return nil
+    }
 }

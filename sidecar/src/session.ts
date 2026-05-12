@@ -16,6 +16,38 @@ const SESSIONS_DIR = path.join(
   "Library/Application Support/QuickShow/sessions",
 );
 
+/// Mirror of `MarkupPaths` on the Swift side. Both sides derive the
+/// same on-disk layout from `sessionId` (and an optional
+/// `QUICKSHOW_EVENTS_DIR` override) so we don't have to negotiate paths
+/// over the control protocol.
+function markupBaseDir(): string {
+  const override = process.env.QUICKSHOW_EVENTS_DIR;
+  if (override && override.length > 0) return override;
+  return path.join(os.homedir(), "Library/Caches/QuickShow/events");
+}
+
+export function markupSessionDir(sessionId: string): string {
+  return path.join(markupBaseDir(), sessionId);
+}
+
+export function markupEventsLog(sessionId: string): string {
+  return path.join(markupSessionDir(sessionId), "events.ndjson");
+}
+
+export function markupArtifactsDir(sessionId: string): string {
+  return path.join(markupSessionDir(sessionId), "artifacts");
+}
+
+export function markupArtifactPath(sessionId: string, artifactId: string): string {
+  return path.join(markupArtifactsDir(sessionId), `${artifactId}.png`);
+}
+
+/** Ensure per-session events + artifacts dirs exist. */
+export function ensureMarkupDirs(sessionId: string): void {
+  fs.mkdirSync(markupSessionDir(sessionId), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(markupArtifactsDir(sessionId), { recursive: true, mode: 0o700 });
+}
+
 /** Compute a stable hash from the sidecar's invocation context. */
 function configHash(): string {
   const parts = [process.cwd(), process.env.MCP_CLIENT_ID ?? "", process.argv0 ?? ""];

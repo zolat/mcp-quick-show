@@ -39,6 +39,14 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
 
     private(set) var webView: WKWebView!
     private let messageHandler = ScriptMessageRelay()
+    private let markupHandler = ScriptMessageRelay()
+
+    /// Hooked by `SessionManager` at panel creation time. Fired when a
+    /// markup-capable panel's WebView posts `{action, ...}` on the
+    /// `markupEvent` bridge. The closure already knows session + panel
+    /// name, so the renderer stays content-agnostic.
+    var onMarkupEvent: ((MarkupAction) -> Void)?
+
     private var pendingRender: CheckedContinuation<RenderResult, Error>?
     private var readyWaiters: [CheckedContinuation<Void, Error>] = []
     private enum LoadState { case loading, ready, failed(Error) }
@@ -58,6 +66,10 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
             self?.handleBridgeMessage(body)
         }
         controller.add(messageHandler, name: "renderComplete")
+        markupHandler.onMessage = { [weak self] body in
+            self?.handleMarkupBridgeMessage(body)
+        }
+        controller.add(markupHandler, name: "markupEvent")
         config.userContentController = controller
 
         let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: config)
@@ -150,6 +162,36 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
     /// JS-side button click.
     func testInvokeBridge(_ payload: [String: Any]) {
         handleBridgeMessage(payload)
+    }
+
+    /// Test-only hook for the markup bridge — same purpose as
+    /// `testInvokeBridge` but routes through the `markupEvent` channel.
+    func testInvokeMarkupBridge(_ payload: [String: Any]) {
+        handleMarkupBridgeMessage(payload)
+    }
+
+    /// Parse a payload from the `markupEvent` bridge and fan it out to
+    /// `onMarkupEvent`. Two shapes are accepted:
+    ///   `{action: "send", png_base64: "<base64 PNG>"}`
+    ///   `{action: "dismiss"}`
+    /// Anything else is silently ignored — the renderer is content-agnostic
+    /// and shouldn't crash on an unknown action.
+    private func handleMarkupBridgeMessage(_ body: Any) {
+        guard let dict = body as? [String: Any],
+              let action = dict["action"] as? String else { return }
+        switch action {
+        case "send":
+            guard let b64 = dict["png_base64"] as? String,
+                  let bytes = Data(base64Encoded: b64) else {
+                NSLog("QuickShow: markupEvent send missing/invalid png_base64")
+                return
+            }
+            onMarkupEvent?(.send(pngBytes: bytes))
+        case "dismiss":
+            onMarkupEvent?(.dismiss)
+        default:
+            NSLog("QuickShow: markupEvent unknown action '\(action)'")
+        }
     }
 
     private func handleBridgeMessage(_ body: Any) {
@@ -297,6 +339,17 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
             decisionHandler(.cancel)
         }
     }
+}
+
+// MARK: - Markup action
+
+/// One markup event posted from the WebView. `send` carries the
+/// flattened PNG bytes (already base64-decoded); `dismiss` carries no
+/// payload. The renderer hands these straight to `onMarkupEvent`; the
+/// session layer turns them into NDJSON log lines + on-disk artifacts.
+enum MarkupAction: Sendable {
+    case send(pngBytes: Data)
+    case dismiss
 }
 
 // MARK: - Bridge message relay

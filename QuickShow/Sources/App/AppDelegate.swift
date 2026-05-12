@@ -40,6 +40,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_PANZOOM"] == "1" {
             runPanZoomSmoke()
         }
+        if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_MARKUP"] == "1" {
+            runMarkupSmoke()
+        }
+    }
+
+    /// Headless markup test. Renders a markdown panel, drives both the
+    /// send and dismiss paths of the `markupEvent` bridge, and logs the
+    /// resulting events-log content + artifact presence so a shell test
+    /// can grep for the expected lines and bytes.
+    private func runMarkupSmoke() {
+        Task {
+            do {
+                // Set session flag the way the sidecar would.
+                let session = "markup-smoke"
+                sessionManager.setFlag(
+                    sessionId: session,
+                    key: "markup_events_armed",
+                    value: .bool(true)
+                )
+                NSLog("QuickShow: TEST_MARKUP step=armed flag=\(sessionManager.flag(sessionId: session, key: "markup_events_armed").map(String.init(describing:)) ?? "nil")")
+
+                _ = try await sessionManager.upsert(
+                    sessionId: session,
+                    name: "diagram",
+                    contentType: "markdown",
+                    form: "inline",
+                    body: "# circle the bug\n\n- thing\n- other thing\n"
+                )
+
+                guard let s = sessionManager.sessions[session],
+                      let panel = s.huds.first?.panels.first,
+                      let web = panel.renderer as? WebViewPanelRenderer else {
+                    NSLog("QuickShow: TEST_MARKUP failed: renderer missing")
+                    return
+                }
+
+                // 1x1 transparent PNG.
+                let png: [UInt8] = [
+                    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+                    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+                    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+                    0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+                    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41,
+                    0x54, 0x78, 0x9c, 0x62, 0x00, 0x01, 0x00, 0x00,
+                    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+                    0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+                    0x42, 0x60, 0x82,
+                ]
+                let b64 = Data(png).base64EncodedString()
+                web.testInvokeMarkupBridge(["action": "send", "png_base64": b64])
+                // Same panel, dismiss path.
+                web.testInvokeMarkupBridge(["action": "dismiss"])
+
+                // Give the writer queue a tick.
+                try await Task.sleep(nanoseconds: 200_000_000)
+
+                let log = MarkupPaths.eventsLog(session)
+                let content = (try? String(contentsOf: log, encoding: .utf8)) ?? ""
+                NSLog("QuickShow: TEST_MARKUP events_log_lines=\(content.split(separator: "\n").count)")
+                let lines = content.split(separator: "\n").map(String.init)
+                for (i, line) in lines.enumerated() {
+                    NSLog("QuickShow: TEST_MARKUP line[\(i)]=\(line)")
+                }
+
+                // Verify an artifact landed.
+                let artifactsDir = MarkupPaths.artifactsDir(session)
+                let artifacts = (try? FileManager.default.contentsOfDirectory(atPath: artifactsDir.path)) ?? []
+                let pngs = artifacts.filter { $0.hasSuffix(".png") }
+                NSLog("QuickShow: TEST_MARKUP artifacts_dir=\(artifactsDir.path) png_count=\(pngs.count)")
+                if let first = pngs.first {
+                    let size = (try? Data(contentsOf: artifactsDir.appendingPathComponent(first)).count) ?? -1
+                    NSLog("QuickShow: TEST_MARKUP first_artifact=\(first) bytes=\(size)")
+                }
+
+                sessionManager.closeAllPanels(in: session)
+                NSLog("QuickShow: TEST_MARKUP done")
+            } catch {
+                NSLog("QuickShow: TEST_MARKUP failed: \(error)")
+            }
+        }
     }
 
     /// Headless pan/zoom test. Renders a mermaid panel + an image

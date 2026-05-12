@@ -35,6 +35,12 @@ final class SessionManager: NSObject {
         var huds: [HUDInstance] = []
         var orphanTimerTask: Task<Void, Never>?
         var orphaned: Bool = false
+        /// Generic per-session flags driven by the `set_session_flag`
+        /// control verb. First consumer: `markup_events_armed`.
+        var flags: [String: SessionFlagValue] = [:]
+        /// Lazy NDJSON writer for markup events. Created on first
+        /// emit; the file lives at `MarkupPaths.eventsLog(sessionId)`.
+        lazy var eventWriter: EventLogWriter = EventLogWriter(sessionId: id)
 
         init(id: String, cascadeIndex: Int) {
             self.id = id
@@ -148,6 +154,7 @@ final class SessionManager: NSObject {
             }
             let view = renderer.makeView()
             let newPanel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
+            wireMarkupCallback(renderer: renderer, sessionId: sessionId, panelName: name)
             let idx = hud.panels.firstIndex(where: { $0.name == name })!
             hud.panels[idx] = newPanel
             hud.window.installPanel(name: name, view: view)
@@ -166,11 +173,28 @@ final class SessionManager: NSObject {
         }
         let view = renderer.makeView()
         let panel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
+        wireMarkupCallback(renderer: renderer, sessionId: sessionId, panelName: name)
         primary.panels.append(panel)
         primary.window.installPanel(name: name, view: view)
         return try await renderPanel(panel: panel, hud: primary,
                                      name: name, contentType: contentType,
                                      form: form, body: body)
+    }
+
+    /// Hook a WebView-based renderer's `markupEvent` bridge so user
+    /// actions on the panel turn into NDJSON events + on-disk artifacts.
+    /// No-op for image renderers (no markup surface).
+    private func wireMarkupCallback(renderer: any PanelRenderer, sessionId: String, panelName: String) {
+        guard let web = renderer as? WebViewPanelRenderer else { return }
+        web.onMarkupEvent = { [weak self] action in
+            guard let self = self else { return }
+            switch action {
+            case .send(let pngBytes):
+                _ = self.recordMarkupSent(sessionId: sessionId, panel: panelName, pngBytes: pngBytes)
+            case .dismiss:
+                self.recordMarkupDismissed(sessionId: sessionId, panel: panelName)
+            }
+        }
     }
 
     private func renderPanel(panel: Panel,
@@ -247,6 +271,59 @@ final class SessionManager: NSObject {
         let snapshot = try await panel.renderer.snapshot()
         let size = hud.window.frame.size
         return (RenderResult(width: Double(size.width), height: Double(size.height)), snapshot)
+    }
+
+    // MARK: - Flags
+
+    /// Set a generic per-session flag. The session is auto-created if
+    /// not yet known; this matches `upsert`'s behaviour so the sidecar
+    /// can arm flags before its first render call lands.
+    func setFlag(sessionId: String, key: String, value: SessionFlagValue) {
+        let session = ensureSession(sessionId)
+        session.flags[key] = value
+        NSLog("QuickShow: session \(sessionId) flag \(key) = \(value)")
+        NotificationCenter.default.post(
+            name: .quickShowSessionFlagChanged,
+            object: nil,
+            userInfo: ["sessionId": sessionId, "key": key]
+        )
+    }
+
+    /// Read a per-session flag. Returns `nil` if unset or session unknown.
+    func flag(sessionId: String, key: String) -> SessionFlagValue? {
+        sessions[sessionId]?.flags[key]
+    }
+
+    // MARK: - Markup events
+
+    /// Persist a flattened markup PNG into the session's artifacts dir
+    /// and append a `markup_sent` line to its events log. Returns the
+    /// generated artifact id (which the sidecar later resolves via
+    /// `get_markup`). Errors surface as a `nil` return + NSLog so the
+    /// renderer can decide how loud to be — the JS bridge already
+    /// considers the press "delivered" once it hands off the PNG.
+    @discardableResult
+    func recordMarkupSent(sessionId: String, panel: String, pngBytes: Data) -> String? {
+        let session = ensureSession(sessionId)
+        let artifactId = UUID().uuidString.lowercased()
+        do {
+            try MarkupPaths.ensureDirs(sessionId)
+            try pngBytes.write(to: MarkupPaths.artifact(sessionId, id: artifactId))
+        } catch {
+            NSLog("QuickShow: recordMarkupSent failed to write artifact: \(error)")
+            return nil
+        }
+        session.eventWriter.emitMarkupSent(panel: panel, artifact: artifactId)
+        NSLog("QuickShow: markup_sent session=\(sessionId) panel=\(panel) artifact=\(artifactId)")
+        return artifactId
+    }
+
+    /// Emit a `markup_dismissed` line for a panel that was closed
+    /// without sending. No artifact is written.
+    func recordMarkupDismissed(sessionId: String, panel: String) {
+        let session = ensureSession(sessionId)
+        session.eventWriter.emitMarkupDismissed(panel: panel)
+        NSLog("QuickShow: markup_dismissed session=\(sessionId) panel=\(panel)")
     }
 
     func list(sessionId: String) -> [PanelDescriptor] {
@@ -664,4 +741,12 @@ struct PanelDescriptor: Sendable {
 struct RenderFailureWithSnapshot: Error {
     let failure: RenderFailure
     let snapshot: Data
+}
+
+extension Notification.Name {
+    /// Posted after a per-session flag changes (e.g. via the
+    /// `set_session_flag` control verb). userInfo carries `sessionId`
+    /// and `key`. HUD UI (Send button gating) subscribes to refresh
+    /// when relevant flags flip.
+    static let quickShowSessionFlagChanged = Notification.Name("QuickShowSessionFlagChanged")
 }

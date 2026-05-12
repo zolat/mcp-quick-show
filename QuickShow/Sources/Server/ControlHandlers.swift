@@ -23,6 +23,8 @@ enum ControlHandlers {
                 return try encode(try handleList(req: req, delegate: delegate))
             case "inspect":
                 return try await handleInspect(req: req, delegate: delegate)
+            case "set_session_flag":
+                return try encode(try handleSetSessionFlag(req: req, delegate: delegate))
             default:
                 return try encode(ControlProtocolError(
                     id: req.id,
@@ -130,6 +132,18 @@ enum ControlHandlers {
                       height: panel.height)
         }
         return ControlOk(id: req.id, result: infos)
+    }
+
+    // MARK: - set_session_flag
+
+    private static func handleSetSessionFlag(req: ControlRequest, delegate: AppDelegate?) throws -> ControlOk {
+        let payload = try req.decodePayload(SetSessionFlagRequest.self)
+        delegate?.sessionManager.setFlag(
+            sessionId: payload.session,
+            key: payload.key,
+            value: payload.value
+        )
+        return ControlOk(id: req.id, result: EmptyOk())
     }
 
     // MARK: - inspect

@@ -13,14 +13,22 @@ import {
 import { SocketClient, DEFAULT_SOCKET_PATH } from "./socket.ts";
 import { getOrCreateSessionId } from "./session.ts";
 import { locateAppBundle, launchAndWaitFor } from "./autolaunch.ts";
-import { allHandlers, findHandler } from "./handlers/registry.ts";
+import {
+  allHandlers,
+  findHandler,
+  allRawHandlers,
+  findRawHandler,
+} from "./handlers/registry.ts";
 
 // Side-effect import: each handler module calls `registerHandler()`
-// on load. Adding a new type is a single import line here.
+// (upsert-style) or `registerRawHandler()` (own-call) on load. Adding a
+// new tool is a single import line here.
 import "./handlers/markdown.ts";
 import "./handlers/svg.ts";
 import "./handlers/mermaid.ts";
 import "./handlers/image.ts";
+import "./handlers/enableMarkupEvents.ts";
+import "./handlers/getMarkup.ts";
 
 async function ensureConnected(client: SocketClient): Promise<void> {
   try {
@@ -83,16 +91,28 @@ async function main() {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-      tools: allHandlers().map((h) => ({
-        name: h.toolName,
-        description: h.description,
-        inputSchema: h.inputSchema,
-      })),
-    };
+    const upsertTools = allHandlers().map((h) => ({
+      name: h.toolName,
+      description: h.description,
+      inputSchema: h.inputSchema,
+    }));
+    const rawTools = allRawHandlers().map((h) => ({
+      name: h.toolName,
+      description: h.description,
+      inputSchema: h.inputSchema,
+    }));
+    return { tools: [...upsertTools, ...rawTools] };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const args = (request.params.arguments ?? {}) as Record<string, unknown>;
+
+    // Raw handlers own their full call flow (own MCP CallToolResult).
+    const rawHandler = findRawHandler(request.params.name);
+    if (rawHandler) {
+      return rawHandler.call(args, { client, sessionId });
+    }
+
     const handler = findHandler(request.params.name);
     if (!handler) {
       return {
@@ -100,7 +120,6 @@ async function main() {
         isError: true,
       } as CallToolResult;
     }
-    const args = (request.params.arguments ?? {}) as Record<string, unknown>;
     const validation = await handler.validate(args);
     if (!validation.ok) {
       return {
