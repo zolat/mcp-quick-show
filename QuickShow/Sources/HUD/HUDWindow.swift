@@ -167,6 +167,14 @@ final class HUDWindow: NSWindow {
         titleBar.setTitle(name)
     }
 
+    /// Show or hide the "session ended" badge on the title bar.
+    /// Called by the SessionManager when a sidecar disconnects past
+    /// the reconnect-grace window, or when the same-UUID sidecar
+    /// reconnects (cleared).
+    func setSessionEnded(_ ended: Bool) {
+        titleBar.setSessionEnded(ended)
+    }
+
     /// Resize the window to fit the rendered content, capped at the
     /// initial-size limits. Keeps the top-right corner anchored so
     /// the cascade position doesn't drift on each update.

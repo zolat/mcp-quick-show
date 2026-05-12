@@ -2,8 +2,12 @@ import Darwin
 import Foundation
 
 // AF_UNIX SOCK_STREAM listener that speaks NDJSON. Adapted from
-// PipAnything's ControlServer.swift — same lifecycle and accept loop,
-// QuickShow-specific verbs in ControlHandlers.
+// PipAnything's ControlServer.swift — same accept-loop shape;
+// QuickShow-specific verbs are dispatched by ControlHandlers.
+//
+// Phase 4 addition: track which connection owns each session_id so
+// the SessionManager learns about sidecar disconnects (which start
+// the 60 s orphan grace window).
 //
 // Lifetime: started from AppDelegate.applicationDidFinishLaunching;
 // stopped from applicationWillTerminate. Stale socket files are
@@ -24,6 +28,11 @@ final class ControlServer {
     )
     private var listenFD: Int32 = -1
     private var listenSource: DispatchSourceRead?
+
+    /// fd → session_id, populated when a `hello` arrives over that
+    /// connection. Used so the per-connection serve loop can tell
+    /// the SessionManager which session disconnected.
+    private var sessionByFD: [Int32: String] = [:]
 
     weak var appDelegate: AppDelegate?
 
@@ -100,7 +109,21 @@ final class ControlServer {
             listenFD = -1
         }
         unlink(socketPath)
+        sessionByFD.removeAll()
         NSLog("QuickShow: control server stopped")
+    }
+
+    // MARK: - Session tracking (called by handlers + serve loop)
+
+    func attachSession(_ sessionId: String, toFD fd: Int32) {
+        sessionByFD[fd] = sessionId
+    }
+
+    func connectionClosed(fd: Int32) {
+        if let sessionId = sessionByFD.removeValue(forKey: fd) {
+            appDelegate?.sessionManager.sidecarDisconnected(sessionId: sessionId)
+            NSLog("QuickShow: connection closed for session \(sessionId)")
+        }
     }
 
     // MARK: - I/O (nonisolated; runs off the main actor)
@@ -120,7 +143,14 @@ final class ControlServer {
         fd: Int32,
         server: WeakRef<ControlServer>
     ) async {
-        defer { Darwin.close(fd) }
+        defer {
+            Darwin.close(fd)
+            // Notify on the main actor that this connection's session
+            // (if any) just dropped.
+            Task { @MainActor in
+                server.value?.connectionClosed(fd: fd)
+            }
+        }
         var pending = Data()
         var readBuf = [UInt8](repeating: 0, count: 4096)
         while true {
@@ -149,6 +179,13 @@ final class ControlServer {
             let encoded = await Task { @MainActor in
                 guard let srv = server.value else {
                     return try? encodeProtocolError(id: req.id, error: "server stopped")
+                }
+                // For hello messages, bind the session to this FD so
+                // the disconnect notification later finds the right
+                // session id.
+                if req.kind == "hello",
+                   let hello = try? req.decodePayload(HelloRequest.self) {
+                    srv.attachSession(hello.sessionId, toFD: fd)
                 }
                 return await ControlHandlers.dispatch(req, delegate: srv.appDelegate)
             }.value

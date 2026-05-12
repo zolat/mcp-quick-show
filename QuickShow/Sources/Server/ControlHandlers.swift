@@ -14,7 +14,7 @@ enum ControlHandlers {
             case "ping":
                 return try encode(handlePing(req: req))
             case "hello":
-                return try encode(try handleHello(req: req))
+                return try encode(try handleHelloWithDelegate(req: req, delegate: delegate))
             case "upsert":
                 return try await handleUpsert(req: req, delegate: delegate)
             case "close":
@@ -52,8 +52,17 @@ enum ControlHandlers {
     // MARK: - hello
 
     private static func handleHello(req: ControlRequest) throws -> ControlOk {
+        return try handleHelloWithDelegate(req: req, delegate: nil)
+    }
+
+    /// Variant that registers the session with the delegate's
+    /// `SessionManager` so cascade indexes are reserved at hello time
+    /// (and any pending orphan timer for the same UUID is cancelled).
+    /// Plumbing routes through `dispatch` below.
+    private static func handleHelloWithDelegate(req: ControlRequest, delegate: AppDelegate?) throws -> ControlOk {
         let payload = try req.decodePayload(HelloRequest.self)
         NSLog("QuickShow: hello from session=\(payload.sessionId) client=\(payload.client ?? "?")")
+        delegate?.sessionManager.registerSession(payload.sessionId)
         return ControlOk(id: req.id, result: HelloResult(
             version: ControlProtocol.version,
             pid: getpid()

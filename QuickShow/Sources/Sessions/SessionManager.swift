@@ -1,21 +1,38 @@
 import Cocoa
 
-/// Tracks panels per session. Phase 3: per-session HUD, multi-panel
-/// per HUD (tab-strip switchable). Same-name `upsert` updates in
-/// place; different-name `upsert` opens a new tab.
+/// Tracks panels per session. Phase 3: multi-panel per HUD.
+/// Phase 4: orphan-on-disconnect with a 60 s same-UUID reconnect
+/// window, then a persistent "session ended" badge.
 @MainActor
 final class SessionManager {
+    /// Reconnect grace window. A sidecar that drops and reconnects
+    /// with the same `session_id` inside this window reattaches
+    /// silently; after it expires the badge is visible.
+    /// Overridable via `QUICKSHOW_RECONNECT_GRACE_SECONDS` for tests.
+    static var reconnectGraceSeconds: TimeInterval {
+        if let raw = ProcessInfo.processInfo.environment["QUICKSHOW_RECONNECT_GRACE_SECONDS"],
+           let v = Double(raw), v > 0 {
+            return v
+        }
+        return 60
+    }
+
     private let renderers: RendererRegistry
 
-    /// One MCP-session's worth of state: a HUD window + the ordered
-    /// list of panels currently in it.
+    /// One MCP-session's worth of state.
     final class SessionState {
         let id: String
         var hud: HUDWindow?
         var panels: [Panel] = []
-        /// Cascade index assigned at creation, stable across panel
-        /// adds / removes so the HUD doesn't jump if siblings close.
         let cascadeIndex: Int
+        /// `nil` when the sidecar is currently connected; populated
+        /// when it disconnects with a Task that fires the "session
+        /// ended" badge after `reconnectGraceSeconds`.
+        var orphanTimerTask: Task<Void, Never>?
+        /// True once the grace window has fully elapsed. The badge is
+        /// visible; further upserts from a new sidecar with the same
+        /// UUID still work (treated as a reconnect).
+        var orphaned: Bool = false
 
         init(id: String, cascadeIndex: Int) {
             self.id = id
@@ -45,19 +62,56 @@ final class SessionManager {
         self.renderers = renderers
     }
 
+    // MARK: - Session lifecycle
+
     /// Register a session on `hello`. Reserves a cascade index even
-    /// before any panels open so the first HUD lands in a stable
-    /// position regardless of registration / open order.
+    /// before any panels open. If the session already exists (e.g.
+    /// a reconnect), cancels any pending orphan timer and clears the
+    /// badge.
     func registerSession(_ sessionId: String) {
-        if sessions[sessionId] == nil {
-            let idx = sessionsRegisteredOrder
-            sessionsRegisteredOrder += 1
-            sessions[sessionId] = SessionState(id: sessionId, cascadeIndex: idx)
+        if let existing = sessions[sessionId] {
+            // Reconnect path: cancel any pending orphan timer, clear
+            // the badge if it was set, keep the HUD + panels in place.
+            existing.orphanTimerTask?.cancel()
+            existing.orphanTimerTask = nil
+            if existing.orphaned {
+                existing.orphaned = false
+                existing.hud?.setSessionEnded(false)
+                NSLog("QuickShow: session \(sessionId) reattached (orphan badge cleared)")
+            }
+            return
+        }
+        let idx = sessionsRegisteredOrder
+        sessionsRegisteredOrder += 1
+        sessions[sessionId] = SessionState(id: sessionId, cascadeIndex: idx)
+    }
+
+    /// Called by `ControlServer` when a sidecar connection drops.
+    /// Starts the grace-window timer; if `registerSession` arrives
+    /// for the same UUID before the timer fires, the timer is
+    /// cancelled. Otherwise the HUD gets the badge and stays put.
+    func sidecarDisconnected(sessionId: String) {
+        guard let session = sessions[sessionId] else { return }
+        // If there's no HUD, nothing user-visible to orphan.
+        guard session.hud != nil else { return }
+        // Replace any in-flight orphan timer (multiple rapid drops).
+        session.orphanTimerTask?.cancel()
+        let grace = Self.reconnectGraceSeconds
+        session.orphanTimerTask = Task { [weak self, weak session] in
+            try? await Task.sleep(nanoseconds: UInt64(grace * 1_000_000_000))
+            if Task.isCancelled { return }
+            await MainActor.run {
+                guard let self = self, let session = session,
+                      self.sessions[session.id] === session else { return }
+                session.orphaned = true
+                session.hud?.setSessionEnded(true)
+                NSLog("QuickShow: session \(session.id) orphan grace expired — badge visible")
+            }
         }
     }
 
-    /// Render content into the named slot. Returns the render result
-    /// + a PNG snapshot. Errors propagate as `RenderFailureWithSnapshot`.
+    // MARK: - Panel verbs
+
     func upsert(sessionId: String,
                 name: String,
                 contentType: String,
@@ -65,7 +119,6 @@ final class SessionManager {
                 body: String) async throws -> (RenderResult, Data) {
         let session = ensureSession(sessionId)
 
-        // Ensure HUD exists.
         let hud: HUDWindow
         if let existing = session.hud {
             hud = existing
@@ -91,7 +144,6 @@ final class SessionManager {
             if existing.contentType == contentType {
                 panel = existing
             } else {
-                // Same name, different type → swap the renderer.
                 hud.removePanel(name)
                 guard let renderer = renderers.make(forContentType: contentType) else {
                     throw RenderFailure(
@@ -107,7 +159,6 @@ final class SessionManager {
                 panel = newPanel
             }
         } else {
-            // New panel.
             guard let renderer = renderers.make(forContentType: contentType) else {
                 throw RenderFailure(
                     message: "no renderer registered for content_type '\(contentType)'",
@@ -136,9 +187,6 @@ final class SessionManager {
         }
     }
 
-    /// Close the named slot. If it was the last panel, tear down the
-    /// HUD; if it was the active panel, switch to the next-most-
-    /// recently-added remaining panel.
     func close(sessionId: String, name: String) {
         guard let session = sessions[sessionId] else { return }
         guard let idx = session.panels.firstIndex(where: { $0.name == name }) else { return }
@@ -152,15 +200,12 @@ final class SessionManager {
         }
         session.hud?.updateTabs(session.panels.map(\.name))
         if wasActive {
-            // Switch to the panel that's now at the same index (or
-            // the last one if we removed from the end).
             let nextIdx = min(idx, session.panels.count - 1)
             session.hud?.setActivePanel(session.panels[nextIdx].name)
             session.hud?.updateTabs(session.panels.map(\.name))
         }
     }
 
-    /// Switch the HUD to show a different panel (no content update).
     func switchTab(in sessionId: String, to name: String) {
         guard let session = sessions[sessionId],
               session.panels.contains(where: { $0.name == name }) else { return }
@@ -168,16 +213,16 @@ final class SessionManager {
         session.hud?.updateTabs(session.panels.map(\.name))
     }
 
-    /// Close every panel in the session and tear down the HUD.
     func closeAllPanels(in sessionId: String) {
         guard let session = sessions[sessionId] else { return }
         session.hud?.close()
         session.hud = nil
         session.panels = []
+        session.orphanTimerTask?.cancel()
+        session.orphanTimerTask = nil
+        session.orphaned = false
     }
 
-    /// Re-snapshot the named slot without re-rendering. Returns nil
-    /// if the slot isn't open.
     func inspect(sessionId: String, name: String) async throws -> (RenderResult, Data)? {
         guard let session = sessions[sessionId],
               let panel = session.panels.first(where: { $0.name == name }) else {
@@ -188,7 +233,6 @@ final class SessionManager {
         return (RenderResult(width: Double(size.width), height: Double(size.height)), snapshot)
     }
 
-    /// All panels in a session, in insertion order.
     func list(sessionId: String) -> [PanelDescriptor] {
         guard let session = sessions[sessionId] else { return [] }
         let size = session.hud?.frame.size ?? .zero
@@ -203,7 +247,20 @@ final class SessionManager {
     }
 
     private func ensureSession(_ sessionId: String) -> SessionState {
-        if let s = sessions[sessionId] { return s }
+        if let s = sessions[sessionId] {
+            // Treat an upsert as a reconnect signal — if the sidecar
+            // was previously marked orphaned and is now sending, the
+            // badge should clear.
+            if s.orphanTimerTask != nil || s.orphaned {
+                s.orphanTimerTask?.cancel()
+                s.orphanTimerTask = nil
+                if s.orphaned {
+                    s.orphaned = false
+                    s.hud?.setSessionEnded(false)
+                }
+            }
+            return s
+        }
         let idx = sessionsRegisteredOrder
         sessionsRegisteredOrder += 1
         let s = SessionState(id: sessionId, cascadeIndex: idx)
