@@ -10,7 +10,9 @@ import Cocoa
 @MainActor
 final class HUDWindow: NSWindow {
     static let defaultSize = NSSize(width: 480, height: 360)
-    static let maxInitialSize = NSSize(width: 800, height: 1000)
+    /// Per-HUD size cap, captured at construction from `Settings.shared`
+    /// so live HUDs aren't affected by mid-session pref changes.
+    private let maxInitialSize: NSSize
 
     private let contentHost = NSView()
     private let titleBar = TitleBarOverlay()
@@ -39,6 +41,11 @@ final class HUDWindow: NSWindow {
     var sessionId: String?
 
     init(initialPosition: NSPoint? = nil) {
+        let settings = Settings.shared
+        self.maxInitialSize = NSSize(
+            width: CGFloat(settings.initialSizeCapWidth),
+            height: CGFloat(settings.initialSizeCapHeight)
+        )
         let frame = NSRect(
             origin: initialPosition ?? Self.cascadeTopRight(0),
             size: Self.defaultSize
@@ -49,6 +56,9 @@ final class HUDWindow: NSWindow {
             backing: .buffered,
             defer: false
         )
+        // Apply user-configured opacity. Captured at construction so
+        // live HUDs keep their state; new HUDs reflect current prefs.
+        alphaValue = CGFloat(settings.defaultOpacityPercent) / 100.0
         configureWindow()
         configureContentView()
     }
@@ -216,10 +226,10 @@ final class HUDWindow: NSWindow {
     /// the cascade position doesn't drift on each update.
     func sizeToContent(width: Double, height: Double) {
         let chrome = TitleBarOverlay.height + (panelCount >= 2 ? TabStripView.height : 0)
-        let targetWidth = min(max(CGFloat(width), 280), Self.maxInitialSize.width)
+        let targetWidth = min(max(CGFloat(width), 280), maxInitialSize.width)
         let targetHeight = min(
             max(CGFloat(height) + chrome, 200),
-            Self.maxInitialSize.height
+            maxInitialSize.height
         )
         let current = self.frame
         let newOrigin = NSPoint(

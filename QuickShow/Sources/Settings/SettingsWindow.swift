@@ -4,20 +4,27 @@ import ServiceManagement
 /// Minimal preferences window. Per PRD § "SettingsWindow":
 /// - Launch at login toggle (ServiceManagement.SMAppService).
 /// - Default opacity for newly-spawned HUDs.
-/// - Initial size cap inputs.
+/// - Initial size cap width/height inputs.
 /// - "Connect to Claude Code" button (writes ~/.claude.json).
 /// - Copyable MCP config snippet for other clients.
+///
+/// Values are persisted via `Settings.shared` (UserDefaults). They
+/// apply to *new* HUDs — live ones retain their captured-at-creation
+/// state, matching PipAnything's "defaults, not global toggles" rule.
 @MainActor
-final class SettingsWindow: NSWindowController, NSWindowDelegate {
+final class SettingsWindow: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     private let launchAtLoginCheckbox = NSButton(checkboxWithTitle: "Launch QuickShow at login", target: nil, action: nil)
-    private let opacityField = NSTextField()
+    private let opacitySlider = NSSlider(value: 100, minValue: 10, maxValue: 100, target: nil, action: nil)
+    private let opacityValueLabel = NSTextField(labelWithString: "100 %")
+    private let sizeWidthField = NSTextField()
+    private let sizeHeightField = NSTextField()
     private let connectButton = NSButton(title: "Connect to Claude Code", target: nil, action: nil)
     private let configTextView = NSTextView()
     private let statusLabel = NSTextField(labelWithString: "")
 
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 460),
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: 560),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -55,19 +62,60 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
 
         stack.addArrangedSubview(separator())
 
-        // --- Default opacity ---
+        // --- Default opacity slider ---
         let opacityRow = NSStackView()
         opacityRow.orientation = .horizontal
-        opacityRow.spacing = 8
+        opacityRow.spacing = 10
+        opacityRow.alignment = .centerY
         let opacityLabel = NSTextField(labelWithString: "Default HUD opacity:")
-        opacityField.stringValue = "100"
-        opacityField.alignment = .right
-        opacityField.widthAnchor.constraint(equalToConstant: 56).isActive = true
-        let pctLabel = NSTextField(labelWithString: "%")
+        opacityLabel.widthAnchor.constraint(equalToConstant: 150).isActive = true
+        opacitySlider.target = self
+        opacitySlider.action = #selector(opacityChanged(_:))
+        opacitySlider.doubleValue = Double(Settings.shared.defaultOpacityPercent)
+        opacitySlider.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        opacityValueLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        opacityValueLabel.stringValue = "\(Settings.shared.defaultOpacityPercent) %"
+        opacityValueLabel.widthAnchor.constraint(equalToConstant: 50).isActive = true
         opacityRow.addArrangedSubview(opacityLabel)
-        opacityRow.addArrangedSubview(opacityField)
-        opacityRow.addArrangedSubview(pctLabel)
+        opacityRow.addArrangedSubview(opacitySlider)
+        opacityRow.addArrangedSubview(opacityValueLabel)
         stack.addArrangedSubview(opacityRow)
+
+        let opacityNote = NSTextField(labelWithString: "Applies to newly-spawned HUDs.")
+        opacityNote.font = .systemFont(ofSize: 10)
+        opacityNote.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(opacityNote)
+
+        stack.addArrangedSubview(separator())
+
+        // --- Initial size cap ---
+        let sizeRow = NSStackView()
+        sizeRow.orientation = .horizontal
+        sizeRow.spacing = 10
+        sizeRow.alignment = .centerY
+        let sizeLabel = NSTextField(labelWithString: "Initial size cap:")
+        sizeLabel.widthAnchor.constraint(equalToConstant: 150).isActive = true
+        sizeWidthField.stringValue = "\(Settings.shared.initialSizeCapWidth)"
+        sizeWidthField.alignment = .right
+        sizeWidthField.widthAnchor.constraint(equalToConstant: 70).isActive = true
+        sizeWidthField.delegate = self
+        let sizeMul = NSTextField(labelWithString: "×")
+        sizeHeightField.stringValue = "\(Settings.shared.initialSizeCapHeight)"
+        sizeHeightField.alignment = .right
+        sizeHeightField.widthAnchor.constraint(equalToConstant: 70).isActive = true
+        sizeHeightField.delegate = self
+        let sizeUnit = NSTextField(labelWithString: "pt")
+        sizeRow.addArrangedSubview(sizeLabel)
+        sizeRow.addArrangedSubview(sizeWidthField)
+        sizeRow.addArrangedSubview(sizeMul)
+        sizeRow.addArrangedSubview(sizeHeightField)
+        sizeRow.addArrangedSubview(sizeUnit)
+        stack.addArrangedSubview(sizeRow)
+
+        let sizeNote = NSTextField(labelWithString: "Upper bound for content-aware HUD sizing.")
+        sizeNote.font = .systemFont(ofSize: 10)
+        sizeNote.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(sizeNote)
 
         stack.addArrangedSubview(separator())
 
@@ -98,11 +146,10 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         configTextView.string = mcpConfigSnippet()
         configTextView.textContainerInset = NSSize(width: 6, height: 6)
         scroll.documentView = configTextView
-        scroll.widthAnchor.constraint(equalToConstant: 460).isActive = true
-        scroll.heightAnchor.constraint(equalToConstant: 160).isActive = true
+        scroll.widthAnchor.constraint(equalToConstant: 480).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: 140).isActive = true
         stack.addArrangedSubview(scroll)
 
-        // Copy button
         let copyButton = NSButton(title: "Copy snippet", target: self, action: #selector(copyConfig(_:)))
         copyButton.bezelStyle = .rounded
         stack.addArrangedSubview(copyButton)
@@ -112,8 +159,31 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         let s = NSBox()
         s.boxType = .separator
         s.translatesAutoresizingMaskIntoConstraints = false
-        s.widthAnchor.constraint(equalToConstant: 460).isActive = true
+        s.widthAnchor.constraint(equalToConstant: 480).isActive = true
         return s
+    }
+
+    // MARK: - Opacity
+
+    @objc private func opacityChanged(_ sender: NSSlider) {
+        let pct = Int(sender.doubleValue.rounded())
+        Settings.shared.defaultOpacityPercent = pct
+        opacityValueLabel.stringValue = "\(pct) %"
+    }
+
+    // MARK: - Size cap (NSTextFieldDelegate)
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField else { return }
+        if field === sizeWidthField {
+            let v = Int(field.stringValue) ?? Settings.shared.initialSizeCapWidth
+            Settings.shared.initialSizeCapWidth = v
+            field.stringValue = "\(Settings.shared.initialSizeCapWidth)" // reflect clamping
+        } else if field === sizeHeightField {
+            let v = Int(field.stringValue) ?? Settings.shared.initialSizeCapHeight
+            Settings.shared.initialSizeCapHeight = v
+            field.stringValue = "\(Settings.shared.initialSizeCapHeight)"
+        }
     }
 
     // MARK: - Launch at login
@@ -135,7 +205,6 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
             }
         } catch {
             NSLog("QuickShow: launch-at-login toggle failed: \(error)")
-            // Roll back the checkbox so the UI reflects reality.
             sender.state = isLaunchAtLoginEnabled() ? .on : .off
             statusLabel.stringValue = "Failed to update: \(error.localizedDescription)"
         }
@@ -176,9 +245,6 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     // MARK: - Config helpers
 
     private func sidecarCommand() -> (cmd: String, args: [String]) {
-        // Bundled-sidecar path (Release builds). Falls back to a
-        // generic `bun run …/index.ts` invocation when running the
-        // app from a Debug build that hasn't bundled the binary yet.
         let bundleURL = Bundle.main.bundleURL
         let bundled = bundleURL
             .appendingPathComponent("Contents/Resources/mcp-quick-show")
@@ -186,8 +252,6 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         if FileManager.default.isExecutableFile(atPath: bundled) {
             return (bundled, [])
         }
-        // Debug fallback: assume sidecar source is sibling to the
-        // app's source tree.
         let sourcePath = bundleURL.deletingLastPathComponent()
             .appendingPathComponent("../sidecar/src/index.ts").path
         return ("bun", ["run", sourcePath])

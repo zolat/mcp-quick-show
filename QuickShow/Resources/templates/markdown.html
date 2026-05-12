@@ -43,11 +43,13 @@
     background: var(--pre-bg);
     color: var(--pre-fg);
     padding: 12px 14px;
+    padding-right: 56px; /* room for the copy button */
     border-radius: 6px;
     overflow-x: auto;
     font-family: var(--mono-font);
     font-size: 0.85em;
     line-height: 1.45;
+    position: relative;
   }
   #qs-content pre code {
     background: transparent;
@@ -55,6 +57,37 @@
     padding: 0;
     border-radius: 0;
     font-size: inherit;
+  }
+  #qs-content pre .qs-copy-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    appearance: none;
+    -webkit-appearance: none;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg-muted);
+    font-family: var(--sans-font);
+    font-size: 10px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+  #qs-content pre:hover .qs-copy-btn,
+  #qs-content pre .qs-copy-btn:focus {
+    opacity: 1;
+  }
+  #qs-content pre .qs-copy-btn:hover {
+    color: var(--fg);
+    border-color: var(--fg-muted);
+  }
+  #qs-content pre .qs-copy-btn.qs-copied {
+    color: var(--link);
+    border-color: var(--link);
+    opacity: 1;
   }
   #qs-content blockquote {
     margin: 0.7em 0;
@@ -118,6 +151,36 @@
     ALLOW_DATA_ATTR: false,
   };
 
+  // Inject a Copy button into each <pre>. Routed through the single
+  // renderComplete bridge with {copy: <text>} — the Swift side writes
+  // to NSPasteboard. (javaScriptCanAccessClipboard is disabled in the
+  // WKWebView config for security; the bridge is our one outlet.)
+  function injectCopyButtons(container) {
+    const pres = container.querySelectorAll('pre');
+    for (const pre of pres) {
+      const btn = document.createElement('button');
+      btn.className = 'qs-copy-btn';
+      btn.type = 'button';
+      btn.textContent = 'Copy';
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        e.preventDefault();
+        const codeEl = pre.querySelector('code');
+        const text = (codeEl ? codeEl.textContent : pre.textContent) || '';
+        try {
+          window.webkit.messageHandlers.renderComplete.postMessage({ copy: text });
+        } catch (err) { /* bridge unavailable in test */ }
+        btn.textContent = 'Copied';
+        btn.classList.add('qs-copied');
+        setTimeout(() => {
+          btn.textContent = 'Copy';
+          btn.classList.remove('qs-copied');
+        }, 1500);
+      });
+      pre.appendChild(btn);
+    }
+  }
+
   function measure() {
     const w = Math.ceil(document.documentElement.scrollWidth);
     const h = Math.ceil(document.documentElement.scrollHeight);
@@ -158,6 +221,7 @@
       const rawHTML = marked.parse(body || '');
       const safe = DOMPurify.sanitize(rawHTML, purifyConfig);
       c.innerHTML = safe;
+      injectCopyButtons(c);
 
       const m = measure();
       window.webkit.messageHandlers.renderComplete.postMessage({

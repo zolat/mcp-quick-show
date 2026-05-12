@@ -141,8 +141,25 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
         return try String(contentsOf: url, encoding: .utf8)
     }
 
+    /// Test-only hook: directly invoke the bridge handler with a
+    /// synthesized payload. Exists so the QUICKSHOW_TEST_PREFS smoke
+    /// can exercise the `copy` side-channel without driving a real
+    /// JS-side button click.
+    func testInvokeBridge(_ payload: [String: Any]) {
+        handleBridgeMessage(payload)
+    }
+
     private func handleBridgeMessage(_ body: Any) {
         guard let dict = body as? [String: Any] else { return }
+        // Side-channel: a `copy` payload from a code-block button or
+        // similar UI affordance. Writes to the system pasteboard.
+        // No correlation with the render pipeline — this branch
+        // returns immediately without touching pendingRender.
+        if let copyText = dict["copy"] as? String {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(copyText, forType: .string)
+            return
+        }
         let isReady = dict["ready"] as? Bool ?? false
         if isReady && pendingRender == nil {
             // First post on DOMContentLoaded.

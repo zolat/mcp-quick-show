@@ -25,6 +25,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_PROMOTE"] == "1" {
             runPromoteSmoke()
         }
+        if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_PREFS"] == "1" {
+            runPrefsSmoke()
+        }
+    }
+
+    /// Headless prefs test: verifies that Settings overrides land on
+    /// new HUDs (opacity + size cap) and that the renderer bridge's
+    /// `copy` side-channel writes to NSPasteboard.
+    private func runPrefsSmoke() {
+        Task {
+            do {
+                _ = try await sessionManager.upsert(
+                    sessionId: "prefs-smoke",
+                    name: "p",
+                    contentType: "markdown",
+                    form: "inline",
+                    body: """
+                    # Big enough content to hit the size cap
+
+                    Lorem ipsum dolor sit amet, consectetur adipiscing elit.
+                    Sed do eiusmod tempor incididunt ut labore et dolore
+                    magna aliqua. Ut enim ad minim veniam, quis nostrud
+                    exercitation ullamco laboris nisi ut aliquip ex ea
+                    commodo consequat. Duis aute irure dolor in reprehenderit
+                    in voluptate velit esse cillum dolore eu fugiat nulla
+                    pariatur. Excepteur sint occaecat cupidatat non proident,
+                    sunt in culpa qui officia deserunt mollit anim id est
+                    laborum.
+                    """
+                )
+                if let session = sessionManager.sessions["prefs-smoke"],
+                   let hud = session.hud {
+                    NSLog("QuickShow: TEST_PREFS opacity alphaValue=\(hud.alphaValue)")
+                    NSLog("QuickShow: TEST_PREFS sizeCap frame=\(hud.frame.size.width)x\(hud.frame.size.height)")
+                }
+                // Exercise the copy bridge: pull the renderer for the
+                // panel and invoke its bridge with a {copy: ...} payload.
+                if let session = sessionManager.sessions["prefs-smoke"],
+                   let panel = session.panels.first,
+                   let webRenderer = panel.renderer as? WebViewPanelRenderer {
+                    // The bridge handler is private; route through the
+                    // public message-handler relay by simulating what
+                    // WK would deliver. Easier: use NSPasteboard
+                    // directly to seed a known value, then call the
+                    // bridge to verify it overwrites.
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString("BEFORE", forType: .string)
+                    webRenderer.testInvokeBridge(["copy": "AFTER-clipboard-payload"])
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                    let got = NSPasteboard.general.string(forType: .string) ?? "(nil)"
+                    NSLog("QuickShow: TEST_PREFS copy pasteboard=\(got)")
+                }
+                NSLog("QuickShow: TEST_PREFS done")
+            } catch {
+                NSLog("QuickShow: TEST_PREFS failed: \(error)")
+            }
+        }
     }
 
     /// Headless promote test (parallel to PipAnything's PIP_TEST_* hooks).
