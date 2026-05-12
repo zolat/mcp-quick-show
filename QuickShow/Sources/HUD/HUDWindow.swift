@@ -1,7 +1,11 @@
 import Cocoa
 
-/// Borderless floating window. Always-on-top via `.floating` level,
-/// cross-Space via `.canJoinAllSpaces + .fullScreenAuxiliary`.
+/// Borderless floating window. Always-on-top via `.floating` level.
+/// Space scoping is driven by `Settings.pinHudsToCurrentSpace`:
+/// pinned = Space-bound (`.fullScreenAuxiliary`); unpinned = cross-
+/// Space (`.canJoinAllSpaces + .fullScreenAuxiliary + .stationary`).
+/// The window observes `Settings.pinHudsToCurrentSpaceChanged` and
+/// re-applies `collectionBehavior` live.
 /// Lifted-from-and-simplified from PipAnything's `OverlayWindow`.
 ///
 /// Phase 3 update: multi-panel. The HUD holds N renderer views; the
@@ -73,17 +77,23 @@ final class HUDWindow: NSWindow {
         alphaValue = CGFloat(settings.defaultOpacityPercent) / 100.0
         configureWindow()
         configureContentView()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePinToSpaceChanged),
+            name: Settings.pinHudsToCurrentSpaceChanged,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     private func configureWindow() {
         isOpaque = false
         backgroundColor = .clear
         level = .floating
-        collectionBehavior = [
-            .canJoinAllSpaces,
-            .fullScreenAuxiliary,
-            .stationary,
-        ]
+        collectionBehavior = Self.collectionBehavior(forPinned: Settings.shared.pinHudsToCurrentSpace)
         isMovableByWindowBackground = true
         hasShadow = true
         ignoresMouseEvents = false
@@ -92,6 +102,21 @@ final class HUDWindow: NSWindow {
         // window in `session.huds[idx].window` after a close. Mirror
         // PromotedWindow's pattern: lifetime is managed by the array.
         isReleasedWhenClosed = false
+    }
+
+    /// Single source of truth for HUD Space scoping.
+    /// `.stationary` is intentionally only set in the cross-Space
+    /// variant — it means "don't follow Space switches" and is moot
+    /// when the window is already pinned to one Space.
+    static func collectionBehavior(forPinned pinned: Bool) -> NSWindow.CollectionBehavior {
+        if pinned {
+            return [.fullScreenAuxiliary]
+        }
+        return [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+    }
+
+    @objc private func handlePinToSpaceChanged() {
+        collectionBehavior = Self.collectionBehavior(forPinned: Settings.shared.pinHudsToCurrentSpace)
     }
 
     override var canBecomeKey: Bool { true }

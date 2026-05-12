@@ -1,19 +1,29 @@
 import Foundation
 
-/// Persistent app settings, backed by `UserDefaults`. Read at HUD-
-/// creation time so changes from `SettingsWindow` apply to newly
-/// spawned HUDs without affecting ones already on screen (matches
-/// PipAnything's "defaults, not global toggles" semantics).
+/// Persistent app settings, backed by `UserDefaults`. Most prefs are
+/// read at HUD-creation time so changes from `SettingsWindow` apply
+/// only to newly spawned HUDs without affecting ones already on
+/// screen (matches PipAnything's "defaults, not global toggles"
+/// semantics).
+///
+/// Exception: `pinHudsToCurrentSpace` is a live toggle. Flipping it
+/// posts `pinHudsToCurrentSpaceChanged`; every live HUD observes and
+/// updates its `collectionBehavior` immediately.
 ///
 /// The `default*` fallback values are also the v0.1 PRD defaults.
 @MainActor
 final class Settings {
     static let shared = Settings()
 
+    /// Posted when `pinHudsToCurrentSpace` changes. `HUDWindow`
+    /// observers re-apply their `collectionBehavior` on receipt.
+    static let pinHudsToCurrentSpaceChanged = Notification.Name("QuickShow.pinHudsToCurrentSpaceChanged")
+
     private enum Key {
         static let defaultOpacityPercent = "QuickShow.defaultOpacityPercent"
         static let initialSizeCapWidth = "QuickShow.initialSizeCapWidth"
         static let initialSizeCapHeight = "QuickShow.initialSizeCapHeight"
+        static let pinHudsToCurrentSpace = "QuickShow.pinHudsToCurrentSpace"
     }
 
     private let defaults = UserDefaults.standard
@@ -58,6 +68,25 @@ final class Settings {
         }
         set {
             defaults.set(max(200, newValue), forKey: Key.initialSizeCapHeight)
+        }
+    }
+
+    /// When true, each HUD is tied to the macOS Space it was spawned
+    /// in and disappears when the user switches Spaces. When false,
+    /// HUDs use `.canJoinAllSpaces` and follow the user everywhere.
+    /// Default: true (Space-scoped). Live: flipping this immediately
+    /// updates every open HUD via `pinHudsToCurrentSpaceChanged`.
+    /// Test override: `QUICKSHOW_PIN_TO_SPACE_OVERRIDE` ("1"/"0").
+    var pinHudsToCurrentSpace: Bool {
+        get {
+            if let env = ProcessInfo.processInfo.environment["QUICKSHOW_PIN_TO_SPACE_OVERRIDE"] {
+                return env == "1" || env.lowercased() == "true"
+            }
+            if defaults.object(forKey: Key.pinHudsToCurrentSpace) == nil { return true }
+            return defaults.bool(forKey: Key.pinHudsToCurrentSpace)
+        }
+        set {
+            defaults.set(newValue, forKey: Key.pinHudsToCurrentSpace)
         }
     }
 }

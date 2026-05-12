@@ -14,6 +14,7 @@ import ServiceManagement
 @MainActor
 final class SettingsWindow: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     private let launchAtLoginCheckbox = NSButton(checkboxWithTitle: "Launch QuickShow at login", target: nil, action: nil)
+    private let pinToSpaceCheckbox = NSButton(checkboxWithTitle: "Pin HUDs to current Space", target: nil, action: nil)
     private let opacitySlider = NSSlider(value: 100, minValue: 10, maxValue: 100, target: nil, action: nil)
     private let opacityValueLabel = NSTextField(labelWithString: "100 %")
     private let sizeWidthField = NSTextField()
@@ -59,6 +60,16 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate, NSTextFieldDel
         launchAtLoginCheckbox.action = #selector(toggleLaunchAtLogin(_:))
         launchAtLoginCheckbox.state = isLaunchAtLoginEnabled() ? .on : .off
         stack.addArrangedSubview(launchAtLoginCheckbox)
+
+        // --- Pin HUDs to current Space ---
+        pinToSpaceCheckbox.target = self
+        pinToSpaceCheckbox.action = #selector(pinToSpaceChanged(_:))
+        pinToSpaceCheckbox.state = Settings.shared.pinHudsToCurrentSpace ? .on : .off
+        stack.addArrangedSubview(pinToSpaceCheckbox)
+        let pinToSpaceNote = NSTextField(labelWithString: "When off, HUDs appear on every Space. Applies immediately to all HUDs.")
+        pinToSpaceNote.font = .systemFont(ofSize: 10)
+        pinToSpaceNote.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(pinToSpaceNote)
 
         stack.addArrangedSubview(separator())
 
@@ -169,6 +180,14 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate, NSTextFieldDel
         let pct = Int(sender.doubleValue.rounded())
         Settings.shared.defaultOpacityPercent = pct
         opacityValueLabel.stringValue = "\(pct) %"
+    }
+
+    // MARK: - Pin to current Space
+
+    @objc private func pinToSpaceChanged(_ sender: NSButton) {
+        let pinned = sender.state == .on
+        Settings.shared.pinHudsToCurrentSpace = pinned
+        NotificationCenter.default.post(name: Settings.pinHudsToCurrentSpaceChanged, object: nil)
     }
 
     // MARK: - Size cap (NSTextFieldDelegate)

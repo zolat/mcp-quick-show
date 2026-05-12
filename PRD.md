@@ -19,7 +19,7 @@ The result: visual artifacts that should sit alongside the agent's work end up e
 
 **QuickShow** — a macOS menu-bar app paired with an MCP server (`mcp-quick-show`) that lets agents render content into floating HUD panels and *see* the rendered result.
 
-The agent calls an MCP tool (e.g. `show_mermaid("architecture", "graph LR; A-->B")`). A small floating HUD appears in the corner of the user's screen — visible across all macOS Spaces including fullscreen apps. The MCP tool response includes a PNG screenshot of the rendered panel, so the agent verifies the output and iterates (`show_mermaid("architecture", improved_spec)` updates the same panel in place).
+The agent calls an MCP tool (e.g. `show_mermaid("architecture", "graph LR; A-->B")`). A small floating HUD appears in the corner of the user's screen — by default scoped to the current macOS Space (cross-Space behaviour is opt-in via Preferences), and visible over fullscreen apps in either mode. The MCP tool response includes a PNG screenshot of the rendered panel, so the agent verifies the output and iterates (`show_mermaid("architecture", improved_spec)` updates the same panel in place).
 
 The user sees the same panel — can drag, resize, close it, or promote it to a standard titled window. Multiple panels live in a tab strip; tabs can be torn out into separate HUDs. Multiple parallel Claude Code sessions each get their own HUD, so visual output stays grouped per agent session.
 
@@ -104,7 +104,7 @@ The sidecar is the canonical artifact users install; it autolaunches the app on 
 - **`AppDelegate`.** Bootstrap. Owns the top-level orchestrators (`ControlServer`, `SessionManager`, `RendererRegistry`, `SettingsWindow`). Shallow glue.
 - **`ControlServer` + `ControlProtocol` + `ControlHandlers`.** Unix-socket listener with NDJSON framing. `ControlProtocol` defines Codable wire types (paired with the sidecar's TS protocol; change-both-files-in-same-commit discipline). `ControlHandlers` dispatches each command on the main actor. Lifts shape from PipAnything's existing pattern. Deep.
 - **`SessionManager`.** Maps `session_id → HUD`. Handles handshake, reconnect window (60 s same-UUID reattach), orphaning on disconnect with visual badge. State machine. Deep.
-- **`HUDWindow`.** Borderless `NSWindow`, `.floating` level, `collectionBehavior` includes `.canJoinAllSpaces` and `.fullScreenAuxiliary`. Top-right cascade positioning per session (24 px offset per HUD). `isMovableByWindowBackground = true` for drag. Bottom-right resize grip subview (lifts from PipAnything's `ResizeHandle`). Initial size is content-aware (panel asks its renderer for natural dimensions after first `renderComplete`) capped at 800 × 1000 pt; user-resizable from then on. Default opacity 100 % (overridable globally in settings). Lifts from PipAnything's `OverlayWindow`.
+- **`HUDWindow`.** Borderless `NSWindow`, `.floating` level. `collectionBehavior` is driven by the "Pin HUDs to current Space" preference (default on, `[.fullScreenAuxiliary]`); turning it off switches to `[.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]` and the change is broadcast live to open HUDs. Top-right cascade positioning per session (24 px offset per HUD). `isMovableByWindowBackground = true` for drag. Bottom-right resize grip subview (lifts from PipAnything's `ResizeHandle`). Initial size is content-aware (panel asks its renderer for natural dimensions after first `renderComplete`) capped at 800 × 1000 pt; user-resizable from then on. Default opacity 100 % (overridable globally in settings). Lifts from PipAnything's `OverlayWindow`.
 - **`TabStripView` + `TabPillView`.** Tab UI, hover-reveal at top edge, drag-to-tear-out, right-click context menu. Tabs override `mouseDownCanMoveWindow = false` so clicks don't drag the window (PipAnything-learned trap). Lifts from PipAnything's `feat/tabs` work.
 
 **Right-click menu surface (v0.1):**
@@ -157,7 +157,7 @@ App → sidecar:
 
 ### Behavioural decisions (locked)
 
-- **Window model.** Hybrid: HUD by default (always-on-top, cross-Space, top-right cascade per session), promote-to-standard-window via right-click on a tab.
+- **Window model.** Hybrid: HUD by default (always-on-top, current-Space by default with opt-in cross-Space, top-right cascade per session), promote-to-standard-window via right-click on a tab.
 - **Multiplexing.** Per-session HUDs. Each MCP session's first `show_X` spawns its HUD. Subsequent calls add tabs. Tear-out spawns sibling HUDs in the same session. Promote moves a single tab into a standard `NSWindow`.
 - **Naming.** Slots are upserted by name, scoped per session. Same name → in-place update. Different name → new tab. Latest-wins on rapid re-renders. If the user has closed a panel and the agent later calls `show("X", …)` with the same name, the panel **reopens** — the agent's purpose is to render visual answers, and the user can dismiss again if unwanted.
 - **Lifecycle.** Sidecar disconnect → HUD orphans with "session ended" badge; same-UUID reconnect within 60 s reattaches. App quit kills all panels (no disk persistence in v0.1).

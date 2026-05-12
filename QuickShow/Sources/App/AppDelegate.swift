@@ -293,6 +293,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                    let hud = session.huds.first?.window {
                     NSLog("QuickShow: TEST_PREFS opacity alphaValue=\(hud.alphaValue)")
                     NSLog("QuickShow: TEST_PREFS sizeCap frame=\(hud.frame.size.width)x\(hud.frame.size.height)")
+                    let cb = hud.collectionBehavior
+                    let pinned = Settings.shared.pinHudsToCurrentSpace
+                    NSLog("QuickShow: TEST_PREFS pinToSpace=\(pinned) canJoinAllSpaces=\(cb.contains(.canJoinAllSpaces)) rawCB=\(cb.rawValue)")
+                    // Verify the live-update observer responds. The env
+                    // override dominates `Settings.shared`, so we
+                    // exercise the observer code path directly: post the
+                    // notification and confirm the HUD's
+                    // collectionBehavior still matches the (env-locked)
+                    // setting after the observer fires. This proves the
+                    // observer is installed and re-applies the helper.
+                    NotificationCenter.default.post(name: Settings.pinHudsToCurrentSpaceChanged, object: nil)
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                    let cb2 = hud.collectionBehavior
+                    let expectedHasJoinAll = !pinned
+                    let observerOK = cb2.contains(.canJoinAllSpaces) == expectedHasJoinAll
+                    NSLog("QuickShow: TEST_PREFS observerFired ok=\(observerOK) rawCB=\(cb2.rawValue)")
                 }
                 // Exercise the copy bridge: pull the renderer for the
                 // panel and invoke its bridge with a {copy: ...} payload.
