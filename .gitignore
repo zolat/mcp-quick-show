@@ -27,3 +27,6 @@ sidecar/.cache/
 
 # Test artifacts
 /tmp-test/
+
+# DMG output
+dist/
