@@ -87,7 +87,8 @@ enum ControlHandlers {
                 name: payload.name,
                 contentType: payload.contentType,
                 form: payload.form,
-                body: payload.body
+                body: payload.body,
+                width: payload.width
             )
             let upsertResult = UpsertResult(
                 width: result.width,

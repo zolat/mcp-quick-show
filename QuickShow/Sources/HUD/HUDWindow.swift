@@ -22,10 +22,6 @@ final class HUDWindow: NSWindow {
     private let titleBar = TitleBarOverlay()
     private let tabStrip = TabStripView()
     let resizeHandle = ResizeHandle()
-    /// Markup drawing overlay — sits topmost in `contentHost`,
-    /// `isHidden = true` by default so mouse events pass through to
-    /// the active renderer view below. Visible while in draw mode.
-    let markupOverlay = MarkupOverlayView()
 
     /// Currently-installed renderer views, keyed by panel name.
     /// At most one is visible at a time; the others are hidden in
@@ -57,30 +53,28 @@ final class HUDWindow: NSWindow {
     var onTitleBarDragMove: ((NSPoint) -> Void)?
     var onTitleBarDragEnd: ((NSPoint) -> Void)?
     /// Markup pencil click in the title bar (visible only when the
-    /// owning session is armed for markup events). Wired by
-    /// SessionManager to call `toggleDrawMode()` on this HUD.
+    /// owning session is armed for markup events). Routes through the
+    /// HUD's own `toggleDrawMode()` so the title-bar tint flips in
+    /// step with the renderer's draw-mode state.
     var onToggleDrawMode: (() -> Void)?
-    /// Send check-mark click in the title bar — fires the composite
-    /// snapshot + `markup_sent` emission flow on the active panel.
+    /// Send check-mark click — fires the full-doc WebView snapshot
+    /// (canvas pixels included) + `markup_sent` emission flow.
     var onSendActivePanelMarkup: (() -> Void)?
-    /// SessionManager owns the per-panel stroke array. The HUD calls
-    /// these on tab switch / draw-mode toggle so strokes survive
-    /// inactive tabs and tear-out/reattach.
-    /// - `onCommitStrokes(panel, strokes)`: persist overlay → panel.
-    /// - `onLoadStrokes(panel) -> [Stroke]`: read panel → overlay.
-    var onCommitStrokes: ((String, [MarkupOverlayView.Stroke]) -> Void)?
-    var onLoadStrokes: ((String) -> [MarkupOverlayView.Stroke])?
-    /// Resolves the active panel's current WebView scroll position
-    /// (CSS px) so the overlay can re-anchor existing strokes when
-    /// the user switches tabs.
-    var onResolveActivePanelScroll: ((String) -> NSPoint)?
+    /// Clear ⌫ click — wipes the active panel's strokes both Swift-
+    /// side and in the WebView's in-DOM canvas.
+    var onClearActivePanelMarkup: (() -> Void)?
+    /// Fired by `toggleDrawMode()` with the new state. SessionManager
+    /// translates this into `enterDrawMode()` / `exitDrawMode()`
+    /// calls on the active panel's renderer.
+    var onDrawModeChanged: ((Bool) -> Void)?
+    /// Returns `true` if the active panel has no strokes — used by
+    /// `setActivePanel` to refresh the ⌫ button visibility on tab
+    /// switch.
+    var onResolveActiveStrokesEmpty: (() -> Bool)?
     /// Reports the session's current `markup_events_armed` flag. Used
     /// by the title bar's flag-change observer to refresh button
     /// visibility without poking through SessionManager directly.
     var onResolveArmedFlag: (() -> Bool)?
-    /// Reports draw-mode toggles to SessionManager so it can suspend
-    /// or resume panzoom on the active renderer.
-    var onDrawModeChanged: ((Bool) -> Void)?
 
     /// Bound by `SessionManager` so right-click handlers can find
     /// their owning session.
@@ -204,7 +198,7 @@ final class HUDWindow: NSWindow {
         titleBar.onDragEnd = { [weak self] loc in self?.onTitleBarDragEnd?(loc) }
         titleBar.onToggleDrawMode = { [weak self] in self?.toggleDrawMode() }
         titleBar.onSend = { [weak self] in self?.onSendActivePanelMarkup?() }
-        titleBar.onClearMarkup = { [weak self] in self?.clearActivePanelMarkup() }
+        titleBar.onClearMarkup = { [weak self] in self?.onClearActivePanelMarkup?() }
         root.addSubview(titleBar)
         NSLayoutConstraint.activate([
             titleBar.topAnchor.constraint(equalTo: root.topAnchor),
@@ -226,37 +220,13 @@ final class HUDWindow: NSWindow {
             tabStrip.heightAnchor.constraint(equalToConstant: TabStripView.height),
         ])
 
-        // Markup overlay sits inside `contentHost` as the topmost
-        // subview — strictly above every renderer view installed via
-        // `installPanel`. Hidden by default so mouse events fall
-        // through to the active renderer.
-        markupOverlay.translatesAutoresizingMaskIntoConstraints = false
-        // Overlay is ALWAYS visible — its draw method paints nothing
-        // when there are no strokes, and `isPassthrough = true`
-        // routes mouse hit-testing to the renderer below. Draw mode
-        // flips `isPassthrough` so the overlay starts capturing
-        // input. Keeping it perpetually visible is what lets sent
-        // strokes remain on screen as proof the Send action took.
-        markupOverlay.isPassthrough = true
-        markupOverlay.onStrokesChanged = { [weak self] in
-            guard let self = self else { return }
-            let strokes = self.markupOverlay.currentStrokes()
-            self.titleBar.setHasStrokes(!strokes.isEmpty)
-            if let active = self.activePanelName {
-                self.onCommitStrokes?(active, strokes)
-            }
-        }
-        markupOverlay.onEscape = { [weak self] in
-            guard let self = self, self.isInDrawMode else { return }
-            self.toggleDrawMode()
-        }
-        contentHost.addSubview(markupOverlay)
-        NSLayoutConstraint.activate([
-            markupOverlay.topAnchor.constraint(equalTo: contentHost.topAnchor),
-            markupOverlay.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor),
-            markupOverlay.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor),
-            markupOverlay.bottomAnchor.constraint(equalTo: contentHost.bottomAnchor),
-        ])
+        // Markup is now drawn into a transparent <canvas> injected
+        // into every WebView by `markup-canvas.js`. The HUD itself
+        // doesn't need a Swift-side overlay anymore — strokes are
+        // part of the WebView's DOM, scaling/panning with content
+        // for free, captured by `takeSnapshot` natively. The HUD
+        // just routes title-bar button clicks (✏︎ ⌫ ✓) into the
+        // active renderer's JS bridge via SessionManager.
 
         resizeHandle.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(resizeHandle)
@@ -278,9 +248,7 @@ final class HUDWindow: NSWindow {
         }
         view.translatesAutoresizingMaskIntoConstraints = false
         if view.superview == nil {
-            // Insert below the markup overlay so the overlay stays
-            // topmost regardless of how many panels we install.
-            contentHost.addSubview(view, positioned: .below, relativeTo: markupOverlay)
+            contentHost.addSubview(view)
             NSLayoutConstraint.activate([
                 view.topAnchor.constraint(equalTo: contentHost.topAnchor),
                 view.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor),
@@ -293,30 +261,30 @@ final class HUDWindow: NSWindow {
     }
 
     /// Make `name` the visible panel; hide the others in place. The
-    /// title bar updates to show the active name. Markup strokes for
-    /// the outgoing panel are committed back to its store, and the
-    /// new panel's strokes are loaded into the overlay so per-panel
-    /// markup state survives tab switches.
+    /// title bar updates to show the active name. Per-panel markup
+    /// state survives tab switches automatically — strokes live in
+    /// each WebView's in-DOM canvas, which persists across hide/show.
     func setActivePanel(_ name: String) {
         guard rendererViews[name] != nil else { return }
-        // Commit overlay state to the panel we're leaving before
-        // swapping in the new panel's strokes.
-        if let outgoing = activePanelName, outgoing != name {
-            onCommitStrokes?(outgoing, markupOverlay.currentStrokes())
+        // If we were in draw mode on the outgoing panel, exit it so
+        // the incoming panel doesn't inherit a stale draw-mode state.
+        if isInDrawMode, activePanelName != name {
+            toggleDrawMode()
         }
         activePanelName = name
         for (n, v) in rendererViews {
             v.isHidden = (n != name)
         }
-        let incomingStrokes = onLoadStrokes?(name) ?? []
-        markupOverlay.loadStrokes(incomingStrokes)
-        // Sync the overlay's scroll tracking to the new active
-        // panel's WebView so the strokes render at the right
-        // viewport positions against its current scroll state.
-        let scroll = onResolveActivePanelScroll?(name) ?? .zero
-        markupOverlay.setCurrentScroll(scroll)
-        titleBar.setHasStrokes(!incomingStrokes.isEmpty)
+        let activeEmpty = onResolveActiveStrokesEmpty?() ?? true
+        titleBar.setHasStrokes(!activeEmpty)
         titleBar.setTitle(name)
+    }
+
+    /// Mirror the active panel's stroke state into the title bar so
+    /// the ⌫ button visibility tracks reality. Called by SessionManager
+    /// whenever strokes are added (via the JS bridge) or cleared.
+    func setActivePanelHasStrokes(_ hasStrokes: Bool) {
+        titleBar.setHasStrokes(hasStrokes)
     }
 
     /// Remove a panel's view from the HUD. If the closed panel was
@@ -391,29 +359,14 @@ final class HUDWindow: NSWindow {
     var isMarkupButtonVisibleForTest: Bool { titleBar.isMarkupButtonVisibleForTest }
     func performSendForTest() { titleBar.performSendForTest() }
 
-    /// Wipe the active panel's strokes — local UI escape hatch
-    /// (no event emission). Triggered by the title-bar ⌫ button.
-    /// `MarkupOverlayView.clear()` fires `onStrokesChanged`, which
-    /// commits the empty array back to the Panel via SessionManager.
-    func clearActivePanelMarkup() {
-        markupOverlay.clear()
-    }
-
-    /// Flip draw-mode on/off. The overlay stays *visible* either
-    /// way — what changes is whether it captures mouse events
-    /// (`isPassthrough = false` when drawing, `true` otherwise so
-    /// clicks hit the panel content). First-responder status moves
-    /// to the overlay during draw mode so Cmd+Z / Esc reach it, and
-    /// SessionManager gets notified to suspend/resume panzoom.
+    /// Flip draw-mode on/off. The actual capture happens inside the
+    /// active panel's in-DOM canvas — SessionManager picks up the
+    /// state change via `onDrawModeChanged` and calls the renderer's
+    /// `enterDrawMode()` / `exitDrawMode()` JS bridge. The HUD only
+    /// owns the visual title-bar tint state here.
     func toggleDrawMode() {
         isInDrawMode.toggle()
-        markupOverlay.isPassthrough = !isInDrawMode
         titleBar.setDrawModeActive(isInDrawMode)
-        if isInDrawMode {
-            makeFirstResponder(markupOverlay)
-        } else if firstResponder === markupOverlay {
-            makeFirstResponder(nil)
-        }
         onDrawModeChanged?(isInDrawMode)
     }
 

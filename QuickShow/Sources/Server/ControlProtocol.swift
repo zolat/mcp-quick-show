@@ -150,9 +150,14 @@ struct UpsertRequest: Decodable {
     let contentType: String
     let form: String           // "inline" | "path"
     let body: String
+    /// Optional canvas-width hint, in points. Used by HTMLRenderer
+    /// (and potentially others) to size the WebView's CSS viewport
+    /// before rendering — so responsive designs lay out at the
+    /// intended width rather than the default 400pt.
+    let width: Double?
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, session, name, form, body
+        case id, kind, session, name, form, body, width
         case contentType = "content_type"
     }
 }

@@ -50,24 +50,39 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
 
     private(set) var webView: WKWebView!
     private let messageHandler = ScriptMessageRelay()
-    private let markupHandler = ScriptMessageRelay()
-    private let scrollHandler = ScriptMessageRelay()
+    private let strokeRelay = ScriptMessageRelay()
 
-    /// Hooked by `SessionManager` at panel creation time. Fired when a
-    /// markup-capable panel's WebView posts `{action, ...}` on the
-    /// `markupEvent` bridge. The closure already knows session + panel
-    /// name, so the renderer stays content-agnostic.
-    var onMarkupEvent: ((MarkupAction) -> Void)?
+    /// Fired when the in-DOM `<canvas>` posts a stroke-changed event
+    /// (pen up / Cmd+Z). The payload is the full strokes array as the
+    /// JS side now has it; SessionManager overwrites `Panel.strokes`
+    /// directly. Bound by SessionManager at panel-creation time.
+    var onStrokesChanged: (([MarkupStroke]) -> Void)?
 
-    /// Fired when the WebView's content scrolls. The markup overlay
-    /// uses this to keep already-drawn strokes anchored to the
-    /// content beneath them.
-    var onScrollChanged: ((NSPoint) -> Void)?
+    /// Fired when the JS canvas receives an Escape keypress in draw
+    /// mode. Host (HUDWindow) toggles draw mode off.
+    var onMarkupEscape: (() -> Void)?
 
-    /// Latest scroll position reported by the page (CSS px, X + Y-down).
-    /// Updated synchronously when the JS bridge fires; new strokes
-    /// captured against this value.
-    private(set) var currentScroll: NSPoint = .zero
+    /// Host wrapper that bubbles wheel events past WKWebView to the
+    /// parent scroll view (WKWebView would otherwise eat them). Public
+    /// so HUDWindow can address it as the markup overlay's canvas
+    /// reference (alongside its inner `webView`).
+    private(set) var canvasHost: WebViewHostView!
+
+    /// Pan-and-zoom container wrapping `canvasHost`. The renderer's
+    /// public `makeView()` returns this; tear-out / reattach reparent
+    /// this whole subtree.
+    private(set) var scrollView: ZoomableCanvasScrollView!
+
+    /// True after the first successful `update()` that knew a real
+    /// canvas size — drives `smartFit()` once per panel, since
+    /// subsequent re-renders should preserve the user's pan/zoom.
+    private var hasFittedOnce = false
+
+    /// `PanelRenderer.canvasView` — strokes anchor to the inner
+    /// WebView, not the outer scroll view. The scroll view's pan/
+    /// zoom transform is applied automatically by AppKit's
+    /// `NSView.convert` when the overlay renders strokes.
+    var canvasView: NSView? { webView }
 
     private var pendingRender: CheckedContinuation<RenderResult, Error>?
     private var readyWaiters: [CheckedContinuation<Void, Error>] = []
@@ -88,56 +103,77 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
             self?.handleBridgeMessage(body)
         }
         controller.add(messageHandler, name: "renderComplete")
-        markupHandler.onMessage = { [weak self] body in
-            self?.handleMarkupBridgeMessage(body)
+        strokeRelay.onMessage = { [weak self] body in
+            self?.handleMarkupStrokeMessage(body)
         }
-        controller.add(markupHandler, name: "markupEvent")
-        scrollHandler.onMessage = { [weak self] body in
-            self?.handleScrollBridgeMessage(body)
+        controller.add(strokeRelay, name: "markupStroke")
+
+        // Inject the in-DOM markup canvas (`window.__qsMarkup`) into
+        // every WebView. Runs at .atDocumentEnd so <body> exists, then
+        // appends a transparent <canvas> that receives pointer events
+        // when draw mode is on. Lives across content-type re-renders
+        // for template-based renderers (which use innerHTML); a fresh
+        // document load (HTMLRenderer's loadHTMLString) re-injects.
+        if let markupJS = Self.markupCanvasScriptSource() {
+            let userScript = WKUserScript(
+                source: markupJS,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: true
+            )
+            controller.addUserScript(userScript)
+        } else {
+            NSLog("QuickShow: markup-canvas.js missing from bundle — markup disabled for this WebView")
         }
-        controller.add(scrollHandler, name: "scrollEvent")
-        // Inject a passive scroll listener into every loaded page so
-        // we don't have to modify the bundled templates (and so
-        // show_html's agent-supplied HTML benefits automatically).
-        // The script posts the current scrollX/scrollY back via the
-        // `scrollEvent` bridge. Initial emit fires on DOMContentLoaded
-        // so we have a real value before the user can draw.
-        let scrollScript = WKUserScript(
-            source: """
-            (function(){
-              var post = function(){
-                try {
-                  var de = document.documentElement;
-                  var b = document.body || de;
-                  window.webkit.messageHandlers.scrollEvent.postMessage({
-                    x: window.scrollX || de.scrollLeft || b.scrollLeft || 0,
-                    y: window.scrollY || de.scrollTop || b.scrollTop || 0
-                  });
-                } catch(e) {}
-              };
-              window.addEventListener('scroll', post, { passive: true });
-              if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', post);
-              } else {
-                post();
-              }
-            })();
-            """,
-            injectionTime: .atDocumentEnd,
-            forMainFrameOnly: true
-        )
-        controller.addUserScript(scrollScript)
+
         config.userContentController = controller
 
-        let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 400, height: 300), configuration: config)
-        wv.translatesAutoresizingMaskIntoConstraints = false
+        let initialSize = NSSize(width: 400, height: 300)
+        let wv = WKWebView(
+            frame: NSRect(origin: .zero, size: initialSize),
+            configuration: config
+        )
         wv.navigationDelegate = self
         // Disable bounce / overscroll halos on macOS.
         wv.setValue(false, forKey: "drawsBackground")
+        // Explicit: we drive zoom via the outer NSScrollView, not via
+        // WKWebView's own magnification gesture.
+        wv.allowsMagnification = false
         webView = wv
 
+        // Host wraps the WebView and bubbles scroll-wheel events to
+        // the parent scroll view. WKWebView would otherwise consume
+        // them before the scroll view's clip view sees them, breaking
+        // wheel-zoom.
+        let host = WebViewHostView(frame: NSRect(origin: .zero, size: initialSize))
+        host.addSubview(wv)
+        wv.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            wv.topAnchor.constraint(equalTo: host.topAnchor),
+            wv.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            wv.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            wv.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+        ])
+        canvasHost = host
+
+        // Outer scroll view: pan + zoom on the host. `documentView` is
+        // re-sized to match the canvas dimensions reported by each
+        // render so the user can pan around the full document.
+        let scroll = ZoomableCanvasScrollView(frame: NSRect(origin: .zero, size: initialSize))
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = false
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.allowsMagnification = true
+        scroll.minMagnification = 0.1
+        scroll.maxMagnification = 8.0
+        scroll.usesPredominantAxisScrolling = false
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.documentView = host
+        scrollView = scroll
+
         loadTemplate()
-        return wv
+        return scroll
     }
 
     private func loadTemplate() {
@@ -188,9 +224,6 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
                 ("<!--QS_MERMAID-->",
                  (try? readBundled("mermaid.min", ext: "js", dir: "libs")) ?? "",
                  true /* is script */),
-                ("<!--QS_PANZOOM-->",
-                 (try? readBundled("panzoom", ext: "js", dir: "templates")) ?? "",
-                 true /* is script */),
             ]
             for (marker, content, isScript) in injections {
                 let wrapped: String
@@ -229,46 +262,109 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
         handleBridgeMessage(payload)
     }
 
-    /// Test-only hook for the markup bridge — same purpose as
-    /// `testInvokeBridge` but routes through the `markupEvent` channel.
-    func testInvokeMarkupBridge(_ payload: [String: Any]) {
-        handleMarkupBridgeMessage(payload)
-    }
-
-    /// Parse a `{x, y}` scroll payload from the injected listener,
-    /// update the cached scroll position, and fan out to
-    /// `onScrollChanged` so the markup overlay re-renders strokes
-    /// against the new scroll position.
-    private func handleScrollBridgeMessage(_ body: Any) {
-        guard let dict = body as? [String: Any] else { return }
-        let x = (dict["x"] as? NSNumber)?.doubleValue ?? 0
-        let y = (dict["y"] as? NSNumber)?.doubleValue ?? 0
-        let p = NSPoint(x: x, y: y)
-        currentScroll = p
-        onScrollChanged?(p)
-    }
-
-    /// Parse a payload from the `markupEvent` bridge and fan it out to
-    /// `onMarkupEvent`. Two shapes are accepted:
-    ///   `{action: "send", png_base64: "<base64 PNG>"}`
-    ///   `{action: "dismiss"}`
-    /// Anything else is silently ignored — the renderer is content-agnostic
-    /// and shouldn't crash on an unknown action.
-    private func handleMarkupBridgeMessage(_ body: Any) {
+    /// Parse a payload from the `markupStroke` bridge (posted by
+    /// `markup-canvas.js`). Two shapes:
+    ///   `{type: "strokesChanged", strokes: [{points, color, width}]}`
+    ///   `{type: "escape"}`
+    /// Anything else is logged + dropped (forward-compat for new
+    /// types). Stroke arrays are JSON-deserialized into Swift
+    /// `MarkupStroke` values via JSONSerialization → re-encode → decode.
+    private func handleMarkupStrokeMessage(_ body: Any) {
         guard let dict = body as? [String: Any],
-              let action = dict["action"] as? String else { return }
-        switch action {
-        case "send":
-            guard let b64 = dict["png_base64"] as? String,
-                  let bytes = Data(base64Encoded: b64) else {
-                NSLog("QuickShow: markupEvent send missing/invalid png_base64")
-                return
-            }
-            onMarkupEvent?(.send(pngBytes: bytes))
-        case "dismiss":
-            onMarkupEvent?(.dismiss)
+              let type = dict["type"] as? String else { return }
+        switch type {
+        case "strokesChanged":
+            let raw = dict["strokes"] as? [Any] ?? []
+            let strokes = Self.decodeStrokes(raw)
+            onStrokesChanged?(strokes)
+        case "escape":
+            onMarkupEscape?()
         default:
-            NSLog("QuickShow: markupEvent unknown action '\(action)'")
+            NSLog("QuickShow: markupStroke unknown type '\(type)'")
+        }
+    }
+
+    private static func decodeStrokes(_ raw: [Any]) -> [MarkupStroke] {
+        guard let data = try? JSONSerialization.data(withJSONObject: raw, options: []) else {
+            return []
+        }
+        return (try? JSONDecoder().decode([MarkupStroke].self, from: data)) ?? []
+    }
+
+    private static func markupCanvasScriptSource() -> String? {
+        guard let url = Bundle.main.url(
+            forResource: "markup-canvas",
+            withExtension: "js",
+            subdirectory: "scripts"
+        ) else { return nil }
+        return try? String(contentsOf: url, encoding: .utf8)
+    }
+
+    // MARK: - Markup JS bridge (public)
+    //
+    // All entry points forward to `window.__qsMarkup.*` via
+    // evaluateJavaScript. The HUD calls these in response to title-bar
+    // button taps + tab switches. Stroke arrays are JSON-encoded
+    // inline; `getStrokes` parses the JS-returned value back to
+    // `[MarkupStroke]` via the same JSONSerialization round-trip.
+
+    func enterDrawMode() async {
+        await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.enterDrawMode();")
+    }
+
+    func exitDrawMode() async {
+        await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.exitDrawMode();")
+    }
+
+    func clearMarkup() async {
+        await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.clear();")
+    }
+
+    func setStrokes(_ strokes: [MarkupStroke]) async {
+        guard let data = try? JSONEncoder().encode(strokes),
+              let json = String(data: data, encoding: .utf8) else {
+            await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.setStrokes([]);")
+            return
+        }
+        await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.setStrokes(\(json));")
+    }
+
+    func getStrokes() async -> [MarkupStroke] {
+        let raw: Any?
+        do {
+            raw = try await webView.evaluateJavaScript(
+                "(window.__qsMarkup && window.__qsMarkup.getStrokes()) || []"
+            )
+        } catch {
+            return []
+        }
+        if let arr = raw as? [Any] {
+            return Self.decodeStrokes(arr)
+        }
+        return []
+    }
+
+    func popLastStroke() async {
+        await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.popLastStroke();")
+    }
+
+    /// Test-only: synthesize a stroke directly into the JS canvas as
+    /// if the user had drawn it. Used by `QUICKSHOW_TEST_MARKUP_UI` to
+    /// drive a deterministic stroke without dispatching pointer events.
+    func appendStrokeForTest(_ stroke: MarkupStroke) async {
+        guard let data = try? JSONEncoder().encode(stroke),
+              let json = String(data: data, encoding: .utf8) else { return }
+        await evalIgnoringError(
+            "window.__qsMarkup && window.__qsMarkup.appendStrokeForTest(\(json));"
+        )
+    }
+
+    private func evalIgnoringError(_ js: String) async {
+        do {
+            _ = try await webView.evaluateJavaScript(js)
+        } catch {
+            // No-op: a script that fails because the page is mid-load
+            // or __qsMarkup hasn't installed yet shouldn't propagate.
         }
     }
 
@@ -345,7 +441,26 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
             guard let self = self else { throw RenderFailure(message: "renderer deallocated", line: nil) }
             return try await self.runRender(body: prepared)
         }
+        applyCanvasSize(NSSize(width: result.width, height: result.height))
         return result
+    }
+
+    /// Pin the WebView + host frame to the document's natural size
+    /// so the WebView doesn't reflow on window resize. The outer
+    /// `ZoomableCanvasScrollView` handles pan / zoom over this
+    /// fixed canvas; the user sees more or less of it depending on
+    /// window size. On the first canvas size of this panel's life,
+    /// fit to container; later re-renders keep the user's pan/zoom.
+    func applyCanvasSize(_ size: NSSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        let frame = NSRect(origin: .zero, size: size)
+        canvasHost.frame = frame
+        webView.frame = frame
+        canvasHost.layoutSubtreeIfNeeded()
+        if !hasFittedOnce {
+            scrollView.smartFit()
+            hasFittedOnce = true
+        }
     }
 
     private func runRender(body: String) async throws -> RenderResult {
@@ -380,28 +495,6 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
 
     func snapshot() async throws -> Data {
         try await SnapshotService.snapshotWebView(webView)
-    }
-
-    /// Freeze panzoom in the embedded template so user strokes stay
-    /// aligned with the content underneath while draw mode is active.
-    /// No-op for templates that didn't install panzoom (the JS hook
-    /// short-circuits when no controller exists yet).
-    func suspendInteraction() {
-        guard webView != nil else { return }
-        Task { @MainActor in
-            _ = try? await self.webView.evaluateJavaScript(
-                "window.__quickshow_panzoom_suspend && window.__quickshow_panzoom_suspend();"
-            )
-        }
-    }
-
-    func resumeInteraction() {
-        guard webView != nil else { return }
-        Task { @MainActor in
-            _ = try? await self.webView.evaluateJavaScript(
-                "window.__quickshow_panzoom_resume && window.__quickshow_panzoom_resume();"
-            )
-        }
     }
 
     // MARK: - WKNavigationDelegate
@@ -441,15 +534,21 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
     }
 }
 
-// MARK: - Markup action
+// MARK: - WebView host
 
-/// One markup event posted from the WebView. `send` carries the
-/// flattened PNG bytes (already base64-decoded); `dismiss` carries no
-/// payload. The renderer hands these straight to `onMarkupEvent`; the
-/// session layer turns them into NDJSON log lines + on-disk artifacts.
-enum MarkupAction: Sendable {
-    case send(pngBytes: Data)
-    case dismiss
+/// Thin wrapper around a `WKWebView` whose sole job is to bubble
+/// scroll-wheel events to its parent `NSScrollView`'s clip view.
+/// Without this, WKWebView eats wheel events before the scroll view
+/// sees them — making wheel-zoom in `ZoomableCanvasScrollView`
+/// silently fail over the WebView.
+///
+/// The host is the `documentView` of the scroll view; the WebView is
+/// the host's sole subview, autolayout-pinned to fill it.
+@MainActor
+final class WebViewHostView: NSView {
+    override func scrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)
+    }
 }
 
 // MARK: - Bridge message relay

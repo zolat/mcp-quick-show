@@ -30,6 +30,12 @@ export type UpsertRequest = {
   content_type: "markdown" | "svg" | "image" | "mermaid" | "html";
   form: "inline" | "path";
   body: string;
+  /**
+   * Optional canvas-width hint in points. HTMLRenderer sizes the
+   * WebView's CSS viewport to this before `loadHTMLString` so
+   * responsive designs lay out at the intended width.
+   */
+  width?: number;
 };
 
 export type CloseRequest = {

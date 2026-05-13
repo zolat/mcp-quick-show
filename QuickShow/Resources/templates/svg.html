@@ -26,7 +26,6 @@
 <div id="qs-content"></div>
 <div id="qs-error"></div>
 <!--QS_PURIFY-->
-<!--QS_PANZOOM-->
 <script>
 (function() {
   "use strict";
@@ -82,9 +81,6 @@
       }
       c.innerHTML = '';
       c.appendChild(svgEl);
-      if (typeof window.__quickshow_install_panzoom === 'function') {
-        window.__quickshow_install_panzoom(svgEl);
-      }
 
       const m = measure();
       window.webkit.messageHandlers.renderComplete.postMessage({

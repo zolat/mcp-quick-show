@@ -97,14 +97,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Headless markup test. Renders a markdown panel, drives both the
-    /// send and dismiss paths of the `markupEvent` bridge, and logs the
-    /// resulting events-log content + artifact presence so a shell test
-    /// can grep for the expected lines and bytes.
+    /// Headless markup test. Renders a markdown panel, drives both
+    /// the Send and Dismiss paths (via SessionManager, the same paths
+    /// the title-bar buttons trigger), and logs the resulting events-
+    /// log content + artifact presence so a shell test can grep for
+    /// the expected lines + bytes.
     private func runMarkupSmoke() {
         Task {
             do {
-                // Set session flag the way the sidecar would.
                 let session = "markup-smoke"
                 sessionManager.setFlag(
                     sessionId: session,
@@ -122,30 +122,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
 
                 guard let s = sessionManager.sessions[session],
-                      let panel = s.huds.first?.panels.first,
+                      let hud = s.huds.first,
+                      let panel = hud.panels.first,
                       let web = panel.renderer as? WebViewPanelRenderer else {
                     NSLog("QuickShow: TEST_MARKUP failed: renderer missing")
                     return
                 }
 
-                // 1x1 transparent PNG.
-                let png: [UInt8] = [
-                    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-                    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-                    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-                    0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
-                    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41,
-                    0x54, 0x78, 0x9c, 0x62, 0x00, 0x01, 0x00, 0x00,
-                    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
-                    0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
-                    0x42, 0x60, 0x82,
-                ]
-                let b64 = Data(png).base64EncodedString()
-                web.testInvokeMarkupBridge(["action": "send", "png_base64": b64])
-                // Same panel, dismiss path.
-                web.testInvokeMarkupBridge(["action": "dismiss"])
+                // Send path: inject a stroke via the in-DOM canvas
+                // bridge so the snapshot has something visible, then
+                // drive Send the same way the title-bar ✓ button does.
+                await web.appendStrokeForTest(MarkupStroke(
+                    points: [
+                        .init(x: 20, y: 20),
+                        .init(x: 80, y: 20),
+                        .init(x: 80, y: 80)
+                    ],
+                    color: MarkupStroke.defaultColor,
+                    width: MarkupStroke.defaultWidth
+                ))
+                sessionManager.sendActivePanelMarkup(sessionId: session, hudId: hud.id)
+                try await Task.sleep(nanoseconds: 600_000_000)
 
-                // Give the writer queue a tick.
+                // Dismiss path: a second panel that we close without
+                // sending (closing the just-sent one wouldn't fire a
+                // dismiss — markupSentPending suppresses it).
+                _ = try await sessionManager.upsert(
+                    sessionId: session,
+                    name: "discardable",
+                    contentType: "markdown",
+                    form: "inline",
+                    body: "# unused panel\n"
+                )
+                sessionManager.close(sessionId: session, name: "discardable")
+
                 try await Task.sleep(nanoseconds: 200_000_000)
 
                 let log = MarkupPaths.eventsLog(session)
@@ -156,7 +166,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     NSLog("QuickShow: TEST_MARKUP line[\(i)]=\(line)")
                 }
 
-                // Verify an artifact landed.
                 let artifactsDir = MarkupPaths.artifactsDir(session)
                 let artifacts = (try? FileManager.default.contentsOfDirectory(atPath: artifactsDir.path)) ?? []
                 let pngs = artifacts.filter { $0.hasSuffix(".png") }
@@ -285,51 +294,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     form: "inline",
                     body: "# draw + composite\n"
                 )
-                guard let hud4 = sessionManager.sessions[s4]?.huds.first?.window else {
+                guard let hud4 = sessionManager.sessions[s4]?.huds.first?.window,
+                      let hud4Instance = sessionManager.sessions[s4]?.huds.first,
+                      let panel4 = hud4Instance.panels.first(where: { $0.name == "design" }),
+                      let web4 = panel4.renderer as? WebViewPanelRenderer else {
                     NSLog("QuickShow: TEST_MARKUP_UI failed step=4 kind=no-hud")
                     return
                 }
                 hud4.toggleDrawMode()
-                let path = NSBezierPath()
-                path.move(to: NSPoint(x: 30, y: 30))
-                path.line(to: NSPoint(x: 120, y: 30))
-                path.line(to: NSPoint(x: 120, y: 120))
-                hud4.markupOverlay.appendStrokeForTest(
-                    MarkupOverlayView.Stroke(
-                        path: path,
-                        color: .systemRed,
-                        width: 8.0
-                    )
-                )
+                // CSS-pixel coords (Y-down) for the JS canvas. Stroke
+                // lands in the TOP-LEFT region of the document since
+                // the canvas mirrors the document's coord space.
+                await web4.appendStrokeForTest(MarkupStroke(
+                    points: [
+                        .init(x: 30, y: 30),
+                        .init(x: 120, y: 30),
+                        .init(x: 120, y: 120)
+                    ],
+                    color: MarkupStroke.defaultColor,
+                    width: 8.0
+                ))
                 hud4.performSendForTest()
-                try await Task.sleep(nanoseconds: 800_000_000)
+                try await Task.sleep(nanoseconds: 1_000_000_000)
                 let s4Artifacts = ((try? FileManager.default.contentsOfDirectory(atPath: MarkupPaths.artifactsDir(s4).path)) ?? []).filter { $0.hasSuffix(".png") }
-                var s4LowerLeftRed = false
-                var s4UpperRightRed = false
+                var s4UpperLeftRed = false
+                var s4LowerRightRed = false
                 if let first = s4Artifacts.first,
                    let data = try? Data(contentsOf: MarkupPaths.artifactsDir(s4).appendingPathComponent(first)),
                    let rep = NSBitmapImageRep(data: data) {
-                    // Stroke was drawn at overlay points (30,30)→(120,30)→(120,120),
-                    // which is the BOTTOM-LEFT quadrant of the overlay
-                    // (NSView Y-up). After compositing into a Y-up
-                    // bitmap context and PNG-encoding, that quadrant
-                    // appears at the BOTTOM-LEFT of the image — which
-                    // in `colorAt(x:y:)` (Y-down per pixel index) is
-                    // the LOWER-LEFT region. Assert red there AND
-                    // assert the UPPER-RIGHT region is clean. The
-                    // asymmetric expectation catches any orientation
-                    // flip we might have introduced.
-                    s4LowerLeftRed = detectsRedInRegion(
+                    // JS canvas coords are Y-down (CSS pixels); the
+                    // stroke at (30,30)→(120,30)→(120,120) lands in
+                    // the TOP-LEFT region of the rendered document.
+                    // `colorAt(x:y:)` is also Y-down, so we look in
+                    // the upper-left quadrant for red AND the lower-
+                    // right for absence — asymmetric expectation
+                    // catches any orientation flip in the new
+                    // takeSnapshot path.
+                    s4UpperLeftRed = detectsRedInRegion(
                         rep,
                         xRange: 0 ..< (rep.pixelsWide / 2),
-                        yRange: (rep.pixelsHigh / 2) ..< rep.pixelsHigh
-                    )
-                    s4UpperRightRed = detectsRedInRegion(
-                        rep,
-                        xRange: (rep.pixelsWide / 2) ..< rep.pixelsWide,
                         yRange: 0 ..< (rep.pixelsHigh / 2)
                     )
-                    NSLog("QuickShow: TEST_MARKUP_UI step=4 kind=draw artifact_bytes=\(data.count) px=\(rep.pixelsWide)x\(rep.pixelsHigh) llRed=\(s4LowerLeftRed) urRed=\(s4UpperRightRed)")
+                    s4LowerRightRed = detectsRedInRegion(
+                        rep,
+                        xRange: (rep.pixelsWide / 2) ..< rep.pixelsWide,
+                        yRange: (rep.pixelsHigh / 2) ..< rep.pixelsHigh
+                    )
+                    NSLog("QuickShow: TEST_MARKUP_UI step=4 kind=draw artifact_bytes=\(data.count) px=\(rep.pixelsWide)x\(rep.pixelsHigh) ulRed=\(s4UpperLeftRed) lrRed=\(s4LowerRightRed)")
                 } else {
                     NSLog("QuickShow: TEST_MARKUP_UI step=4 kind=draw artifact_missing")
                 }
@@ -383,15 +394,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let s6Dismissed = s6Lines.filter { $0.contains("\"markup_dismissed\"") }.count
                 NSLog("QuickShow: TEST_MARKUP_UI step=6 kind=rerender sent=\(s6Sent) dismissed=\(s6Dismissed)")
 
-                // ---- 7. Inactive-tab stroke wipe on re-render -------
+                // ---- 7. Strokes survive re-render -------------------
                 //
-                // Open two panels in one HUD, draw on b, switch to a
-                // (b commits + becomes inactive), re-render b while a
-                // is active. Switch back to b — overlay must be empty.
-                // Catches a bug where the wipe was gated on
-                // `activePanelName == name`, leaving inactive tabs'
-                // strokes stale.
-                let s7 = "markup-ui-inactive-wipe"
+                // The in-DOM canvas architecture preserves strokes
+                // across re-renders — Swift mirrors them onto
+                // `Panel.strokes` via the JS bridge and replays after
+                // each `update()`. Open two panels, draw on b, switch
+                // to a, re-render b. Assert Panel.strokes still has
+                // the stroke AND that the JS canvas (after switching
+                // back to b) reports the same count.
+                let s7 = "markup-ui-survives-rerender"
                 sessionManager.setFlag(
                     sessionId: s7,
                     key: "markup_events_armed",
@@ -409,26 +421,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     form: "inline",
                     body: "# panel b\n"
                 )
-                guard let hud7 = sessionManager.sessions[s7]?.huds.first?.window,
-                      let session7 = sessionManager.sessions[s7],
-                      let bPanel = session7.huds.first?.panels.first(where: { $0.name == "b" }) else {
+                guard let session7 = sessionManager.sessions[s7],
+                      let bPanel = session7.huds.first?.panels.first(where: { $0.name == "b" }),
+                      let bWeb = bPanel.renderer as? WebViewPanelRenderer else {
                     NSLog("QuickShow: TEST_MARKUP_UI failed step=7 kind=no-panel")
                     return
                 }
-                // After the second upsert, "b" is active. Add a
-                // stroke into b's overlay, then switch to a so the
-                // stroke commits into bPanel.strokes.
-                let bPath = NSBezierPath()
-                bPath.move(to: NSPoint(x: 40, y: 40))
-                bPath.line(to: NSPoint(x: 100, y: 100))
-                hud7.markupOverlay.appendStrokeForTest(
-                    MarkupOverlayView.Stroke(path: bPath, color: .systemRed, width: 5.0)
-                )
+                // After the second upsert, "b" is active. Inject a
+                // stroke via the JS bridge and let the strokesChanged
+                // round-trip mirror it into bPanel.strokes... except
+                // appendStrokeForTest is the silent path (no message
+                // back). So commit explicitly via popLast+set, or
+                // just write to Panel.strokes here for the test.
+                await bWeb.appendStrokeForTest(MarkupStroke(
+                    points: [.init(x: 40, y: 40), .init(x: 100, y: 100)],
+                    color: MarkupStroke.defaultColor,
+                    width: 5.0
+                ))
+                bPanel.strokes = await bWeb.getStrokes()
                 sessionManager.switchTab(in: s7, to: "a")
                 let bStrokesAfterSwitch = bPanel.strokes.count
-                // Re-render b while a is active. Per the wipe rule,
-                // bPanel.strokes should be cleared even though b isn't
-                // visible — content changed underneath.
+                // Re-render b while a is active. Under the new
+                // policy, bPanel.strokes survives (no auto-wipe) and
+                // the JS canvas gets replayed from Panel.strokes.
                 _ = try await sessionManager.upsert(
                     sessionId: s7, name: "b",
                     contentType: "markdown",
@@ -436,11 +451,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     body: "# panel b updated\n"
                 )
                 let bStrokesAfterReRender = bPanel.strokes.count
-                // Switch back to b — overlay should pull empty
-                // strokes from the wiped panel.
                 sessionManager.switchTab(in: s7, to: "b")
-                let overlayStrokesOnReturn = hud7.markupOverlay.currentStrokes().count
-                NSLog("QuickShow: TEST_MARKUP_UI step=7 kind=inactive-wipe afterCommit=\(bStrokesAfterSwitch) afterReRender=\(bStrokesAfterReRender) overlayOnReturn=\(overlayStrokesOnReturn)")
+                let bJsStrokesOnReturn = await bWeb.getStrokes().count
+                NSLog("QuickShow: TEST_MARKUP_UI step=7 kind=survives-rerender afterCommit=\(bStrokesAfterSwitch) afterReRender=\(bStrokesAfterReRender) jsOnReturn=\(bJsStrokesOnReturn)")
 
                 // Cleanup.
                 for s in [s1, s2, s3, s4, s6, s7] {
@@ -490,7 +503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func runPanZoomSmoke() {
         Task {
             do {
-                // --- Mermaid (WebKit pipeline) ---
+                // --- Mermaid (WebKit + outer scroll view) ---
                 _ = try await sessionManager.upsert(
                     sessionId: "panzoom-smoke",
                     name: "diagram",
@@ -501,33 +514,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try await Task.sleep(nanoseconds: 500_000_000)
                 guard let session = sessionManager.sessions["panzoom-smoke"],
                       let mermaidPanel = session.huds.first?.panels.first(where: { $0.name == "diagram" }),
-                      let webRenderer = mermaidPanel.renderer as? WebViewPanelRenderer else {
-                    NSLog("QuickShow: TEST_PANZOOM failed: no mermaid panel/renderer")
+                      let mermaidScroll = mermaidPanel.view as? ZoomableCanvasScrollView else {
+                    NSLog("QuickShow: TEST_PANZOOM failed: no mermaid scroll view")
                     return
                 }
-
-                let initial: Any? = try await webRenderer.webView.evaluateJavaScript(
-                    "JSON.stringify(window.__quickshow_panzoom_latest && window.__quickshow_panzoom_latest.state())"
+                let mermaidInitial = mermaidScroll.magnification
+                mermaidScroll.setMagnification(
+                    2.0,
+                    centeredAt: NSPoint(x: mermaidScroll.bounds.midX,
+                                        y: mermaidScroll.bounds.midY)
                 )
-                NSLog("QuickShow: TEST_PANZOOM mermaid_initial=\(initial ?? "nil")")
-
-                _ = try await webRenderer.webView.evaluateJavaScript(
-                    "window.__quickshow_panzoom_latest._wheel(-200, 100, 100)"
-                )
-                try await Task.sleep(nanoseconds: 100_000_000)
-                let zoomed: Any? = try await webRenderer.webView.evaluateJavaScript(
-                    "JSON.stringify(window.__quickshow_panzoom_latest.state())"
-                )
-                NSLog("QuickShow: TEST_PANZOOM mermaid_zoomed=\(zoomed ?? "nil")")
-
-                _ = try await webRenderer.webView.evaluateJavaScript(
-                    "window.__quickshow_panzoom_latest._resetForTest()"
-                )
-                try await Task.sleep(nanoseconds: 100_000_000)
-                let resetState: Any? = try await webRenderer.webView.evaluateJavaScript(
-                    "JSON.stringify(window.__quickshow_panzoom_latest.state())"
-                )
-                NSLog("QuickShow: TEST_PANZOOM mermaid_reset=\(resetState ?? "nil")")
+                let mermaidZoomed = mermaidScroll.magnification
+                mermaidScroll.fitToContainer()
+                let mermaidReset = mermaidScroll.magnification
+                NSLog("QuickShow: TEST_PANZOOM mermaid initial=\(mermaidInitial) zoomed=\(mermaidZoomed) reset=\(mermaidReset)")
 
                 // --- Image (NSScrollView pipeline) ---
                 let fixturePath = "/tmp/qs-phase1-render.png"
@@ -541,7 +541,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     )
                     try await Task.sleep(nanoseconds: 300_000_000)
                     if let imgPanel = session.huds.first?.panels.first(where: { $0.name == "picture" }),
-                       let scroll = imgPanel.view as? ZoomableImageScrollView {
+                       let scroll = imgPanel.view as? ZoomableCanvasScrollView {
                         let before = scroll.magnification
                         scroll.setMagnification(2.0, centeredAt: NSPoint(x: scroll.bounds.midX, y: scroll.bounds.midY))
                         let zoomed = scroll.magnification

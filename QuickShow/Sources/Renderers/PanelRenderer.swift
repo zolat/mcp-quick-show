@@ -14,6 +14,11 @@ struct PanelPayload: Sendable {
     let contentType: String
     let form: String          // "inline" | "path"
     let body: String
+    /// Optional canvas-width hint in points. HTMLRenderer uses this
+    /// to size the WebView's CSS viewport before `loadHTMLString` so
+    /// responsive designs lay out at the agent's intended width.
+    /// Renderers that don't care simply ignore it.
+    let width: Double?
 }
 
 /// Result of a successful render.
@@ -53,18 +58,17 @@ protocol PanelRenderer: AnyObject {
     /// Includes any error UI if the last update failed.
     func snapshot() async throws -> Data
 
-    /// Suspend interactive transforms (pan, zoom, scroll-magnification)
-    /// while the user is drawing markup strokes on top. Keeps the
-    /// strokes coherent with the content underneath. Default is a
-    /// no-op for renderers that have nothing to suspend.
-    func suspendInteraction()
-
-    /// Resume interactive transforms after draw mode exits.
-    func resumeInteraction()
+    /// The inner view the markup overlay anchors strokes to. For
+    /// WebView renderers this is the inner `WKWebView` (not the
+    /// outer scroll view); for `ImageRenderer` it's the `NSImageView`.
+    /// Default returns `nil` — caller falls back to overlay-local
+    /// coordinates.
+    var canvasView: NSView? { get }
 }
 
 extension PanelRenderer {
-    /// Default no-ops — only renderers with pan/zoom override these.
-    func suspendInteraction() {}
-    func resumeInteraction() {}
+    /// Default: no canvas view → strokes captured in overlay-local
+    /// coords. Renderers that want canvas-anchored markup override
+    /// this with their inner content view.
+    var canvasView: NSView? { nil }
 }

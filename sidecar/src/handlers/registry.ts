@@ -23,6 +23,8 @@ export type NormalizedUpsert = {
   form: "inline" | "path";
   body: string;
   returnScreenshot: boolean;
+  /** Optional canvas-width hint in points (HTMLRenderer only today). */
+  width?: number;
 };
 
 /** Validation result a handler returns from `validate()`. */

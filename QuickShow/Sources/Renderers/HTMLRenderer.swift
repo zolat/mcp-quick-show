@@ -42,12 +42,24 @@ final class HTMLRenderer: WebViewPanelRenderer {
             pendingLoad = nil
             prev.resume(throwing: CancellationError())
         }
+        // Width hint: sizes the WebView's CSS viewport *before*
+        // `loadHTMLString` so responsive designs lay out at the
+        // agent's intended width rather than the default 400pt. We
+        // also bump the host so the scroll-view's `documentView`
+        // bounds match — without this, smartFit might pick the
+        // wrong zoom level on the first measure.
+        if let hintWidth = payload.width, hintWidth >= 100 {
+            let hintHeight = max(webView.bounds.height, 600)
+            let target = NSRect(
+                origin: .zero,
+                size: NSSize(width: hintWidth, height: hintHeight)
+            )
+            webView.frame = target
+            canvasHost.frame = target
+            canvasHost.layoutSubtreeIfNeeded()
+        }
         return try await withCheckedThrowingContinuation { cont in
             self.pendingLoad = cont
-            // `baseURL: nil` matches the rest of the renderers; relative
-            // URLs in the document won't resolve to anything network-
-            // reachable, which is the security posture we want even
-            // under the looser show_html CSP.
             self.webView.loadHTMLString(payload.body, baseURL: nil)
         }
     }
@@ -78,6 +90,11 @@ final class HTMLRenderer: WebViewPanelRenderer {
                 }
                 if let cont = self.pendingLoad {
                     self.pendingLoad = nil
+                    // Same canvas-pinning the base class does in its
+                    // template-driven `update`. Keep `applyCanvasSize`
+                    // on the success path so the user's pan/zoom is
+                    // preserved across re-renders.
+                    self.applyCanvasSize(NSSize(width: size.0, height: size.1))
                     cont.resume(returning: RenderResult(width: size.0, height: size.1))
                 }
             }

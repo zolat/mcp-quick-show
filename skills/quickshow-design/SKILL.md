@@ -9,7 +9,8 @@ You are designing real visual artifacts the user can see, mark up, and ship from
 
 Three QuickShow MCP tools, all installed and ready:
 
-- `show_html(name, content, return_screenshot?)` — render a complete, self-contained HTML document as a floating HUD panel. Reusing the same `name` updates the panel in place. **The content MUST be a full `<html>…</html>` document with all CSS/JS/fonts/images inlined**. No external CDN refs, no remote font URLs, no remote images. The rendering environment blocks external network requests by design.
+- `show_html(name, content, width?, return_screenshot?)` — render a complete, self-contained HTML document as a floating HUD panel. Reusing the same `name` updates the panel in place. **The content MUST be a full `<html>…</html>` document with all CSS/JS/fonts/images inlined**. No external CDN refs, no remote font URLs, no remote images. The rendering environment blocks external network requests by design.
+  - The optional `width` argument sets the canvas width in points (typically 800–1600). The rendered design becomes a fixed-width canvas; the user can pan + zoom freely. Without `width`, the canvas falls back to ~400pt — narrow for most designs.
 - `enable_markup_events()` — arms the panel so the user can mark it up. Returns a Monitor command instruction the user expects you to start.
 - `get_markup(artifact_id)` — fetch a marked-up snapshot the user sent back. Returns the image so you can see exactly what they drew.
 
@@ -20,7 +21,7 @@ Three QuickShow MCP tools, all installed and ready:
    - **A specific aesthetic stance.** Brutalist, editorial, Swiss, Bauhaus, anti-design — pick a direction and commit. If the brief is open-ended, decide based on the subject and tell the user up front which direction you're trying.
    - **Real content, not lorem ipsum.** Write the actual copy the design needs.
    - **Self-contained.** All styles inline. All scripts inline. All images via `data:` URIs or omitted. No external network requests of any kind.
-2. **Render it.** Call `show_html(name: "design", content: "<!doctype html><html>…</html>")`. The panel appears as a floating window. Subsequent revisions use the same `name`.
+2. **Render it.** Call `show_html(name: "design", content: "<!doctype html><html>…</html>", width: 1200)`. Pick a width that matches the design's intended canvas (e.g., 1280 for desktop landing pages, 800 for narrower content, 375 for mobile mocks). The panel appears as a floating window with pan + zoom on the canvas. Subsequent revisions use the same `name`.
 3. **Arm feedback.** Call `enable_markup_events()` once at the start of the design loop. The response includes a Monitor command — **start it** so markup events stream as user-visible notifications.
 4. **Wait for the user's reaction.** The user has two options:
    - **Send (✓):** they're approving the current state OR marking it up. Either way, they click Send and a `markup_sent` event lands in the log with an `artifact` UUID.

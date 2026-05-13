@@ -68,10 +68,11 @@ final class SessionManager: NSObject {
         let view: NSView
         /// Markup strokes the user has drawn over this panel. Lives on
         /// Panel (the unit that travels under tear-out/reattach) so
-        /// annotations follow the content across HUDs. Loaded into the
-        /// owning HUD's overlay on activation, committed back on
-        /// deactivation, and cleared by the Send flow.
-        var strokes: [MarkupOverlayView.Stroke] = []
+        /// annotations follow the content across HUDs. Mirrored to the
+        /// in-WebView `<canvas>` via `setStrokes` on each render so
+        /// strokes survive content updates; the JS bridge keeps this
+        /// array in sync on every pen-up / Cmd+Z.
+        var strokes: [MarkupStroke] = []
         /// True while a `markup_sent` artifact has been recorded for
         /// this panel's current render and the panel hasn't been
         /// re-rendered yet. Suppresses the close → `markup_dismissed`
@@ -146,7 +147,8 @@ final class SessionManager: NSObject {
                 name: String,
                 contentType: String,
                 form: String,
-                body: String) async throws -> (RenderResult, Data) {
+                body: String,
+                width: Double? = nil) async throws -> (RenderResult, Data) {
         let session = ensureSession(sessionId)
 
         // Locate the panel across all HUDs first (in-place update path).
@@ -154,7 +156,7 @@ final class SessionManager: NSObject {
             if panel.contentType == contentType {
                 return try await renderPanel(panel: panel, hud: hud,
                                              name: name, contentType: contentType,
-                                             form: form, body: body)
+                                             form: form, body: body, width: width)
             }
             // Same name, different type → swap the renderer in-place.
             hud.window.removePanel(name)
@@ -166,13 +168,13 @@ final class SessionManager: NSObject {
             }
             let view = renderer.makeView()
             let newPanel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
-            wireMarkupCallback(renderer: renderer, sessionId: sessionId, panelName: name)
+            wireStrokePersistence(renderer: renderer, sessionId: sessionId, panelName: name)
             let idx = hud.panels.firstIndex(where: { $0.name == name })!
             hud.panels[idx] = newPanel
             hud.window.installPanel(name: name, view: view)
             return try await renderPanel(panel: newPanel, hud: hud,
                                          name: name, contentType: contentType,
-                                         form: form, body: body)
+                                         form: form, body: body, width: width)
         }
 
         // Novel name → ensure primary HUD exists, append there.
@@ -185,53 +187,42 @@ final class SessionManager: NSObject {
         }
         let view = renderer.makeView()
         let panel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
-        wireMarkupCallback(renderer: renderer, sessionId: sessionId, panelName: name)
+        wireStrokePersistence(renderer: renderer, sessionId: sessionId, panelName: name)
         primary.panels.append(panel)
         primary.window.installPanel(name: name, view: view)
         return try await renderPanel(panel: panel, hud: primary,
                                      name: name, contentType: contentType,
-                                     form: form, body: body)
+                                     form: form, body: body, width: width)
     }
 
-    /// Hook a WebView-based renderer's `markupEvent` bridge so user
-    /// actions on the panel turn into NDJSON events + on-disk artifacts.
-    /// No-op for image renderers (no markup surface). Also wires the
-    /// scroll bridge so the markup overlay can keep strokes anchored
-    /// to content when the active panel scrolls.
-    private func wireMarkupCallback(renderer: any PanelRenderer, sessionId: String, panelName: String) {
+    /// Hook a renderer's markup-canvas bridge so strokes captured in
+    /// the JS-side `<canvas>` mirror into `Panel.strokes` on every
+    /// change. Image + HTML + template renderers all subclass
+    /// `WebViewPanelRenderer`, so this works uniformly.
+    ///
+    /// The closures look up `(hud, panel)` via `locate(in:name:)` at
+    /// call time so they follow the panel across tear-out / reattach.
+    private func wireStrokePersistence(renderer: any PanelRenderer, sessionId: String, panelName: String) {
         guard let web = renderer as? WebViewPanelRenderer else { return }
-        web.onMarkupEvent = { [weak self] action in
-            guard let self = self else { return }
-            switch action {
-            case .send(let pngBytes):
-                _ = self.recordMarkupSent(sessionId: sessionId, panel: panelName, pngBytes: pngBytes)
-            case .dismiss:
-                self.recordMarkupDismissed(sessionId: sessionId, panel: panelName)
+        web.onStrokesChanged = { [weak self] strokes in
+            guard let self = self,
+                  let session = self.sessions[sessionId],
+                  let (hud, p) = self.locate(in: session, name: panelName) else { return }
+            p.strokes = strokes
+            // Only refresh title-bar UI if THIS panel is the active
+            // one in its HUD — strokes added on a hidden tab still
+            // mirror into Panel.strokes (for when the user switches
+            // back) but don't change the visible button state.
+            if hud.window.activePanelName == panelName {
+                hud.window.setActivePanelHasStrokes(!strokes.isEmpty)
             }
         }
-        web.onScrollChanged = { [weak self] scroll in
-            self?.forwardScrollToOverlay(
-                sessionId: sessionId,
-                panelName: panelName,
-                scroll: scroll
-            )
-        }
-    }
-
-    /// Forward a panel's scroll-change event to its HUD's markup
-    /// overlay — but ONLY when the panel is the active one. Background
-    /// panels' scrolls don't repaint anything; their strokes already
-    /// carry their own `anchorScroll` and will re-anchor correctly
-    /// when activated.
-    private func forwardScrollToOverlay(sessionId: String,
-                                        panelName: String,
-                                        scroll: NSPoint) {
-        guard let session = sessions[sessionId] else { return }
-        for hud in session.huds {
-            if hud.window.activePanelName == panelName,
-               hud.panels.contains(where: { $0.name == panelName }) {
-                hud.window.markupOverlay.setCurrentScroll(scroll)
-                return
+        web.onMarkupEscape = { [weak self] in
+            guard let self = self,
+                  let session = self.sessions[sessionId],
+                  let (hud, _) = self.locate(in: session, name: panelName) else { return }
+            if hud.window.isInDrawMode {
+                hud.window.toggleDrawMode()
             }
         }
     }
@@ -241,35 +232,46 @@ final class SessionManager: NSObject {
                              name: String,
                              contentType: String,
                              form: String,
-                             body: String) async throws -> (RenderResult, Data) {
+                             body: String,
+                             width: Double? = nil) async throws -> (RenderResult, Data) {
         hud.window.setActivePanel(name)
         hud.window.updateTabs(hud.panels.map(\.name))
-        // Re-render means the content has changed underneath any
-        // previously-drawn strokes — wipe them so the next close
-        // is again a "dismiss without send", and so stale strokes
-        // don't fight the new content.
-        //
-        // The mid-stroke guard applies ONLY when the user is actively
-        // drawing on THIS panel right now (active + mid-drag). In that
-        // case, dropping their stroke mid-gesture would feel like a
-        // glitch — keep their work; their mouseUp will commit and the
-        // next re-render will wipe normally. For inactive tabs, the
-        // wipe always proceeds — the user isn't watching, so stale
-        // strokes would just resurface on next tab switch.
+        // A re-render resets the "send → close" guard: after Send the
+        // panel held `markupSentPending = true` so a follow-on close
+        // wouldn't emit a phantom `markup_dismissed`. A re-render is a
+        // fresh round of content, so the next close on it IS a real
+        // dismissal.
         panel.markupSentPending = false
-        let overlay = hud.window.markupOverlay
-        let isActiveAndDragging =
-            hud.window.activePanelName == name && overlay.isCurrentlyDragging
-        if !isActiveAndDragging {
-            panel.strokes = []
-            if hud.window.activePanelName == name {
-                overlay.loadStrokes([])
-            }
-        }
-        let payload = PanelPayload(name: name, contentType: contentType, form: form, body: body)
+        // Strokes survive re-render under the new in-DOM canvas
+        // architecture — the user uses the ⌫ button to clear them.
+        let payload = PanelPayload(
+            name: name,
+            contentType: contentType,
+            form: form,
+            body: body,
+            width: width
+        )
         do {
             let result = try await panel.renderer.update(payload: payload)
-            hud.window.sizeToContent(width: result.width, height: result.height)
+            // Replay persisted strokes into the WebView's in-DOM
+            // canvas. Required because:
+            //  - HTMLRenderer / ImageRenderer reload the document on
+            //    each update — JS state (including __qsMarkup's
+            //    `strokes` array) is wiped.
+            //  - Template renderers (markdown/svg/mermaid) keep JS
+            //    state across __quickshow_render calls, so the replay
+            //    is a redundant but cheap no-op.
+            // The HUD window stays at whatever size the user has it.
+            // Canvas dimensions live inside the renderer's scroll
+            // view now — pan/zoom changes how much of the canvas is
+            // visible, never reflows content.
+            if let web = panel.renderer as? WebViewPanelRenderer,
+               !panel.strokes.isEmpty {
+                await web.setStrokes(panel.strokes)
+            }
+            if hud.window.activePanelName == name {
+                hud.window.setActivePanelHasStrokes(!panel.strokes.isEmpty)
+            }
             let snapshot = try await panel.renderer.snapshot()
             return (result, snapshot)
         } catch let renderFailure as RenderFailure {
@@ -407,63 +409,37 @@ final class SessionManager: NSObject {
         return artifactId
     }
 
-    /// Take a snapshot of the active panel inside `hudId`, composite
-    /// any overlay strokes on top, emit `markup_sent`, then exit draw
-    /// mode and clear the overlay. Wired to the title-bar Send button
-    /// in `wireHudCallbacks`.
+    /// Snapshot the active panel's WebView — which already includes
+    /// the in-DOM markup canvas pixels — and emit `markup_sent` with
+    /// the resulting PNG. No separate composite step: the strokes are
+    /// part of the rendered document. Wired to the title-bar Send
+    /// button in `wireHudCallbacks`.
     func sendActivePanelMarkup(sessionId: String, hudId: UUID) {
         guard let session = sessions[sessionId],
               let hud = session.huds.first(where: { $0.id == hudId }),
               let activeName = hud.window.activePanelName,
-              let panel = hud.panels.first(where: { $0.name == activeName }) else {
+              let panel = hud.panels.first(where: { $0.name == activeName }),
+              let web = panel.renderer as? WebViewPanelRenderer else {
             return
         }
-        let overlay = hud.window.markupOverlay
-        let strokesAtSend = overlay.currentStrokes()
-
+        _ = session  // used only for the locate-by-id chain above
         Task { @MainActor [weak self] in
             guard let self = self else { return }
             do {
-                let composite: Data
-                // WebView-backed renderers get a full-document snapshot
-                // (everything, not just the visible scrolled region)
-                // with strokes translated from viewport→document
-                // coords. ImageRenderer + anything else falls back to
-                // the visible-bounds path.
-                if let web = panel.renderer as? WebViewPanelRenderer,
-                   let webView = web.webView {
-                    let (docPNG, docSize, viewBounds, _) =
-                        try await SnapshotService.snapshotFullDocument(webView)
-                    composite = SnapshotService.compositeMarkupFullPage(
-                        documentPNG: docPNG,
-                        strokes: strokesAtSend,
-                        viewBoundsPt: viewBounds,
-                        docSizePt: docSize
-                    ) ?? docPNG
-                } else {
-                    let underlying = try await panel.renderer.snapshot()
-                    composite = SnapshotService.compositeMarkup(
-                        underlyingPNG: underlying,
-                        strokes: strokesAtSend,
-                        viewBoundsPt: panel.view.bounds.size
-                    ) ?? underlying
-                }
+                // Exit draw mode first so the JS canvas hides its
+                // crosshair cursor before we snapshot. The strokes
+                // themselves remain visible (we only flip pointer-
+                // events; the canvas content stays painted).
+                await web.exitDrawMode()
+                let png = try await SnapshotService.snapshotWebViewFullDoc(web.webView)
                 _ = self.recordMarkupSent(
                     sessionId: sessionId,
                     panel: activeName,
-                    pngBytes: composite
+                    pngBytes: png
                 )
-                // Leave strokes on screen so the user sees their
-                // annotation was captured (otherwise the screen
-                // snaps clean and feels like the send didn't take).
-                // The next agent re-render of this panel is what
-                // wipes them (see renderPanel).
-                //
-                // Exit draw mode though — the gesture is complete; if
-                // the user wants to add more strokes they'll re-enter
-                // explicitly. Cmd+Z still pops strokes one at a time
-                // for manual cleanup if they want a clean slate
-                // without waiting for the agent.
+                // Strokes stay on screen as visible proof the Send
+                // took. The user can clear with ⌫ or keep iterating;
+                // they survive re-render now (see renderPanel).
                 if hud.window.isInDrawMode {
                     hud.window.toggleDrawMode()
                 }
@@ -651,29 +627,28 @@ final class SessionManager: NSObject {
         window.onTitleBarDragEnd = { [weak self] cursor in
             self?.handleHudDragEnd(sessionId: sessionId, hudId: hudId, cursor: cursor)
         }
-        // Markup: title-bar Send button → composite + emit; draw mode
-        // toggle → suspend/resume renderer interaction on the active
-        // panel so panning doesn't drift the underlying content while
-        // strokes are being drawn.
+        // Markup wiring. Strokes live in each WebView's in-DOM
+        // canvas (`window.__qsMarkup`), mirrored to `Panel.strokes`
+        // via the renderer's `onStrokesChanged` callback. The HUD
+        // routes title-bar button clicks back here:
         window.onSendActivePanelMarkup = { [weak self] in
             self?.sendActivePanelMarkup(sessionId: sessionId, hudId: hudId)
         }
-        window.onDrawModeChanged = { [weak self] on in
-            self?.handleDrawModeChanged(sessionId: sessionId, hudId: hudId, on: on)
+        window.onClearActivePanelMarkup = { [weak self] in
+            self?.clearActivePanelMarkup(sessionId: sessionId, hudId: hudId)
         }
-        window.onCommitStrokes = { [weak self] name, strokes in
-            self?.commitStrokes(sessionId: sessionId, hudId: hudId,
-                                panel: name, strokes: strokes)
+        window.onDrawModeChanged = { [weak self] enter in
+            self?.applyDrawMode(sessionId: sessionId, hudId: hudId, enter: enter)
         }
-        window.onLoadStrokes = { [weak self] name in
-            return self?.loadStrokes(sessionId: sessionId, hudId: hudId, panel: name) ?? []
-        }
-        window.onResolveActivePanelScroll = { [weak self] name in
-            return self?.resolveActivePanelScroll(
-                sessionId: sessionId,
-                hudId: hudId,
-                panel: name
-            ) ?? .zero
+        window.onResolveActiveStrokesEmpty = { [weak self] in
+            guard let self = self,
+                  let session = self.sessions[sessionId],
+                  let hud = session.huds.first(where: { $0.id == hudId }),
+                  let activeName = hud.window.activePanelName,
+                  let panel = hud.panels.first(where: { $0.name == activeName }) else {
+                return true
+            }
+            return panel.strokes.isEmpty
         }
         window.onResolveArmedFlag = { [weak self] in
             return self?.flag(sessionId: sessionId, key: "markup_events_armed")?.asBool == true
@@ -689,65 +664,35 @@ final class SessionManager: NSObject {
         window.setArmed(armed)
     }
 
-    /// Persist the overlay's strokes back onto the Panel that owns
-    /// them. Called on tab switch + every onStrokesChanged event.
-    private func commitStrokes(sessionId: String,
-                               hudId: UUID,
-                               panel: String,
-                               strokes: [MarkupOverlayView.Stroke]) {
+    /// Enter / exit draw mode on the active panel's renderer. Sent
+    /// from the title-bar pencil click via HUDWindow's
+    /// `onDrawModeChanged` callback.
+    private func applyDrawMode(sessionId: String, hudId: UUID, enter: Bool) {
         guard let session = sessions[sessionId],
               let hud = session.huds.first(where: { $0.id == hudId }),
-              let p = hud.panels.first(where: { $0.name == panel }) else {
-            return
+              let activeName = hud.window.activePanelName,
+              let panel = hud.panels.first(where: { $0.name == activeName }),
+              let web = panel.renderer as? WebViewPanelRenderer else { return }
+        Task { @MainActor in
+            if enter { await web.enterDrawMode() } else { await web.exitDrawMode() }
         }
-        p.strokes = strokes
     }
 
-    /// Fetch the strokes currently stored on a panel so the overlay
-    /// can re-load them when the panel becomes active again.
-    private func loadStrokes(sessionId: String,
-                             hudId: UUID,
-                             panel: String) -> [MarkupOverlayView.Stroke] {
-        guard let session = sessions[sessionId],
-              let hud = session.huds.first(where: { $0.id == hudId }),
-              let p = hud.panels.first(where: { $0.name == panel }) else {
-            return []
-        }
-        return p.strokes
-    }
-
-    /// Read the active panel's current WebView scroll position so the
-    /// overlay re-anchors loaded strokes against it. Returns zero for
-    /// non-WebView renderers (ImageRenderer) — scroll-following is a
-    /// WebView-only feature today.
-    private func resolveActivePanelScroll(sessionId: String,
-                                          hudId: UUID,
-                                          panel: String) -> NSPoint {
-        guard let session = sessions[sessionId],
-              let hud = session.huds.first(where: { $0.id == hudId }),
-              let p = hud.panels.first(where: { $0.name == panel }),
-              let web = p.renderer as? WebViewPanelRenderer else {
-            return .zero
-        }
-        return web.currentScroll
-    }
-
-    /// Draw mode toggled on/off — fan the signal out to the active
-    /// renderer so panzoom + scroll-magnification stop fighting the
-    /// user's drawing.
-    private func handleDrawModeChanged(sessionId: String,
-                                       hudId: UUID,
-                                       on: Bool) {
+    /// Clear all strokes from the active panel — wipes both the
+    /// in-DOM canvas via the JS bridge and the Swift-side mirror in
+    /// `Panel.strokes`. Title-bar ⌫ button calls this via the HUD's
+    /// `onClearActivePanelMarkup` callback.
+    private func clearActivePanelMarkup(sessionId: String, hudId: UUID) {
         guard let session = sessions[sessionId],
               let hud = session.huds.first(where: { $0.id == hudId }),
               let activeName = hud.window.activePanelName,
               let panel = hud.panels.first(where: { $0.name == activeName }) else {
             return
         }
-        if on {
-            panel.renderer.suspendInteraction()
-        } else {
-            panel.renderer.resumeInteraction()
+        panel.strokes = []
+        hud.window.setActivePanelHasStrokes(false)
+        if let web = panel.renderer as? WebViewPanelRenderer {
+            Task { @MainActor in await web.clearMarkup() }
         }
     }
 

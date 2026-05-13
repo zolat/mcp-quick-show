@@ -136,6 +136,7 @@ async function main() {
       content_type: payload.contentType,
       form: payload.form,
       body: payload.body,
+      ...(payload.width !== undefined ? { width: payload.width } : {}),
     });
 
     if (resp.kind === "ok") {

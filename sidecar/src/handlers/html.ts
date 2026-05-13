@@ -52,6 +52,11 @@ const handler: ContentTypeHandler = {
         description:
           "Complete, self-contained HTML document (up to 10 MB). Must be a full <html>...</html> with all CSS/JS/fonts/images inlined.",
       },
+      width: {
+        type: "number",
+        description:
+          "Optional canvas width in points (typically 320–2400). Sizes the WebView's CSS viewport before the page lays out, so responsive designs render at this width. If omitted, the default ~400pt viewport is used — fine for designs that explicitly set their own widths in CSS, narrow for responsive ones. The user can pan + zoom the result regardless of canvas width.",
+      },
       return_screenshot: {
         type: "boolean",
         description:
@@ -79,6 +84,17 @@ const handler: ContentTypeHandler = {
       };
     }
     const returnScreenshot = args.return_screenshot !== false;
+    let width: number | undefined;
+    if (args.width !== undefined) {
+      if (typeof args.width !== "number" || !Number.isFinite(args.width)
+          || args.width < 100 || args.width > 4096) {
+        return {
+          ok: false,
+          error: "`width` must be a finite number between 100 and 4096 points",
+        };
+      }
+      width = Math.round(args.width);
+    }
     return {
       ok: true,
       payload: {
@@ -87,6 +103,7 @@ const handler: ContentTypeHandler = {
         form: "inline",
         body: content,
         returnScreenshot,
+        width,
       },
     };
   },
