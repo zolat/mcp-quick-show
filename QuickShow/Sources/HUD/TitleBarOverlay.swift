@@ -65,16 +65,26 @@ final class TitleBarOverlay: NSView {
     /// something to clear.
     private var hasStrokes: Bool = false
 
+    /// Arthur "elevated" surface — sits one step above the contentHost
+    /// background (#1c1c1c). Hex matches the style guide's `elevated`
+    /// token; full opacity for now since the top-bar rework is roadmap.
+    private static let arthurElevated = NSColor(
+        red:  42/255.0, green: 38/255.0, blue: 32/255.0, alpha: 1.0
+    )
+    /// Arthur `text-muted` — soft sage-gray for icons + the panel name.
+    private static let arthurTextMuted = NSColor(
+        red: 168/255.0, green: 169/255.0, blue: 158/255.0, alpha: 1.0
+    )
+
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: 400, height: Self.height))
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor
-            .withAlphaComponent(0.85).cgColor
+        layer?.backgroundColor = Self.arthurElevated.cgColor
         layer?.cornerRadius = 6
 
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        titleLabel.textColor = .secondaryLabelColor
+        titleLabel.textColor = Self.arthurTextMuted
         titleLabel.alignment = .left
         titleLabel.lineBreakMode = .byTruncatingTail
         addSubview(titleLabel)
@@ -88,7 +98,7 @@ final class TitleBarOverlay: NSView {
         snapshotButton.translatesAutoresizingMaskIntoConstraints = false
         snapshotButton.isBordered = false
         snapshotButton.font = .systemFont(ofSize: 13, weight: .medium)
-        snapshotButton.contentTintColor = .secondaryLabelColor
+        snapshotButton.contentTintColor = Self.arthurTextMuted
         snapshotButton.target = self
         snapshotButton.action = #selector(handleSnapshot)
         snapshotButton.toolTip = "Save snapshot to ~/Downloads"
@@ -101,7 +111,7 @@ final class TitleBarOverlay: NSView {
         markupButton.translatesAutoresizingMaskIntoConstraints = false
         markupButton.isBordered = false
         markupButton.font = .systemFont(ofSize: 13, weight: .medium)
-        markupButton.contentTintColor = .secondaryLabelColor
+        markupButton.contentTintColor = Self.arthurTextMuted
         markupButton.target = self
         markupButton.action = #selector(handleMarkup)
         markupButton.toolTip = "Toggle markup draw mode"
@@ -111,7 +121,7 @@ final class TitleBarOverlay: NSView {
         clearMarkupButton.translatesAutoresizingMaskIntoConstraints = false
         clearMarkupButton.isBordered = false
         clearMarkupButton.font = .systemFont(ofSize: 13, weight: .medium)
-        clearMarkupButton.contentTintColor = .secondaryLabelColor
+        clearMarkupButton.contentTintColor = Self.arthurTextMuted
         clearMarkupButton.target = self
         clearMarkupButton.action = #selector(handleClearMarkup)
         clearMarkupButton.toolTip = "Clear markup strokes"
@@ -131,7 +141,7 @@ final class TitleBarOverlay: NSView {
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.isBordered = false
         closeButton.font = .systemFont(ofSize: 14, weight: .medium)
-        closeButton.contentTintColor = .secondaryLabelColor
+        closeButton.contentTintColor = Self.arthurTextMuted
         closeButton.target = self
         closeButton.action = #selector(handleClose)
         addSubview(closeButton)
@@ -224,7 +234,7 @@ final class TitleBarOverlay: NSView {
         drawModeActive = active
         markupButton.contentTintColor = active
             ? .controlAccentColor
-            : .secondaryLabelColor
+            : Self.arthurTextMuted
     }
 
     @objc private func handleSessionFlagChanged(_ note: Notification) {

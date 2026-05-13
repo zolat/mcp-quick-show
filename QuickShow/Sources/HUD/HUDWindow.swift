@@ -181,6 +181,16 @@ final class HUDWindow: NSWindow {
         root.layer?.masksToBounds = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
+        // Arthur palette: warm dark grey (#1c1c1c) behind the canvas,
+        // so the rendered content sits on a deliberate "stage"
+        // background instead of the system window color.
+        contentHost.wantsLayer = true
+        contentHost.layer?.backgroundColor = NSColor(
+            red:  28/255.0,
+            green: 28/255.0,
+            blue: 28/255.0,
+            alpha: 1.0
+        ).cgColor
         contentHost.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(contentHost)
         NSLayoutConstraint.activate([

@@ -153,6 +153,16 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
             wv.trailingAnchor.constraint(equalTo: host.trailingAnchor),
             wv.bottomAnchor.constraint(equalTo: host.bottomAnchor),
         ])
+        // Subtle border around the canvas so the content edges are
+        // visible against the Arthur dark-grey HUD background.
+        // rgba(255,255,255,0.10) — a touch above the style guide's
+        // 0.07 since we want it to read clearly on #1c1c1c.
+        host.wantsLayer = true
+        host.layer?.borderWidth = 1
+        host.layer?.borderColor = NSColor(
+            white: 1.0,
+            alpha: 0.10
+        ).cgColor
         canvasHost = host
 
         // Outer scroll view: pan + zoom on the host. `documentView` is
@@ -309,10 +319,15 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
     // `[MarkupStroke]` via the same JSONSerialization round-trip.
 
     func enterDrawMode() async {
+        // Suppress the scroll view's open-hand pan cursor while
+        // drawing so the JS canvas's crosshair cursor (set by
+        // markup-canvas.js on enterDrawMode) is what the user sees.
+        scrollView.isInDrawMode = true
         await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.enterDrawMode();")
     }
 
     func exitDrawMode() async {
+        scrollView.isInDrawMode = false
         await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.exitDrawMode();")
     }
 

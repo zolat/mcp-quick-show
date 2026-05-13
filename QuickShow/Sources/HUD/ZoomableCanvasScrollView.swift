@@ -30,11 +30,45 @@ final class ZoomableCanvasScrollView: NSScrollView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        installCenteringClipView()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        installCenteringClipView()
+    }
+
+    /// Swap the default clip view for one that centers the document
+    /// when it's smaller than the visible bounds. Must run before
+    /// `documentView` is assigned (assigning `contentView` clears the
+    /// existing documentView). Our caller — WebViewPanelRenderer's
+    /// `makeView()` — assigns documentView after construction, so the
+    /// init-time replacement here is safe.
+    private func installCenteringClipView() {
+        let clip = CenteringClipView()
+        clip.drawsBackground = false
+        self.contentView = clip
+    }
+
     /// Fired any time the canvas → screen transform changes:
     /// magnification flips, pan origin moves, fit recompute. The
     /// markup overlay binds this to invalidate its display so its
     /// canvas-space strokes re-render at the right screen positions.
     var onTransformChanged: (() -> Void)?
+
+    /// When true, suppress the open-/closed-hand pan cursor — the
+    /// active panel is in draw mode and the WebView's in-DOM canvas
+    /// has its own (crosshair) cursor that should show through. Pan
+    /// itself is naturally blocked in draw mode anyway (the canvas
+    /// captures mouseDown), so the cursor would have been lying.
+    var isInDrawMode: Bool = false {
+        didSet {
+            guard oldValue != isInDrawMode else { return }
+            window?.invalidateCursorRects(for: self)
+        }
+    }
 
     // MARK: - Fit modes
 
@@ -155,8 +189,33 @@ final class ZoomableCanvasScrollView: NSScrollView {
     }
 
     override func resetCursorRects() {
+        if isInDrawMode { return }
         if magnification > minMagnification + 0.01 {
             addCursorRect(bounds, cursor: .openHand)
         }
+    }
+}
+
+// MARK: - Centering clip view
+
+/// NSClipView subclass that pulls the document toward the center of
+/// the visible bounds when the document is smaller than the clip. The
+/// standard AppKit recipe: override `constrainBoundsRect` to shift the
+/// clip's bounds origin into negative territory by the half-difference
+/// on each axis. When the doc is larger (zoomed in), the parent's
+/// implementation clamps the origin so panning works normally.
+@MainActor
+final class CenteringClipView: NSClipView {
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        var rect = super.constrainBoundsRect(proposedBounds)
+        guard let doc = documentView else { return rect }
+        let docFrame = doc.frame
+        if rect.size.width > docFrame.size.width {
+            rect.origin.x = (docFrame.size.width - rect.size.width) / 2
+        }
+        if rect.size.height > docFrame.size.height {
+            rect.origin.y = (docFrame.size.height - rect.size.height) / 2
+        }
+        return rect
     }
 }
