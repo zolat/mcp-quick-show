@@ -8,6 +8,8 @@ Companion docs:
 - `ROADMAP.md` — phase pointer. Read first. v0.1 is complete; new
   work lives outside the original phase list (markup feedback loop,
   HTML renderer, design skill).
+- `BACKLOG.md` — unscheduled post-v0.1 ideas. Agent-ready outlines;
+  move into ROADMAP.md as a phase when picking one up.
 - `PRD.md` — full v0.1 PRD (what + how).
 - `~/.claude/plans/mcp-quick-show-v01.md` — long-form plan with the
   *why* behind decisions.

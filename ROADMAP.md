@@ -41,11 +41,20 @@ DMG + refreshed README is the natural next milestone.
   top-bar tint `#2a2620` / `#a8a99e`
 - [x] Centered-fit when content < window; crosshair-cursor-in-draw-
   mode suppressing the scroll view's open-hand pan cursor
+- [x] Claude Code plugin distribution — `.claude-plugin/marketplace.json`
+  at repo root + `plugin/` tree (manifest, `.mcp.json` pointing at
+  bundled sidecar, foundational `quickshow` skill, adapted
+  `frontend-design` skill, `tic-tac-toe` demo skill)
+- [x] Demo skill: tic-tac-toe — `plugin/skills/tic-tac-toe/` ships
+  with the plugin; SVG board + markup-driven gameplay
+- [x] Demo skill: chess — `plugin/skills/chess/` with `chess_helper.py`
+  (uv inline-deps + python-chess), Unicode-glyph board renderer,
+  minimax-2 opponent
 
 ## Backlog
 
 Loosely sorted, no commitment. Pulled into a phase or into ad-hoc
-work as priorities firm up.
+work as priorities firm up. Longer outlines live in `BACKLOG.md`.
 
 - **Public release: v0.1.1.** README is stale (still pitches "v0.1
   in development" and doesn't mention the markup loop, `show_html`,
@@ -54,15 +63,12 @@ work as priorities firm up.
   loop + design skill, rebuild the DMG against current `main`, sign
   + notarize, tag `v0.1.1`, publish to GitHub Releases. This is
   the highest-ROI move — work is done, story isn't told.
-- **Demo skill: tic-tac-toe.** Showcases the markup feedback loop
-  as a true two-way interaction (vs. design which is one-way).
-  Agent renders a 3×3 grid via `show_html`, user draws their X in
-  a cell, agent reads the annotated PNG via `get_markup`, places
-  the O, re-renders. Isolated enough for a separate agent session
-  to scope + build under `skills/quickshow-tictactoe/`. Key design
-  choice: render cells at known fixed coords so the agent can map
-  stroke position → cell deterministically; have the skill ask
-  for clarification when the user's X is ambiguous.
+- **Interactive panels — DOM events back to Claude.** Generic
+  `window.quickshow.emit(...)` JS → Swift bridge → new
+  `panel_event` line in `events.ndjson`. Turns `show_html` panels
+  into real two-way UIs (click-to-move chess, dropdowns, form
+  submissions) instead of static renderings with arrow-on-PNG
+  markup. Full outline in `BACKLOG.md`.
 - **Top-bar rework.** Current top bar got a quick Arthur tint pass
   but is otherwise unchanged from v0.1. Open question: what
   belongs there once the markup loop is the marquee feature
