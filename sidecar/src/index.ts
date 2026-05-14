@@ -12,6 +12,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { SocketClient, DEFAULT_SOCKET_PATH } from "./socket.ts";
 import { getOrCreateSessionId } from "./session.ts";
+import type { HelloResult } from "./protocol.ts";
 import { locateAppBundle, launchAndWaitFor } from "./autolaunch.ts";
 import {
   allHandlers,
@@ -71,21 +72,33 @@ function asString(v: unknown): string | undefined {
 async function main() {
   const socketPath = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
   const client = new SocketClient(socketPath);
-  const sessionId = getOrCreateSessionId();
+  const candidateId = getOrCreateSessionId();
 
   await ensureConnected(client);
 
-  // Handshake.
+  // Handshake — send the cwd-derived candidate as a CLAIM. The app
+  // decides the authoritative session_id (it can override the claim
+  // to disambiguate parallel sidecars sharing a cwd) and returns it
+  // in the response. Everything downstream uses the granted id.
   const helloResp = await client.request({
     kind: "hello",
-    session_id: sessionId,
+    session_id: candidateId,
     client: process.env.MCP_CLIENT_ID ?? "claude-code",
+    parent_pid: process.ppid,
   });
   if (helloResp.kind !== "ok") {
     const err = "error" in helloResp ? helloResp.error : helloResp.kind;
     throw new Error(`hello rejected: ${err}`);
   }
-  console.error(`[mcp-quick-show] connected (session=${sessionId})`);
+  const granted = (helloResp.result as HelloResult).session_id;
+  const sessionId = granted;
+  if (granted === candidateId) {
+    console.error(`[mcp-quick-show] connected (session=${sessionId})`);
+  } else {
+    console.error(
+      `[mcp-quick-show] connected (session=${sessionId}, claim=${candidateId} contested)`,
+    );
+  }
 
   const server = new Server(
     { name: "mcp-quick-show", version: "0.1.0" },

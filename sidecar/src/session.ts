@@ -1,10 +1,12 @@
-// Persistent session UUID per MCP-server-config-hash.
+// Persistent per-cwd UUID used as the sidecar's CLAIM in `hello`.
 //
-// Why hash the config: different Claude Code projects launch the
-// sidecar with different cwds / env, and we want each to look like a
-// different "session" to the app. Same project across restarts maps to
-// the same UUID — that's what powers the reconnect-within-window
-// behavior in Phase 4.
+// The app is the authority on the granted `session_id` (it inspects
+// its per-FD session map at hello time). What this file produces is
+// the *candidate* id the sidecar offers: the same one across sidecar
+// restarts from the same cwd, which powers single-session reconnect
+// in `SessionManager`. The app grants it when no other live FD owns
+// it; otherwise the app returns a fresh UUID and the sidecar adopts
+// that — see `index.ts` for the adoption flow.
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -48,19 +50,26 @@ export function ensureMarkupDirs(sessionId: string): void {
   fs.mkdirSync(markupArtifactsDir(sessionId), { recursive: true, mode: 0o700 });
 }
 
-/** Compute a stable hash from the sidecar's invocation context. */
-function configHash(): string {
-  const parts = [process.cwd(), process.env.MCP_CLIENT_ID ?? "", process.argv0 ?? ""];
-  return crypto.createHash("sha256").update(parts.join("|")).digest("hex").slice(0, 16);
+/// Stable hash of the sidecar's working directory. Used to key the
+/// persisted candidate-UUID file so two sidecar runs from the same
+/// project propose the same claim. `MCP_CLIENT_ID` and `process.argv0`
+/// used to be in this hash too — both were noise (a placeholder env
+/// var Claude Code never sets, and a stable executable path) and
+/// added zero discrimination, so they're gone.
+function cwdHash(): string {
+  return crypto.createHash("sha256").update(process.cwd()).digest("hex").slice(0, 16);
 }
 
 /**
- * Returns a stable UUID for this sidecar invocation context. Persists
- * to `~/Library/Application Support/QuickShow/sessions/<hash>.uuid`
- * so reconnects within the same cwd reattach to the same HUD.
+ * Returns the candidate `session_id` for this sidecar invocation. The
+ * sidecar sends this in `hello`; the app's allocator may grant it as
+ * the authoritative id (single-session case) or override it with a
+ * fresh UUID (parallel-session contest). Persisted at
+ * `~/Library/Application Support/QuickShow/sessions/<cwdHash>.uuid` so
+ * the claim stays stable across sidecar restarts from the same cwd.
  */
 export function getOrCreateSessionId(): string {
-  const hash = configHash();
+  const hash = cwdHash();
   const sessionFile = path.join(SESSIONS_DIR, `${hash}.uuid`);
   try {
     const existing = fs.readFileSync(sessionFile, "utf8").trim();
