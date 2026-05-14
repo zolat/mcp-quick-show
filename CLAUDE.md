@@ -110,9 +110,9 @@ mcp-quick-show/
 │   ├── bin/                     compiled sidecar binary (gitignored; built by tools/build-plugin.sh)
 │   ├── skills/quickshow/        foundational "how to use QuickShow" skill
 │   ├── skills/frontend-design/  bold-aesthetic design + markup loop
-│   ├── skills/tic-tac-toe/      demo skill (markup-driven gameplay)
+│   ├── skills/tic-tac-toe/      demo skill (panel_event channel — click → emit → re-render)
 │   ├── skills/chess/            demo skill (markup-driven chess vs. minimax-2)
-│   └── skills/click-demo/       demo skill (panel_event channel — click → emit → re-render)
+│   └── skills/click-demo/       minimal panel_event demo (one button)
 ├── QuickShow/                   Swift app
 │   ├── Info.plist               LSUIElement
 │   ├── Resources/
