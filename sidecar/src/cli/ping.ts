@@ -8,6 +8,7 @@
 
 import { SocketClient, DEFAULT_SOCKET_PATH } from "../socket.ts";
 import { getOrCreateSessionId } from "../session.ts";
+import { helloHandshake } from "../handshake.ts";
 
 async function main() {
   const socketPath = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
@@ -20,19 +21,14 @@ async function main() {
     process.exit(2);
   }
 
-  const sessionId = getOrCreateSessionId();
-  const hello = await client.request({
-    kind: "hello",
-    session_id: sessionId,
-    client: "ping-cli",
-  });
-  console.log("hello:", JSON.stringify(hello));
+  const sessionId = await helloHandshake(client, getOrCreateSessionId(), "ping-cli");
+  console.log("hello: granted session_id =", sessionId);
 
   const ping = await client.request({ kind: "ping" });
   console.log("ping: ", JSON.stringify(ping));
 
   client.close();
-  process.exit(hello.kind === "ok" && ping.kind === "ok" ? 0 : 1);
+  process.exit(ping.kind === "ok" ? 0 : 1);
 }
 
 main().catch((err) => {

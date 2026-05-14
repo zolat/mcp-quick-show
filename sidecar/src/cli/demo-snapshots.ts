@@ -3,6 +3,7 @@
 
 import * as fs from "node:fs";
 import { SocketClient, DEFAULT_SOCKET_PATH } from "../socket.ts";
+import { helloHandshake } from "../handshake.ts";
 
 const SOCK = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
 
@@ -21,10 +22,10 @@ async function main() {
   // Simplest of all: open a new session, re-render the same content,
   // and snapshot via inspect. We render once + immediately inspect.
 
-  const sessionId = `demo-snapshots-${process.pid}`;
+  const candidate = `demo-snapshots-${process.pid}`;
   const client = new SocketClient(SOCK);
   await client.connect(2000);
-  await client.request({ kind: "hello", session_id: sessionId, client: "demo-snapshots" });
+  const sessionId = await helloHandshake(client, candidate, "demo-snapshots");
 
   const cases: Array<{ name: string; type: string; body: string; form: "inline" | "path" }> = [
     {

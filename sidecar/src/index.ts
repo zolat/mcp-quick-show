@@ -11,7 +11,8 @@ import {
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { SocketClient, DEFAULT_SOCKET_PATH } from "./socket.ts";
-import { getOrCreateSessionId } from "./session.ts";
+import { resolveSessionId } from "./session.ts";
+import { helloHandshake } from "./handshake.ts";
 import { locateAppBundle, launchAndWaitFor } from "./autolaunch.ts";
 import {
   allHandlers,
@@ -71,21 +72,33 @@ function asString(v: unknown): string | undefined {
 async function main() {
   const socketPath = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
   const client = new SocketClient(socketPath);
-  const sessionId = getOrCreateSessionId();
+  // Resolve the CLAIM. Primary path: the Claude conversation UUID,
+  // discovered from `~/.claude/projects/.../<uuid>.jsonl`. That id is
+  // distinct across parallel Claudes and stable across sidecar
+  // respawn / `claude --resume`, which is exactly what the app's
+  // session model wants. Falls back to env override or persisted cwd
+  // UUID — see `resolveSessionId` for the precedence chain.
+  const { id: candidateId, source } = await resolveSessionId();
+  console.error(`[mcp-quick-show] session id source: ${source} (claim=${candidateId})`);
 
   await ensureConnected(client);
 
-  // Handshake.
-  const helloResp = await client.request({
-    kind: "hello",
-    session_id: sessionId,
-    client: process.env.MCP_CLIENT_ID ?? "claude-code",
-  });
-  if (helloResp.kind !== "ok") {
-    const err = "error" in helloResp ? helloResp.error : helloResp.kind;
-    throw new Error(`hello rejected: ${err}`);
+  // Handshake — send the resolved id as the CLAIM. The app's
+  // allocator still does a live-FD contest check as belt-and-braces
+  // (with conversation-UUID claims this should never fire) and
+  // returns the granted id we adopt for everything downstream.
+  const sessionId = await helloHandshake(
+    client,
+    candidateId,
+    process.env.MCP_CLIENT_ID ?? "claude-code",
+  );
+  if (sessionId === candidateId) {
+    console.error(`[mcp-quick-show] connected (session=${sessionId})`);
+  } else {
+    console.error(
+      `[mcp-quick-show] connected (session=${sessionId}, claim=${candidateId} contested)`,
+    );
   }
-  console.error(`[mcp-quick-show] connected (session=${sessionId})`);
 
   const server = new Server(
     { name: "mcp-quick-show", version: "0.1.0" },

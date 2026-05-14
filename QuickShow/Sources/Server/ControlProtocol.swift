@@ -13,7 +13,7 @@ import Foundation
 // switching on `kind`.
 
 enum ControlProtocol {
-    static let version = "0.1"
+    static let version = "0.2"
 
     static let encoder: JSONEncoder = {
         let e = JSONEncoder()
@@ -117,22 +117,36 @@ enum ControlError: Error {
 
 // MARK: - Per-kind payload types
 
-/// `kind: "hello"` — handshake. Sidecar identifies itself + session.
+/// `kind: "hello"` — handshake. `sessionId` is a CLAIM the sidecar
+/// computed from its cwd; the app's allocator inspects its per-FD
+/// session map and either grants it or mints a fresh UUID when the
+/// claim is contested by another live connection. The granted id
+/// rides back in `HelloResult.sessionId`.
 struct HelloRequest: Decodable {
     let id: String?
     let kind: String
     let sessionId: String
     let client: String?
+    /// Informational — logged when a claim contest is resolved.
+    let parentPid: Int32?
 
     enum CodingKeys: String, CodingKey {
         case id, kind, client
         case sessionId = "session_id"
+        case parentPid = "parent_pid"
     }
 }
 
+/// `sessionId` is the GRANTED id — sidecar adopts unconditionally.
 struct HelloResult: Encodable {
     let version: String
     let pid: Int32
+    let sessionId: String
+
+    enum CodingKeys: String, CodingKey {
+        case version, pid
+        case sessionId = "session_id"
+    }
 }
 
 /// `kind: "ping"` — round-trip liveness check. No payload.

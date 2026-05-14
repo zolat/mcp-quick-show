@@ -10,22 +10,15 @@
 
 import { SocketClient, DEFAULT_SOCKET_PATH } from "../socket.ts";
 import { markupEventsLog } from "../session.ts";
+import { helloHandshake } from "../handshake.ts";
 
 async function main(): Promise<number> {
   const socketPath = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
-  const session = process.env.QUICKSHOW_VERIFY_SESSION ?? "live-test";
+  const claim = process.env.QUICKSHOW_VERIFY_SESSION ?? "live-test";
   const client = new SocketClient(socketPath);
   await client.connect(2000);
 
-  const hello = await client.request({
-    kind: "hello",
-    session_id: session,
-    client: "live-markup",
-  });
-  if (hello.kind !== "ok") {
-    console.error("hello rejected:", hello);
-    return 1;
-  }
+  const session = await helloHandshake(client, claim, "live-markup");
 
   const armed = await client.request({
     kind: "set_session_flag",
