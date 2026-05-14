@@ -65,9 +65,13 @@ enum ControlHandlers {
         let payload = try req.decodePayload(HelloRequest.self)
         NSLog("QuickShow: hello from session=\(payload.sessionId) client=\(payload.client ?? "?")")
         delegate?.sessionManager.registerSession(payload.sessionId)
+        // Allocator-driven path lands in a follow-up commit; for now
+        // echo the claim back as the granted id — same as today's
+        // behavior.
         return ControlOk(id: req.id, result: HelloResult(
             version: ControlProtocol.version,
-            pid: getpid()
+            pid: getpid(),
+            sessionId: payload.sessionId
         ))
     }
 

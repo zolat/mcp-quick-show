@@ -6,15 +6,24 @@
 //   sidecar → app:  {"id", "kind":"hello|ping|upsert|close|list|inspect|set_session_flag", ...}
 //   app → sidecar:  {"id", "kind":"ok|render_error|protocol_error", ...}
 
-export const PROTOCOL_VERSION = "0.1";
+export const PROTOCOL_VERSION = "0.2";
 
 // ---------- Requests (sidecar → app) ----------
 
+/// `session_id` is a CLAIM, not authoritative. The app inspects its
+/// per-FD session map and either grants the claim (first-ever sidecar
+/// from this cwd, or orphan-grace reattach) or mints a fresh UUID if
+/// the claim is already bound to a different live FD (parallel
+/// sessions from the same cwd). The granted id comes back in
+/// `HelloResult.session_id`; sidecar adopts that for every subsequent
+/// verb and for derived paths (events log, artifacts dir).
 export type HelloRequest = {
   id?: string;
   kind: "hello";
   session_id: string;
   client?: string;
+  /** Informational only — app logs it when a contest is resolved. */
+  parent_pid?: number;
 };
 
 export type PingRequest = {
@@ -107,7 +116,9 @@ export type ControlResponse =
 
 // ---------- Result payload types ----------
 
-export type HelloResult = { version: string; pid: number };
+/// `session_id` is the GRANTED id — sidecar adopts this unconditionally
+/// for downstream verbs and derived paths.
+export type HelloResult = { version: string; pid: number; session_id: string };
 export type PingResult = { version: string; pid: number };
 
 export type UpsertResult = {
