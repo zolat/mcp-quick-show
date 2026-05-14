@@ -161,6 +161,25 @@ Current verbs (sidecar → app): `hello`, `ping`, `upsert`, `close`,
 wire-protocol change. Only new verbs / response kinds require the
 paired-file edit.
 
+### session_id is app-allocated (since 0.2)
+
+`hello.session_id` is a CLAIM, not authoritative. The app's allocator
+(`ControlServer.allocateSessionId`) checks if any other live FD already
+holds the claim and either grants it (single-session reconnect case) or
+mints a fresh UUID (parallel-session contest from the same cwd). The
+granted id rides back in `HelloResult.session_id`; the sidecar adopts
+it for every subsequent verb and for derived paths
+(`events.ndjson`, artifacts dir).
+
+All sidecar code goes through `helloHandshake()` in
+`sidecar/src/handshake.ts` — single chokepoint, returns the granted id.
+Do not bypass it.
+
+`getOrCreateSessionId()` in `sidecar/src/session.ts` is the *candidate*
+source — a stable per-cwd UUID, persisted at
+`~/Library/Application Support/QuickShow/sessions/<cwdHash>.uuid`. It's
+the claim the sidecar offers, not the id it uses.
+
 ## Adding a new content type
 
 Three files + two registration lines, all documented in
