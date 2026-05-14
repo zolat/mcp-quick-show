@@ -5,36 +5,31 @@
 # ///
 """Chess helper for the QuickShow `chess` skill.
 
+The helper is ground truth — it tracks the position, validates moves,
+lists legal moves, and renders the board. It does **not** pick moves;
+Claude plays both sides using its own chess knowledge.
+
 Subcommands:
   new                                   → emit starting FEN as JSON
   render <fen> [--last-move uci]        → emit board SVG to stdout
-  render-html <fen> [...]               → emit clickable HTML to stdout
+  render-html <fen> [...]               → emit draggable HTML to stdout
   move <fen> <uci>                      → validate + apply a move
-  best <fen>                            → pick a move via minimax-2
   status <fen>                          → game status
   legal <fen> [--from sq]               → list legal moves
 
 All commands except `render` / `render-html` print one JSON object on
-stdout. `render` prints raw SVG; `render-html` prints a full HTML page
-that wraps the SVG with a click overlay (panel_event-driven).
+stdout. `render` prints raw SVG; `render-html` prints a full HTML
+page that wraps the SVG with a drag-and-drop overlay
+(panel_event-driven).
 """
 
 import argparse
 import json
-import sys
 
 import chess
 
 
 STARTING_FEN = chess.STARTING_FEN
-PIECE_VALUE = {
-    chess.PAWN: 1,
-    chess.KNIGHT: 3,
-    chess.BISHOP: 3,
-    chess.ROOK: 5,
-    chess.QUEEN: 9,
-    chess.KING: 0,
-}
 
 # Use the SOLID Unicode chess glyphs for both colours and tint with fill;
 # the outlined ("white") glyphs look thin on screen and don't render as
@@ -459,52 +454,6 @@ def normalize_uci(board: chess.Board, uci: str) -> chess.Move:
     return move
 
 
-def evaluate(board: chess.Board) -> int:
-    """Material balance from white's POV. Larger = better for white."""
-    if board.is_checkmate():
-        # Side to move is checkmated → very bad for them.
-        return -100000 if board.turn == chess.WHITE else 100000
-    if board.is_stalemate() or board.is_insufficient_material():
-        return 0
-    score = 0
-    for _sq, piece in board.piece_map().items():
-        v = PIECE_VALUE[piece.piece_type]
-        score += v if piece.color == chess.WHITE else -v
-    return score
-
-
-def minimax(board: chess.Board, depth: int, alpha: int, beta: int, maximizing: bool):
-    if depth == 0 or board.is_game_over():
-        return evaluate(board), None
-    best_move = None
-    if maximizing:
-        max_eval = -10**9
-        for move in board.legal_moves:
-            board.push(move)
-            score, _ = minimax(board, depth - 1, alpha, beta, False)
-            board.pop()
-            if score > max_eval:
-                max_eval = score
-                best_move = move
-            alpha = max(alpha, score)
-            if beta <= alpha:
-                break
-        return max_eval, best_move
-    else:
-        min_eval = 10**9
-        for move in board.legal_moves:
-            board.push(move)
-            score, _ = minimax(board, depth - 1, alpha, beta, True)
-            board.pop()
-            if score < min_eval:
-                min_eval = score
-                best_move = move
-            beta = min(beta, score)
-            if beta <= alpha:
-                break
-        return min_eval, best_move
-
-
 def cmd_new(_args):
     emit({"fen": STARTING_FEN})
 
@@ -590,31 +539,6 @@ def cmd_move(args):
     })
 
 
-def cmd_best(args):
-    board = chess.Board(args.fen)
-    if board.is_game_over():
-        emit({"ok": False, "error": "game over", "status": status_str(board)})
-        return
-    maximizing = board.turn == chess.WHITE
-    _, best_move = minimax(board, args.depth, -10**9, 10**9, maximizing)
-    if best_move is None:
-        emit({"ok": False, "error": "no legal moves"})
-        return
-    san = board.san(best_move)
-    board.push(best_move)
-    emit({
-        "ok": True,
-        "from": chess.square_name(best_move.from_square),
-        "to": chess.square_name(best_move.to_square),
-        "promotion": chess.piece_symbol(best_move.promotion) if best_move.promotion else None,
-        "uci": best_move.uci(),
-        "san": san,
-        "fen": board.fen(),
-        "status": status_str(board),
-        "turn": "white" if board.turn == chess.WHITE else "black",
-    })
-
-
 def cmd_status(args):
     board = chess.Board(args.fen)
     emit({
@@ -677,11 +601,6 @@ def main():
     p.add_argument("fen")
     p.add_argument("move")
     p.set_defaults(func=cmd_move)
-
-    p = sub.add_parser("best", help="Pick a move via minimax")
-    p.add_argument("fen")
-    p.add_argument("--depth", type=int, default=2)
-    p.set_defaults(func=cmd_best)
 
     p = sub.add_parser("status", help="Game status")
     p.add_argument("fen")

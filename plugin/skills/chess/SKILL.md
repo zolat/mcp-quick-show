@@ -1,6 +1,6 @@
 ---
 name: chess
-description: Play a casual chess game with the user in a floating QuickShow HUD panel. The board is rendered via python-chess wrapped in a draggable HTML page; the user drags a piece onto a legal target square, the page validates locally against the embedded legal-moves map and emits `{type:"move", from, to}` as a `panel_event` only on a successful drop, Claude applies the move, plays a minimax-2 reply, and re-renders. Use when the user asks to play chess, wants a drag-driven demo of the QuickShow panel-event loop, or asks for a quick game.
+description: Play a casual chess game with the user in a floating QuickShow HUD panel. The board is rendered via python-chess wrapped in a draggable HTML page; the user drags a piece onto a legal target square and the page emits `{type:"move", from, to}` as a `panel_event`. Claude plays both sides using its own chess knowledge — the bundled `chess_helper.py` is the ground-truth keeper (validates moves, lists legal moves, renders the board) but does not pick moves. Use when the user asks to play chess, wants a drag-driven demo of the QuickShow panel-event loop, or asks for a quick game.
 ---
 
 A casual chess demo of the QuickShow `panel_event` channel. The user
@@ -9,9 +9,12 @@ plays White by default; Claude plays Black. Moves are submitted by
 validates locally before emitting, so Claude only ever sees confirmed
 moves.
 
-Claude is not a strong chess engine — the bundled helper uses
-depth-2 minimax with material-only evaluation. Strong players will
-win easily. The point is the loop, not Stockfish.
+**Claude plays its own moves.** There is no engine. The bundled
+`chess_helper.py` is the ground-truth keeper: it tracks the position,
+validates moves, lists legal moves, and renders the board. The
+move-selection brain is yours — pick moves based on opening
+principles, tactics, and the position on the board, the same way you
+would in any chess conversation.
 
 ## How the loop works
 
@@ -27,29 +30,27 @@ win easily. The point is the loop, not Stockfish.
      captures).
    - Dropping onto a legal square commits the move visually,
      locks the board, and emits `{"type":"move","from":"e2","to":"e4"}`.
-   - Dropping anywhere else (illegal square, same square, off the
-     board) snaps the piece back and emits nothing.
-3. The agent reacts to the `panel_event`, applies the move, plays a
-   reply, and re-renders. The re-render replaces the DOM, unlocking
-   the board for the next turn.
+   - Dropping anywhere else snaps the piece back and emits nothing.
+3. Claude reacts to the `panel_event`, applies the user's move,
+   thinks about a reply, plays it, and re-renders. The re-render
+   replaces the DOM and unlocks the board for the next turn.
 
 You never receive a "click" or a "selection" event — only completed
 moves. The state machine is on the page.
 
 ## Setup (once per session)
 
-1. **Decide who plays White.** Default: user is White. If the user
-   asks Claude to go first, swap (Claude plays White, user plays
-   Black). The board is always drawn with White on the bottom — if
-   the user is Black, they'll be reading the board from the top.
+1. **Decide who plays White.** Default: user is White. If they
+   ask Claude to go first, swap. Board is always drawn with White
+   on the bottom — if the user plays Black, they read the board
+   from the top.
 2. **Bootstrap.** Get the starting FEN:
 
    ```sh
    plugin/skills/chess/chess_helper.py new
    ```
 
-   Store the returned FEN. There is no per-click state to track —
-   just the FEN.
+   Store the returned FEN. That's the only state to track.
 3. **Render the board.**
 
    ```sh
@@ -59,15 +60,13 @@ moves. The state machine is on the page.
    Pipe into `show_html(name: "chess-board", content: <HTML>, width: 640)`.
 4. **Arm panel events** once: `enable_panel_events()`. Start the
    `Monitor` it returns.
-5. If Claude is White, **play the opening move first** (see "Claude's
-   turn"). Otherwise, wait for the first `panel_event`.
+5. If Claude is White, **play the opening move first** (see
+   "Claude's turn"). Otherwise, wait for the first `panel_event`.
 
 ## On every `panel_event` with `payload.type === "move"`
 
-The payload shape is `{"type":"move","from":"<sq>","to":"<sq>"}`. The
-move is already validated by the page — it WILL be legal in the
-current FEN (modulo Claude having de-synced state, which shouldn't
-happen).
+Payload: `{"type":"move","from":"<sq>","to":"<sq>"}`. The move is
+already validated by the page; it WILL be legal in the current FEN.
 
 1. **Apply the user's move:**
 
@@ -75,69 +74,88 @@ happen).
    plugin/skills/chess/chess_helper.py move <FEN> <from><to>
    ```
 
-   This should always return `ok: true`. If it returns `ok: false`,
-   something's out of sync — re-render the board from the current
-   FEN to resync the page's legal-moves map, then wait for the next
-   `panel_event`.
-2. Update `FEN` to the helper's returned value.
-3. **Check `status`**: if it's a terminal state (`checkmate`,
-   `stalemate`, `insufficient_material`, `fifty_moves`,
-   `threefold_repetition`), render the final board and handle the
-   terminal (see "Terminal handling"). Don't play a reply.
-4. **Otherwise, play Claude's reply** (next section).
+   Update `FEN` to the helper's returned value.
+2. **Check `status`** for terminal states (see "Terminal handling").
+   If terminal, render the final board and stop — don't play a reply.
+3. **Otherwise, play Claude's reply** (next section).
 
-### Promotion
+### Promotion (user's turn)
 
 The page emits `{from, to}` without a promotion field — for a pawn
 reaching the back rank, `chess_helper.py move` defaults to **queen**
 promotion. If the user has specified a different piece in chat
-("promote to knight"), extend the UCI before calling: e.g.
-`e7e8n`. Otherwise, queen.
+("promote to knight"), extend the UCI before calling: `e7e8n` etc.
 
-## Claude's turn
+## Claude's turn — pick a move yourself
 
-Pick a reply:
+You play. The helper exists to validate, not to suggest.
 
-```sh
-plugin/skills/chess/chess_helper.py best <FEN>
-```
+1. **Think about the position.** You have the FEN, the user's last
+   move, and the rendered board. Apply normal chess judgment:
+   - Opening: develop pieces, control the centre, get the king
+     safe. Don't move the same piece twice in the opening unless
+     there's a reason. Connect the rooks.
+   - Middlegame: look for tactics (forks, pins, skewers, double
+     attacks, hanging pieces, weak king cover). Improve worst
+     piece. Trade when ahead, complicate when behind.
+   - Endgame: activate the king, push passed pawns, look for
+     opposition + simple mating patterns.
+   - **Don't shuffle.** If you can't find a strong move, play a
+     sensible developing or improving move — don't move a rook
+     out and back. Casual chess, not engine chess.
+2. **If you want to enumerate**, ask the helper for every legal
+   move (or just from one square):
 
-Returns `{from, to, uci, san, fen, status}`. Default depth (2) is
-fast and weak — fine for casual play. Use `--depth 3` for slower,
-slightly better play.
+   ```sh
+   plugin/skills/chess/chess_helper.py legal <FEN>
+   plugin/skills/chess/chess_helper.py legal <FEN> --from e4
+   ```
 
-Update `FEN` to the returned value. Re-render with the last-move
-highlight:
+   Useful when you want to scan for tactical targets or quickly
+   confirm whether a move is available.
+3. **Apply your move** via the helper. UCI notation:
 
-```sh
-plugin/skills/chess/chess_helper.py render-html <new-FEN> --size 600 \
-  --last-move <uci>
-```
+   ```sh
+   plugin/skills/chess/chess_helper.py move <FEN> <uci>
+   ```
 
-`show_html(name: "chess-board", ...)` — same panel name, updates in
-place. The re-render embeds the user's new legal-moves map; the
-page's `locked` flag is reset because the DOM is replaced.
+   - `ok: true` → update `FEN`, continue.
+   - `ok: false, error: "illegal move"` → you picked something
+     illegal. Re-think and resubmit. (Treat this as a sanity check
+     — illegal-move rate should be near zero.)
+   - Promotion: omit suffix for queen, append `n`/`r`/`b` for
+     other pieces.
+4. **Re-render** with the last-move highlight:
 
-**Announce the move** in SAN (the `san` field) — one short line:
-"Nf3." / "Bxc4." / "O-O." / "Check." Skip explanation unless the
-move is genuinely interesting.
+   ```sh
+   plugin/skills/chess/chess_helper.py render-html <new-FEN> --size 600 \
+     --last-move <your-uci>
+   ```
 
-Then check `status` (terminal handling below).
+   `show_html(name: "chess-board", ...)` — same panel name, panel
+   updates in place. The re-render embeds the user's new
+   legal-moves map; the page's lock clears because the DOM is
+   replaced.
+5. **Announce the move** in SAN (the `san` field from the `move`
+   response) — one short line: "Nf3." / "Bxc4." / "O-O." /
+   "Check." Skip explanation unless the move is genuinely
+   interesting.
+6. Check `status` (terminal handling below).
 
 ## Terminal handling
 
-After any move (user's or Claude's), the helper's `status` field
-tells you the game state:
+After any move, `status` tells you the game state:
 
 - `"ongoing"` → continue.
-- `"check"` → note it ("Check.") but the game continues. The board
-  renderer also draws a red ring around the king in check.
+- `"check"` → the side to move is in check. Note it ("Check.") but
+  the game continues. The renderer draws a red ring around the
+  king in check.
 - `"checkmate"` → game over, whoever just moved won. Announce
   ("Checkmate. Good game." or "Got me — nice mate.") and offer a
   rematch.
 - `"stalemate"` / `"insufficient_material"` / `"fifty_moves"` /
-  `"threefold_repetition"` → game over, draw. Announce the specific
-  reason and offer a rematch.
+  `"threefold_repetition"` → game over, draw. Announce the
+  specific reason and offer a rematch.
 
 On rematch: `chess_helper.py new`, reset `FEN`, re-render with the
 same panel name (`chess-board`).
@@ -155,17 +173,15 @@ same panel name (`chess-board`).
   around the enemy piece during the drag (vs. filled dots for
   empty-square moves). Dropping onto the enemy piece executes the
   capture.
-- **Off-board / illegal drops** snap back. Nothing emits. The user
-  can try again immediately.
-- **Pieces with no legal moves** (pinned, blocked, opponent's) can't
-  be picked up — the page rejects the drag start silently.
+- **Pieces with no legal moves** (pinned, blocked, opponent's)
+  can't be picked up — the page rejects the drag start silently.
 - **Lock during round-trip:** after a legal drop, the page locks
   until Claude's re-render. The user can't move twice before
   Claude responds.
 - **Draw mode steals pointer events.** If the user toggles markup
   draw mode (✏︎ in the title bar), the in-DOM canvas captures
   pointer input and dragging stops working until they leave draw
-  mode. Same trade-off the markup loop already lives with.
+  mode.
 
 ## Etiquette
 
@@ -173,20 +189,23 @@ same panel name (`chess-board`).
   "Nice move." Don't lecture.
 - **Don't narrate FEN updates** or helper invocations. Just render
   and move on.
-- **Don't sandbag.** Play the move the helper gives you, even if
-  it's bad. Minimax-2 is what it is.
-- **Acknowledge a brilliant move** ("Nice — didn't see that.")
-  without fishing for praise on your own moves.
-- **On a rematch:** `chess_helper.py new`, same panel name.
+- **Acknowledge a strong move from the user** ("Nice — didn't see
+  that."). Don't fish for praise on your own moves.
+- **Play your best.** Don't sandbag. If the user beats you, they
+  beat you. If you find a tactic, take it.
+- **On a rematch:** `chess_helper.py new`, reset `FEN`, same panel
+  name.
 
-## Limitations to be upfront about
+## Limitations
 
-- **Weak play.** Minimax-2 with material eval makes me a beatable
-  opponent. That's intentional.
 - **No clock.** Casual play, no time pressure.
-- **No PGN export.** If the user wants the game record, you can
-  reconstruct one from the SAN sequence you've been announcing.
-- **Promotion default is queen.** Override via chat ("promote to
-  knight") and extend the UCI yourself before calling `move`.
-- **Board orientation fixed.** White is always on the bottom — if
-  the user plays Black, they read the board from Black's side.
+- **No PGN export** built in. If asked, reconstruct one from the
+  SAN sequence you've been announcing.
+- **Promotion default is queen.** Override with `n`/`r`/`b`
+  suffix.
+- **Board orientation fixed** — White on the bottom. If the user
+  plays Black, they read it from the top.
+- **Tactical blind spots.** You're an LLM playing chess from a
+  FEN; deep tactical sequences (3+ move forced wins) can slip
+  past. That's fine — it's casual chess. Use `legal` if you want
+  to scan harder before committing to a sharp move.

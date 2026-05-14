@@ -111,7 +111,7 @@ mcp-quick-show/
 │   ├── skills/quickshow/        foundational "how to use QuickShow" skill
 │   ├── skills/frontend-design/  bold-aesthetic design + markup loop
 │   ├── skills/tic-tac-toe/      demo skill (panel_event channel — click → emit → re-render)
-│   ├── skills/chess/            demo skill (panel_event channel — click → emit → re-render, minimax-2 opponent)
+│   ├── skills/chess/            demo skill (panel_event channel — drag → emit → re-render; Claude plays its own moves, helper validates)
 │   └── skills/click-demo/       minimal panel_event demo (one button)
 ├── QuickShow/                   Swift app
 │   ├── Info.plist               LSUIElement
