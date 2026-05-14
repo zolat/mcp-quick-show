@@ -6,15 +6,17 @@
 """Chess helper for the QuickShow `chess` skill.
 
 Subcommands:
-  new                              → emit starting FEN as JSON
-  render <fen> [--last-move uci]   → emit board SVG to stdout
-  move <fen> <uci>                 → validate + apply a move
-  best <fen>                       → pick a move via minimax-2
-  status <fen>                     → game status
-  legal <fen> [--from sq]          → list legal moves
+  new                                   → emit starting FEN as JSON
+  render <fen> [--last-move uci]        → emit board SVG to stdout
+  render-html <fen> [...]               → emit clickable HTML to stdout
+  move <fen> <uci>                      → validate + apply a move
+  best <fen>                            → pick a move via minimax-2
+  status <fen>                          → game status
+  legal <fen> [--from sq]               → list legal moves
 
-All commands except `render` print one JSON object on stdout.
-`render` prints raw SVG.
+All commands except `render` / `render-html` print one JSON object on
+stdout. `render` prints raw SVG; `render-html` prints a full HTML page
+that wraps the SVG with a click overlay (panel_event-driven).
 """
 
 import argparse
@@ -152,6 +154,118 @@ def render_board_svg(board: chess.Board, size: int = 600, last_move: chess.Move 
     return "".join(parts)
 
 
+def render_board_html(
+    board: chess.Board,
+    size: int = 600,
+    last_move: chess.Move | None = None,
+    selected: int | None = None,
+    legal_targets: list[int] | None = None,
+) -> str:
+    """Wrap `render_board_svg` in an HTML page with a transparent
+    click overlay so the user can click squares; each click is emitted
+    as a `panel_event` via `window.quickshow.emit`.
+
+    Optional `selected` (square index) draws a yellow border on that
+    square. Optional `legal_targets` (list of square indices) draws
+    yellow dots on empty squares + yellow rings on enemy-piece squares
+    (captures), the standard chess-UI move-hint convention.
+
+    The page is self-contained — no external scripts or CSS.
+    """
+    base_svg = render_board_svg(board, size=size, last_move=last_move)
+    margin = 30
+    inner = size - 2 * margin
+    sq = inner / 8.0
+
+    overlay: list[str] = []
+
+    # Selected-square highlight (yellow border).
+    if selected is not None:
+        file = chess.square_file(selected)
+        rank_top = 7 - chess.square_rank(selected)
+        x = margin + file * sq
+        y = margin + rank_top * sq
+        overlay.append(
+            f'<rect x="{x:.2f}" y="{y:.2f}" width="{sq:.2f}" height="{sq:.2f}" '
+            f'fill="none" stroke="#f7ec74" stroke-width="4" pointer-events="none"/>'
+        )
+
+    # Legal-target indicators.
+    if legal_targets:
+        for tgt in legal_targets:
+            file = chess.square_file(tgt)
+            rank_top = 7 - chess.square_rank(tgt)
+            cx = margin + (file + 0.5) * sq
+            cy = margin + (rank_top + 0.5) * sq
+            if board.piece_at(tgt) is not None:
+                # Capture indicator: ring around the enemy piece.
+                overlay.append(
+                    f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{sq * 0.46:.2f}" '
+                    f'fill="none" stroke="#f7ec74" stroke-width="4" '
+                    f'opacity="0.85" pointer-events="none"/>'
+                )
+            else:
+                # Move indicator: small filled dot.
+                overlay.append(
+                    f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{sq * 0.16:.2f}" '
+                    f'fill="#f7ec74" opacity="0.85" pointer-events="none"/>'
+                )
+
+    # Click overlay — 64 transparent rects with `data-square` set to
+    # algebraic notation. Sits on top so clicks land here, not on the
+    # piece glyphs. The decorative overlays above all have
+    # pointer-events="none" so they don't steal clicks.
+    overlay.append('<g id="click-overlay">')
+    for sqi in range(64):
+        file = chess.square_file(sqi)
+        rank_top = 7 - chess.square_rank(sqi)
+        x = margin + file * sq
+        y = margin + rank_top * sq
+        name = chess.square_name(sqi)
+        overlay.append(
+            f'<rect class="click-cell" data-square="{name}" '
+            f'x="{x:.2f}" y="{y:.2f}" width="{sq:.2f}" height="{sq:.2f}" '
+            f'fill="transparent"/>'
+        )
+    overlay.append("</g>")
+
+    svg_with_overlay = base_svg.replace("</svg>", "".join(overlay) + "</svg>")
+
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  :root {{ color-scheme: dark; }}
+  html, body {{ margin: 0; padding: 0; background: #1c1c1c; }}
+  body {{ display: flex; align-items: center; justify-content: center; min-height: {size}px; }}
+  svg {{ display: block; }}
+  .click-cell {{ cursor: pointer; }}
+  .click-cell:hover {{ fill: rgba(255,255,255,0.08); }}
+</style></head><body>
+{svg_with_overlay}
+<script>
+  // The page is dumb: every click on a square emits its algebraic
+  // name. Claude maintains selection state and decides what each
+  // click means (first click = select; second click = move attempt;
+  // same-square click = deselect). Optimistic flash gives the user
+  // immediate feedback while Claude's re-render is in flight.
+  document.addEventListener("click", function (e) {{
+    const t = e.target;
+    if (!(t instanceof Element) || !t.matches(".click-cell")) return;
+    const sq = t.dataset.square;
+    // Flash the clicked square yellow briefly so the click feels
+    // alive even before Claude re-renders.
+    const prev = t.getAttribute("fill");
+    t.setAttribute("fill", "rgba(247,236,116,0.35)");
+    setTimeout(function () {{
+      if (t.isConnected) t.setAttribute("fill", prev || "transparent");
+    }}, 400);
+    if (window.quickshow && window.quickshow.emit) {{
+      window.quickshow.emit({{ type: "click", square: sq }});
+    }}
+  }});
+</script>
+</body></html>"""
+
+
 def status_str(board: chess.Board) -> str:
     if board.is_checkmate():
         return "checkmate"
@@ -244,6 +358,39 @@ def cmd_render(args):
         except ValueError:
             pass
     print(render_board_svg(board, size=args.size, last_move=last_move))
+
+
+def cmd_render_html(args):
+    board = chess.Board(args.fen)
+    last_move = None
+    if args.last_move:
+        try:
+            last_move = chess.Move.from_uci(args.last_move)
+        except ValueError:
+            pass
+    selected = None
+    if args.selected:
+        try:
+            selected = chess.parse_square(args.selected)
+        except ValueError:
+            pass
+    legal_targets: list[int] = []
+    if args.legal_targets:
+        for s in args.legal_targets.split(","):
+            s = s.strip()
+            if not s:
+                continue
+            try:
+                legal_targets.append(chess.parse_square(s))
+            except ValueError:
+                pass
+    print(render_board_html(
+        board,
+        size=args.size,
+        last_move=last_move,
+        selected=selected,
+        legal_targets=legal_targets,
+    ))
 
 
 def cmd_move(args):
@@ -354,6 +501,17 @@ def main():
     p.add_argument("--last-move", default=None, help="UCI of last move to highlight")
     p.add_argument("--size", type=int, default=600)
     p.set_defaults(func=cmd_render)
+
+    p = sub.add_parser("render-html",
+                       help="Emit a clickable HTML page wrapping the SVG (panel_event-driven)")
+    p.add_argument("fen")
+    p.add_argument("--last-move", default=None, help="UCI of last move to highlight")
+    p.add_argument("--size", type=int, default=600)
+    p.add_argument("--selected", default=None,
+                   help="Selected square, e.g. e2 — draws a yellow border")
+    p.add_argument("--legal-targets", default=None,
+                   help="Comma-separated legal target squares, e.g. e3,e4 — draws move dots / capture rings")
+    p.set_defaults(func=cmd_render_html)
 
     p = sub.add_parser("move", help="Apply a move (UCI: e2e4, or e7e8q for promotion)")
     p.add_argument("fen")
