@@ -1,0 +1,18 @@
+{
+  "name": "quickshow",
+  "description": "Floating HUD panels that let Claude render markdown, SVG, Mermaid, images, and full HTML designs — and see what it rendered. Pairs with the QuickShow.app menu-bar app to give agents a visual output surface plus a markup feedback loop where users draw on what they see and Claude reads the annotations back.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Tom Zola",
+    "email": "thomas.zola@gmail.com"
+  },
+  "keywords": [
+    "mcp",
+    "rendering",
+    "hud",
+    "visual",
+    "design",
+    "feedback-loop",
+    "markup"
+  ]
+}

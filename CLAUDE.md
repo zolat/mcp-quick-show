@@ -100,8 +100,15 @@ mcp-quick-show/
 ├── docs/
 │   ├── control-protocol.md      wire-protocol reference
 │   └── adding-a-renderer.md     three-file pattern for new content types
-├── skills/
-│   └── quickshow-design/        designer-loop skill (show_html + markup)
+├── .claude-plugin/
+│   └── marketplace.json         declares this repo as a single-plugin marketplace
+├── plugin/                      Claude Code plugin tree (distribution)
+│   ├── .claude-plugin/plugin.json
+│   ├── .mcp.json                quickshow → ${CLAUDE_PLUGIN_ROOT}/bin/mcp-quick-show
+│   ├── bin/                     compiled sidecar binary (gitignored; built by tools/build-plugin.sh)
+│   ├── skills/quickshow/        foundational "how to use QuickShow" skill
+│   ├── skills/frontend-design/  bold-aesthetic design + markup loop
+│   └── skills/tic-tac-toe/      demo skill (markup-driven gameplay)
 ├── QuickShow/                   Swift app
 │   ├── Info.plist               LSUIElement
 │   ├── Resources/

@@ -31,3 +31,6 @@ sidecar/.*.bun-build
 
 # DMG output
 dist/
+
+# Plugin bundled binary (built by tools/build-plugin.sh)
+plugin/bin/

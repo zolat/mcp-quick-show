@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "mcp-quick-show",
+  "description": "Local marketplace for the QuickShow plugin — render markdown/SVG/Mermaid/images/HTML into floating macOS HUD panels, with a markup feedback loop the user can annotate on.",
+  "owner": {
+    "name": "zolat"
+  },
+  "plugins": [
+    {
+      "name": "quickshow",
+      "description": "Floating HUD panels for Claude. MCP tools (show_markdown / show_svg / show_mermaid / show_image / show_html / enable_markup_events / get_markup) plus foundational + demo skills. Pairs with QuickShow.app.",
+      "source": "./plugin",
+      "version": "0.1.0",
+      "category": "productivity",
+      "tags": ["mcp", "rendering", "hud", "visual", "design", "feedback-loop"]
+    }
+  ]
+}
