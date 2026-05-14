@@ -95,6 +95,9 @@ def render_board_svg(board: chess.Board, size: int = 600, last_move: chess.Move 
     # Pieces — Unicode glyph, tinted by colour, with an opposite-colour stroke
     # so they read on any square (paint-order:stroke renders the outline first
     # so the fill sits on top, keeping the glyph crisp).
+    #
+    # `data-square` lets the drag handler (in render_board_html) look up the
+    # piece <text> element by algebraic notation.
     piece_font = sq * 0.78
     for sqi in range(64):
         piece = board.piece_at(sqi)
@@ -113,8 +116,9 @@ def render_board_svg(board: chess.Board, size: int = 600, last_move: chess.Move 
         else:
             fill = "#1a1a1a"
             stroke = "#ffffff"
+        name = chess.square_name(sqi)
         parts.append(
-            f'<text x="{cx:.2f}" y="{cy:.2f}" font-size="{piece_font:.2f}" '
+            f'<text data-square="{name}" x="{cx:.2f}" y="{cy:.2f}" font-size="{piece_font:.2f}" '
             f'text-anchor="middle" dominant-baseline="central" '
             f'fill="{fill}" stroke="{stroke}" stroke-width="2" paint-order="stroke">{glyph}</text>'
         )
@@ -161,16 +165,15 @@ def render_board_html(
     selected: int | None = None,
     legal_targets: list[int] | None = None,
 ) -> str:
-    """Wrap `render_board_svg` in an HTML page with a transparent
-    click overlay so the user can click squares; each click is emitted
-    as a `panel_event` via `window.quickshow.emit`.
+    """Wrap `render_board_svg` in an HTML page with drag-and-drop
+    interaction. The page embeds the side-to-move's legal-moves map
+    and validates drops locally; only successful (legal) drops emit a
+    `panel_event` of shape `{type:"move", from, to}`. Illegal / off-
+    board drops snap back and emit nothing.
 
-    Optional `selected` (square index) draws a yellow border on that
-    square. Optional `legal_targets` (list of square indices) draws
-    yellow dots on empty squares + yellow rings on enemy-piece squares
-    (captures), the standard chess-UI move-hint convention.
-
-    The page is self-contained — no external scripts or CSS.
+    `selected` / `legal_targets` are optional static decorations —
+    useful for snapshotting / debugging without a real drag, no
+    effect on the live drag UX (which paints its own highlights).
     """
     base_svg = render_board_svg(board, size=size, last_move=last_move)
     margin = 30
@@ -179,7 +182,7 @@ def render_board_html(
 
     overlay: list[str] = []
 
-    # Selected-square highlight (yellow border).
+    # Static decorations (debugging only — drag UX paints its own).
     if selected is not None:
         file = chess.square_file(selected)
         rank_top = 7 - chess.square_rank(selected)
@@ -189,8 +192,6 @@ def render_board_html(
             f'<rect x="{x:.2f}" y="{y:.2f}" width="{sq:.2f}" height="{sq:.2f}" '
             f'fill="none" stroke="#f7ec74" stroke-width="4" pointer-events="none"/>'
         )
-
-    # Legal-target indicators.
     if legal_targets:
         for tgt in legal_targets:
             file = chess.square_file(tgt)
@@ -198,23 +199,22 @@ def render_board_html(
             cx = margin + (file + 0.5) * sq
             cy = margin + (rank_top + 0.5) * sq
             if board.piece_at(tgt) is not None:
-                # Capture indicator: ring around the enemy piece.
                 overlay.append(
                     f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{sq * 0.46:.2f}" '
                     f'fill="none" stroke="#f7ec74" stroke-width="4" '
                     f'opacity="0.85" pointer-events="none"/>'
                 )
             else:
-                # Move indicator: small filled dot.
                 overlay.append(
                     f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{sq * 0.16:.2f}" '
                     f'fill="#f7ec74" opacity="0.85" pointer-events="none"/>'
                 )
 
-    # Click overlay — 64 transparent rects with `data-square` set to
-    # algebraic notation. Sits on top so clicks land here, not on the
-    # piece glyphs. The decorative overlays above all have
-    # pointer-events="none" so they don't steal clicks.
+    # Click/drop overlay — 64 transparent rects, one per square,
+    # tagged with `data-square` so the JS handler can map pointer
+    # position → square name without a hit-test loop. Pieces sit
+    # below this layer; the drag handler reorders the picked piece
+    # on top during drag so it visually rides above the overlay.
     overlay.append('<g id="click-overlay">')
     for sqi in range(64):
         file = chess.square_file(sqi)
@@ -228,41 +228,201 @@ def render_board_html(
             f'fill="transparent"/>'
         )
     overlay.append("</g>")
-
     svg_with_overlay = base_svg.replace("</svg>", "".join(overlay) + "</svg>")
+
+    # Precompute the side-to-move's legal moves so the page can
+    # validate drops without an embedded chess engine. Map shape:
+    #   { "e2": ["e3","e4"], "g1": ["f3","h3"], ... }
+    # Promotion is intentionally not encoded — the page emits
+    # {from,to} only and lets chess_helper.py move default to queen
+    # (the user can override via chat for non-queen promotions).
+    legal_map: dict[str, list[str]] = {}
+    for move in board.legal_moves:
+        legal_map.setdefault(chess.square_name(move.from_square), []).append(
+            chess.square_name(move.to_square)
+        )
+    # Dedupe target lists (promotions otherwise produce 4 entries per to-square).
+    legal_map = {k: sorted(set(v)) for k, v in legal_map.items()}
+    state_json = json.dumps({
+        "legalMoves": legal_map,
+        "turn": "white" if board.turn == chess.WHITE else "black",
+    })
+
+    drag_script = r"""
+(function () {
+  // Embedded at render time by chess_helper.render-html.
+  const state = window.__chess || { legalMoves: {} };
+  const legalMoves = state.legalMoves || {};
+
+  // Index click-cells (drop zones) by square name.
+  const cells = {};
+  for (const c of document.querySelectorAll(".click-cell")) {
+    cells[c.dataset.square] = {
+      el: c,
+      x: parseFloat(c.getAttribute("x")),
+      y: parseFloat(c.getAttribute("y")),
+      w: parseFloat(c.getAttribute("width")),
+      h: parseFloat(c.getAttribute("height")),
+    };
+  }
+
+  // Index piece <text> elements by their data-square attribute.
+  const pieces = {};
+  for (const t of document.querySelectorAll("text[data-square]")) {
+    pieces[t.dataset.square] = t;
+  }
+
+  const svgEl = document.querySelector("svg");
+
+  function clientToSvg(cx, cy) {
+    const pt = svgEl.createSVGPoint();
+    pt.x = cx; pt.y = cy;
+    return pt.matrixTransform(svgEl.getScreenCTM().inverse());
+  }
+
+  function squareAt(x, y) {
+    for (const [name, c] of Object.entries(cells)) {
+      if (x >= c.x && x < c.x + c.w && y >= c.y && y < c.y + c.h) return name;
+    }
+    return null;
+  }
+
+  // Dynamic highlight layer drawn during drag.
+  let hlGroup = null;
+  function drawHighlights(originSq, targets) {
+    clearHighlights();
+    const ns = "http://www.w3.org/2000/svg";
+    hlGroup = document.createElementNS(ns, "g");
+    hlGroup.setAttribute("id", "drag-highlights");
+    hlGroup.setAttribute("pointer-events", "none");
+    const o = cells[originSq];
+    const border = document.createElementNS(ns, "rect");
+    border.setAttribute("x", o.x); border.setAttribute("y", o.y);
+    border.setAttribute("width", o.w); border.setAttribute("height", o.h);
+    border.setAttribute("fill", "none");
+    border.setAttribute("stroke", "#f7ec74");
+    border.setAttribute("stroke-width", "4");
+    hlGroup.appendChild(border);
+    for (const tgt of targets) {
+      const c = cells[tgt];
+      if (!c) continue;
+      const cx = c.x + c.w / 2;
+      const cy = c.y + c.h / 2;
+      const shape = document.createElementNS(ns, "circle");
+      shape.setAttribute("cx", cx); shape.setAttribute("cy", cy);
+      if (pieces[tgt]) {
+        shape.setAttribute("r", c.w * 0.46);
+        shape.setAttribute("fill", "none");
+        shape.setAttribute("stroke", "#f7ec74");
+        shape.setAttribute("stroke-width", "4");
+      } else {
+        shape.setAttribute("r", c.w * 0.16);
+        shape.setAttribute("fill", "#f7ec74");
+      }
+      shape.setAttribute("opacity", "0.85");
+      hlGroup.appendChild(shape);
+    }
+    const clickGroup = document.getElementById("click-overlay");
+    svgEl.insertBefore(hlGroup, clickGroup);
+  }
+  function clearHighlights() {
+    if (hlGroup && hlGroup.parentNode) hlGroup.parentNode.removeChild(hlGroup);
+    hlGroup = null;
+  }
+
+  let drag = null;
+  let locked = false;
+
+  function startDrag(e) {
+    if (locked) return;
+    if (e.button !== 0 && e.button !== undefined) return;
+    const p = clientToSvg(e.clientX, e.clientY);
+    const sq = squareAt(p.x, p.y);
+    if (!sq) return;
+    const targets = legalMoves[sq];
+    if (!targets || targets.length === 0) return;
+    const piece = pieces[sq];
+    if (!piece) return;
+    drag = {
+      origin: sq,
+      piece: piece,
+      ox: parseFloat(piece.getAttribute("x")),
+      oy: parseFloat(piece.getAttribute("y")),
+      legalSet: new Set(targets),
+    };
+    // Bring piece above the click-overlay group during drag.
+    svgEl.appendChild(piece);
+    piece.style.cursor = "grabbing";
+    piece.setAttribute("pointer-events", "none");
+    drawHighlights(sq, targets);
+    // Track pointer immediately so the piece centres under the cursor.
+    piece.setAttribute("x", p.x);
+    piece.setAttribute("y", p.y);
+    try { e.target.setPointerCapture && e.target.setPointerCapture(e.pointerId); } catch (_) {}
+    e.preventDefault();
+  }
+
+  function moveDrag(e) {
+    if (!drag) return;
+    const p = clientToSvg(e.clientX, e.clientY);
+    drag.piece.setAttribute("x", p.x);
+    drag.piece.setAttribute("y", p.y);
+  }
+
+  function endDrag(e) {
+    if (!drag) return;
+    const p = clientToSvg(e.clientX, e.clientY);
+    const dropSq = squareAt(p.x, p.y);
+    clearHighlights();
+    if (dropSq && dropSq !== drag.origin && drag.legalSet.has(dropSq)) {
+      const c = cells[dropSq];
+      drag.piece.setAttribute("x", c.x + c.w / 2);
+      drag.piece.setAttribute("y", c.y + c.h / 2 + c.h * 0.03);
+      // Remove captured piece visually so the board reads cleanly
+      // while Claude's re-render is in flight.
+      if (pieces[dropSq] && pieces[dropSq] !== drag.piece) {
+        pieces[dropSq].remove();
+      }
+      locked = true;
+      if (window.quickshow && window.quickshow.emit) {
+        window.quickshow.emit({ type: "move", from: drag.origin, to: dropSq });
+      }
+    } else {
+      drag.piece.setAttribute("x", drag.ox);
+      drag.piece.setAttribute("y", drag.oy);
+    }
+    drag.piece.style.cursor = "";
+    drag = null;
+  }
+
+  function cancelDrag() {
+    if (!drag) return;
+    drag.piece.setAttribute("x", drag.ox);
+    drag.piece.setAttribute("y", drag.oy);
+    drag.piece.style.cursor = "";
+    clearHighlights();
+    drag = null;
+  }
+
+  document.addEventListener("pointerdown", startDrag);
+  document.addEventListener("pointermove", moveDrag);
+  document.addEventListener("pointerup", endDrag);
+  document.addEventListener("pointercancel", cancelDrag);
+})();
+"""
 
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><style>
   :root {{ color-scheme: dark; }}
-  html, body {{ margin: 0; padding: 0; background: #1c1c1c; }}
+  html, body {{ margin: 0; padding: 0; background: #1c1c1c; user-select: none; -webkit-user-select: none; }}
   body {{ display: flex; align-items: center; justify-content: center; min-height: {size}px; }}
-  svg {{ display: block; }}
-  .click-cell {{ cursor: pointer; }}
-  .click-cell:hover {{ fill: rgba(255,255,255,0.08); }}
+  svg {{ display: block; touch-action: none; }}
+  .click-cell {{ cursor: grab; }}
+  .click-cell:hover {{ fill: rgba(255,255,255,0.06); }}
 </style></head><body>
+<script>window.__chess = {state_json};</script>
 {svg_with_overlay}
-<script>
-  // The page is dumb: every click on a square emits its algebraic
-  // name. Claude maintains selection state and decides what each
-  // click means (first click = select; second click = move attempt;
-  // same-square click = deselect). Optimistic flash gives the user
-  // immediate feedback while Claude's re-render is in flight.
-  document.addEventListener("click", function (e) {{
-    const t = e.target;
-    if (!(t instanceof Element) || !t.matches(".click-cell")) return;
-    const sq = t.dataset.square;
-    // Flash the clicked square yellow briefly so the click feels
-    // alive even before Claude re-renders.
-    const prev = t.getAttribute("fill");
-    t.setAttribute("fill", "rgba(247,236,116,0.35)");
-    setTimeout(function () {{
-      if (t.isConnected) t.setAttribute("fill", prev || "transparent");
-    }}, 400);
-    if (window.quickshow && window.quickshow.emit) {{
-      window.quickshow.emit({{ type: "click", square: sq }});
-    }}
-  }});
-</script>
+<script>{drag_script}</script>
 </body></html>"""
 
 
