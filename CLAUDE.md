@@ -161,24 +161,40 @@ Current verbs (sidecar → app): `hello`, `ping`, `upsert`, `close`,
 wire-protocol change. Only new verbs / response kinds require the
 paired-file edit.
 
-### session_id is app-allocated (since 0.2)
+### session_id is anchored to the Claude conversation UUID
 
-`hello.session_id` is a CLAIM, not authoritative. The app's allocator
-(`ControlServer.allocateSessionId`) checks if any other live FD already
-holds the claim and either grants it (single-session reconnect case) or
-mints a fresh UUID (parallel-session contest from the same cwd). The
-granted id rides back in `HelloResult.session_id`; the sidecar adopts
-it for every subsequent verb and for derived paths
-(`events.ndjson`, artifacts dir).
+The sidecar's `hello.session_id` claim is the **conversation UUID**
+that Claude Code writes to
+`~/.claude/projects/<cwd-encoded>/<uuid>.jsonl`. That id is the
+actual semantic identity of a Claude session — distinct between
+parallel Claudes from the same cwd, stable across sidecar respawn,
+stable across `claude --resume <id>`. Anchoring to it means parallel
+sessions are naturally scoped and reconnect happens through identity
+rather than through a process-based heuristic.
+
+`sidecar/src/session.ts:resolveSessionId()` runs the discovery with
+a 3 s / 200 ms retry loop (Claude writes the JSONL ~2 s AFTER
+spawning the MCP server, so eager-at-module-load misses every time).
+Precedence: `QUICKSHOW_SESSION_ID` env override → JSONL discovery →
+`getOrCreateSessionId` per-cwd persisted UUID fallback (used by CLI
+smokes not invoked under Claude). Reference implementation:
+`~/projects/substant/mcp-plugin/server.ts:54-227`.
+
+`hello.session_id` is technically still a CLAIM. The app's allocator
+(`ControlServer.allocateSessionId`) does a live-FD contest check
+as belt-and-braces — it would mint a fresh UUID on a same-claim
+collision, but with conversation-UUID claims that should never fire
+in practice. The granted id rides back in `HelloResult.session_id`;
+the sidecar adopts it unconditionally and uses it for every
+subsequent verb and for derived paths (`events.ndjson`, artifacts).
 
 All sidecar code goes through `helloHandshake()` in
 `sidecar/src/handshake.ts` — single chokepoint, returns the granted id.
 Do not bypass it.
 
-`getOrCreateSessionId()` in `sidecar/src/session.ts` is the *candidate*
-source — a stable per-cwd UUID, persisted at
-`~/Library/Application Support/QuickShow/sessions/<cwdHash>.uuid`. It's
-the claim the sidecar offers, not the id it uses.
+`parent_pid` on `HelloRequest` (added in protocol 0.2) is now
+diagnostic only — useful for log forensics when investigating
+session lifecycle, not load-bearing for the allocator's decision.
 
 ## Adding a new content type
 

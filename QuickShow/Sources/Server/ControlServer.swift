@@ -117,24 +117,20 @@ final class ControlServer {
 
     /// Decide the authoritative `session_id` for an incoming `hello`.
     ///
-    /// The sidecar's claim is its cwd-derived persisted UUID. If no
-    /// other live FD currently holds that id we grant it — preserving
-    /// the single-session case (first-ever sidecar from this cwd OR
-    /// orphan-grace reattach after a sidecar crash). If another live
-    /// FD already holds it, that's a parallel session from the same
-    /// cwd and we mint a fresh UUID so the two get disjoint HUDs,
-    /// flags, events log, throttle bucket.
+    /// The sidecar's claim is normally the Claude conversation UUID,
+    /// discovered from `~/.claude/projects/.../<uuid>.jsonl` (see
+    /// `sidecar/src/session.ts:resolveSessionId`). That id is
+    /// distinct per parallel Claude and stable across sidecar respawn
+    /// / `claude --resume`, so two competing claims from real Claude
+    /// processes should never collide. This allocator's live-FD
+    /// contest check is belt-and-braces — it catches the
+    /// near-impossible case where the same UUID arrives on two FDs
+    /// concurrently (UUID collision, env-override misuse) — and we
+    /// mint a fresh UUID for the second arrival.
     ///
     /// Always called on `@MainActor` (from `handleLine`'s hello
     /// fast-path); `sessionByFD` is single-writer here so there's no
     /// race between two concurrent hellos checking the same claim.
-    ///
-    /// Known limitation: a *different* Claude's sidecar that connects
-    /// with the same cwd-claim *within the 60 s orphan window* of an
-    /// abandoned session will be granted that claim and inherit the
-    /// orphaned HUDs. Fixing that requires per-session PPID tracking
-    /// which asymmetrically breaks Claude-restart-reconnect, so we
-    /// document and live with it for now.
     func allocateSessionId(claim: String, fd: Int32, parentPid: Int32?) -> String {
         let contested = sessionByFD.values.contains(claim)
         let granted = contested ? UUID().uuidString.lowercased() : claim
