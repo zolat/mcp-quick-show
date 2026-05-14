@@ -1,5 +1,5 @@
 ---
-name: click-demo
+name: fun-click-demo
 description: Tiny end-to-end demo of the QuickShow `panel_event` channel — a `show_html` page with a button; clicking it calls `window.quickshow.emit(...)`, the agent reads the event off the session's events log via Monitor, and re-renders an acknowledgment. Use when the user asks for a demo of the click bridge, "interactive panels", or `panel_event`.
 ---
 

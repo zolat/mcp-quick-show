@@ -46,16 +46,16 @@ milestone.
   at repo root + `plugin/` tree (manifest, `.mcp.json` pointing at
   bundled sidecar, foundational `quickshow` skill, adapted
   `frontend-design` skill, `tic-tac-toe` demo skill)
-- [x] Demo skill: tic-tac-toe — `plugin/skills/tic-tac-toe/` ships
+- [x] Demo skill: tic-tac-toe — `plugin/skills/fun-tic-tac-toe/` ships
   with the plugin; SVG board + markup-driven gameplay
-- [x] Demo skill: chess — `plugin/skills/chess/` with `chess_helper.py`
+- [x] Demo skill: chess — `plugin/skills/fun-chess/` with `chess_helper.py`
   (uv inline-deps + python-chess), Unicode-glyph board renderer,
   minimax-2 opponent
 - [x] Interactive panels — `window.quickshow.emit(payload)` JS→Swift
   bridge, third `panelEvent` script-message channel, new
   `enable_panel_events` sidecar tool gated on `panel_events_armed`,
   token-bucket throttle (20/s/panel) with 1Hz drop summaries, demo
-  skill `plugin/skills/click-demo/`
+  skill `plugin/skills/fun-click-demo/`
 
 ## Backlog
 

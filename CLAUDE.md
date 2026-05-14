@@ -108,11 +108,12 @@ mcp-quick-show/
 │   ├── .claude-plugin/plugin.json
 │   ├── .mcp.json                quickshow → ${CLAUDE_PLUGIN_ROOT}/bin/mcp-quick-show
 │   ├── bin/                     compiled sidecar binary (gitignored; built by tools/build-plugin.sh)
-│   ├── skills/quickshow/        foundational "how to use QuickShow" skill
-│   ├── skills/frontend-design/  bold-aesthetic design + markup loop
-│   ├── skills/tic-tac-toe/      demo skill (panel_event channel — click → emit → re-render)
-│   ├── skills/chess/            demo skill (panel_event channel — drag → emit → re-render; Claude plays its own moves, helper validates)
-│   └── skills/click-demo/       minimal panel_event demo (one button)
+│   ├── skills/quickshow/         foundational "how to use QuickShow" skill
+│   ├── skills/frontend-design/   bold-aesthetic design + markup loop
+│   ├── skills/fun-tic-tac-toe/   fun skill (panel_event channel — click → emit → re-render)
+│   ├── skills/fun-chess/         fun skill (panel_event channel — drag → emit → re-render; Claude plays its own moves, helper validates)
+│   ├── skills/fun-click-demo/    fun skill — minimal panel_event demo (one button)
+│   └── skills/fun-pictionary/    fun skill (markup-loop — user draws, Claude guesses)
 ├── QuickShow/                   Swift app
 │   ├── Info.plist               LSUIElement
 │   ├── Resources/
@@ -249,7 +250,7 @@ PNG-with-arrows markup.
   when the user is *not* drawing. Same trade-off the markup loop
   has lived with.
 
-Canonical consumer: `plugin/skills/click-demo` — minimal HTML page,
+Canonical consumer: `plugin/skills/fun-click-demo` — minimal HTML page,
 one button, one emit, one re-render.
 
 ## Logging convention
