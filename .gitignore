@@ -34,3 +34,6 @@ dist/
 
 # Plugin bundled binary (built by tools/build-plugin.sh)
 plugin/bin/
+
+# Claude Code local workspace (retros, worktrees, etc.)
+.claude/
