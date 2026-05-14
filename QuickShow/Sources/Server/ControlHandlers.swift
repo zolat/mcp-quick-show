@@ -3,6 +3,13 @@ import Foundation
 
 // Per-kind dispatch. Phase 0: hello + ping. Phase 1: + upsert / close
 // (real handlers wired through SessionManager).
+//
+// `hello` is NOT dispatched here — `ControlServer.handleLine` has a
+// fast-path for it because the session_id allocator needs the FD,
+// and threading FD through the handler signature would be more
+// surgery than the saving is worth. Anything that reaches dispatch
+// with `kind == "hello"` is a logic bug; we fall through to the
+// unknown-kind branch.
 
 @MainActor
 enum ControlHandlers {
@@ -13,8 +20,6 @@ enum ControlHandlers {
             switch req.kind {
             case "ping":
                 return try encode(handlePing(req: req))
-            case "hello":
-                return try encode(try handleHelloWithDelegate(req: req, delegate: delegate))
             case "upsert":
                 return try await handleUpsert(req: req, delegate: delegate)
             case "close":
@@ -48,30 +53,6 @@ enum ControlHandlers {
         ControlOk(id: req.id, result: PingResult(
             version: ControlProtocol.version,
             pid: getpid()
-        ))
-    }
-
-    // MARK: - hello
-
-    private static func handleHello(req: ControlRequest) throws -> ControlOk {
-        return try handleHelloWithDelegate(req: req, delegate: nil)
-    }
-
-    /// Variant that registers the session with the delegate's
-    /// `SessionManager` so cascade indexes are reserved at hello time
-    /// (and any pending orphan timer for the same UUID is cancelled).
-    /// Plumbing routes through `dispatch` below.
-    private static func handleHelloWithDelegate(req: ControlRequest, delegate: AppDelegate?) throws -> ControlOk {
-        let payload = try req.decodePayload(HelloRequest.self)
-        NSLog("QuickShow: hello from session=\(payload.sessionId) client=\(payload.client ?? "?")")
-        delegate?.sessionManager.registerSession(payload.sessionId)
-        // Allocator-driven path lands in a follow-up commit; for now
-        // echo the claim back as the granted id — same as today's
-        // behavior.
-        return ControlOk(id: req.id, result: HelloResult(
-            version: ControlProtocol.version,
-            pid: getpid(),
-            sessionId: payload.sessionId
         ))
     }
 

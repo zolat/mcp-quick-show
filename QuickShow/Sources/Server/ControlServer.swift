@@ -115,8 +115,36 @@ final class ControlServer {
 
     // MARK: - Session tracking (called by handlers + serve loop)
 
-    func attachSession(_ sessionId: String, toFD fd: Int32) {
-        sessionByFD[fd] = sessionId
+    /// Decide the authoritative `session_id` for an incoming `hello`.
+    ///
+    /// The sidecar's claim is its cwd-derived persisted UUID. If no
+    /// other live FD currently holds that id we grant it — preserving
+    /// the single-session case (first-ever sidecar from this cwd OR
+    /// orphan-grace reattach after a sidecar crash). If another live
+    /// FD already holds it, that's a parallel session from the same
+    /// cwd and we mint a fresh UUID so the two get disjoint HUDs,
+    /// flags, events log, throttle bucket.
+    ///
+    /// Always called on `@MainActor` (from `handleLine`'s hello
+    /// fast-path); `sessionByFD` is single-writer here so there's no
+    /// race between two concurrent hellos checking the same claim.
+    ///
+    /// Known limitation: a *different* Claude's sidecar that connects
+    /// with the same cwd-claim *within the 60 s orphan window* of an
+    /// abandoned session will be granted that claim and inherit the
+    /// orphaned HUDs. Fixing that requires per-session PPID tracking
+    /// which asymmetrically breaks Claude-restart-reconnect, so we
+    /// document and live with it for now.
+    func allocateSessionId(claim: String, fd: Int32, parentPid: Int32?) -> String {
+        let contested = sessionByFD.values.contains(claim)
+        let granted = contested ? UUID().uuidString.lowercased() : claim
+        sessionByFD[fd] = granted
+        if contested {
+            NSLog("QuickShow: session_id claim \(claim) contested " +
+                  "(held by another live FD); granted fresh \(granted) " +
+                  "to fd=\(fd) ppid=\(parentPid.map(String.init) ?? "?")")
+        }
+        return granted
     }
 
     func connectionClosed(fd: Int32) {
@@ -180,12 +208,14 @@ final class ControlServer {
                 guard let srv = server.value else {
                     return try? encodeProtocolError(id: req.id, error: "server stopped")
                 }
-                // For hello messages, bind the session to this FD so
-                // the disconnect notification later finds the right
-                // session id.
-                if req.kind == "hello",
-                   let hello = try? req.decodePayload(HelloRequest.self) {
-                    srv.attachSession(hello.sessionId, toFD: fd)
+                // Hello fast-path: the app — not the sidecar — is the
+                // authority on session_id. Decode here so we can call
+                // the allocator + registerSession on the *granted*
+                // id, then return the response directly. Skipping
+                // ControlHandlers.dispatch for "hello" keeps the
+                // fd-needing logic out of the handler signature.
+                if req.kind == "hello" {
+                    return try? handleHelloAllocating(req: req, fd: fd, server: srv)
                 }
                 return await ControlHandlers.dispatch(req, delegate: srv.appDelegate)
             }.value
@@ -203,6 +233,33 @@ final class ControlServer {
         withNewline.withUnsafeBytes { raw in
             ControlServer.writeAll(raw.baseAddress!, raw.count, to: fd)
         }
+    }
+
+    /// Hello fast-path body: decode claim, allocate granted id,
+    /// register with SessionManager, encode the HelloResult response.
+    /// Pulled out for readability; called only from `handleLine`.
+    @MainActor
+    private static func handleHelloAllocating(
+        req: ControlRequest,
+        fd: Int32,
+        server srv: ControlServer
+    ) throws -> Data {
+        let payload = try req.decodePayload(HelloRequest.self)
+        let granted = srv.allocateSessionId(
+            claim: payload.sessionId,
+            fd: fd,
+            parentPid: payload.parentPid
+        )
+        NSLog("QuickShow: hello from session=\(granted) client=\(payload.client ?? "?") (claim=\(payload.sessionId))")
+        srv.appDelegate?.sessionManager.registerSession(granted)
+        return try ControlProtocol.encoder.encode(ControlOk(
+            id: req.id,
+            result: HelloResult(
+                version: ControlProtocol.version,
+                pid: getpid(),
+                sessionId: granted
+            )
+        ))
     }
 
     private nonisolated static func encodeProtocolError(id: String?, error: String) throws -> Data {
