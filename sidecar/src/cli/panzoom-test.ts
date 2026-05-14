@@ -7,14 +7,14 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import { SocketClient, DEFAULT_SOCKET_PATH } from "../socket.ts";
+import { helloHandshake } from "../handshake.ts";
 
 const SOCK = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
 
 async function main() {
-  const sessionId = randomUUID();
   const client = new SocketClient(SOCK);
   await client.connect(2000);
-  await client.request({ kind: "hello", session_id: sessionId, client: "panzoom-test" });
+  const sessionId = await helloHandshake(client, randomUUID(), "panzoom-test");
 
   // 1. A busy mermaid diagram — too many nodes to read at fit-zoom.
   await client.request({

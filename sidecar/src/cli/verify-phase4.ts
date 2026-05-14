@@ -17,6 +17,7 @@
 
 import { randomUUID } from "node:crypto";
 import { SocketClient, DEFAULT_SOCKET_PATH } from "../socket.ts";
+import { helloHandshake } from "../handshake.ts";
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) {
@@ -31,7 +32,16 @@ const SOCK = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
 async function connectHello(sessionId: string, label: string): Promise<SocketClient> {
   const c = new SocketClient(SOCK);
   await c.connect(2000);
-  await c.request({ kind: "hello", session_id: sessionId, client: `verify-phase4-${label}` });
+  // Adopts the granted id. For this test we expect no contest — same
+  // claim each time, separate-connection serial reconnects — so the
+  // granted id should always equal the claim. Verify and bail if not.
+  const granted = await helloHandshake(c, sessionId, `verify-phase4-${label}`);
+  if (granted !== sessionId) {
+    throw new Error(
+      `verify-phase4: claim ${sessionId} contested, granted ${granted} — ` +
+      `unexpected for this test; a stale connection still holds the claim`,
+    );
+  }
   return c;
 }
 

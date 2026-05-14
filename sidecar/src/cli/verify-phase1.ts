@@ -13,6 +13,7 @@
 import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { SocketClient, DEFAULT_SOCKET_PATH } from "../socket.ts";
+import { helloHandshake } from "../handshake.ts";
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -27,13 +28,12 @@ function assert(cond: unknown, msg: string): asserts cond {
 async function main() {
   const socketPath = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
   const client = new SocketClient(socketPath);
-  const sessionId = randomUUID();
-
   await client.connect(2000);
 
-  // 1. Hello
-  const hello = await client.request({ kind: "hello", session_id: sessionId, client: "verify-cli" });
-  assert(hello.kind === "ok", `hello returned ok (kind=${hello.kind})`);
+  // 1. Hello — helloHandshake throws on non-ok, so passing here means
+  //    the handshake worked. Adopts the app-granted session_id.
+  const sessionId = await helloHandshake(client, randomUUID(), "verify-cli");
+  assert(typeof sessionId === "string" && sessionId.length > 0, `hello returned a session_id`);
 
   // 2. show_markdown upsert
   const markdownBody = "# Hello QuickShow\n\nThis is a **Phase 1** verification render.\n\n- one\n- two\n- three\n\n```ts\nconst x: number = 42;\n```";

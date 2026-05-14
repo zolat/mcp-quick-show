@@ -7,6 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { SocketClient, DEFAULT_SOCKET_PATH } from "../socket.ts";
+import { helloHandshake } from "../handshake.ts";
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -21,10 +22,8 @@ function assert(cond: unknown, msg: string): asserts cond {
 async function main() {
   const socketPath = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
   const client = new SocketClient(socketPath);
-  const sessionId = randomUUID();
-
   await client.connect(2000);
-  await client.request({ kind: "hello", session_id: sessionId, client: "verify-phase2" });
+  const sessionId = await helloHandshake(client, randomUUID(), "verify-phase2");
 
   // === SVG ===
   const svgBody = `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">

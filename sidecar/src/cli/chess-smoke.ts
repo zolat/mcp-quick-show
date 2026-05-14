@@ -13,6 +13,7 @@ import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { SocketClient, DEFAULT_SOCKET_PATH } from "../socket.ts";
 import { getOrCreateSessionId } from "../session.ts";
+import { helloHandshake } from "../handshake.ts";
 
 const HELPER = resolve(import.meta.dir, "../../../plugin/skills/chess/chess_helper.py");
 
@@ -47,20 +48,15 @@ async function main() {
   const svg = execFileSync(HELPER, args, { encoding: "utf-8" });
   console.error(`[chess-smoke] svg ${svg.length} bytes`);
 
-  const sessionId = getOrCreateSessionId();
   const socketPath = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
   const client = new SocketClient(socketPath);
   await client.connect(2000);
 
-  const hello = await client.request({
-    kind: "hello",
-    session_id: sessionId,
-    client: process.env.MCP_CLIENT_ID ?? "claude-code",
-  });
-  if (hello.kind !== "ok") {
-    console.error(`[chess-smoke] hello rejected: ${JSON.stringify(hello)}`);
-    process.exit(1);
-  }
+  const sessionId = await helloHandshake(
+    client,
+    getOrCreateSessionId(),
+    process.env.MCP_CLIENT_ID ?? "claude-code",
+  );
 
   const resp = await client.request({
     kind: "upsert",

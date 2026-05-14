@@ -12,7 +12,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { SocketClient, DEFAULT_SOCKET_PATH } from "./socket.ts";
 import { getOrCreateSessionId } from "./session.ts";
-import type { HelloResult } from "./protocol.ts";
+import { helloHandshake } from "./handshake.ts";
 import { locateAppBundle, launchAndWaitFor } from "./autolaunch.ts";
 import {
   allHandlers,
@@ -76,23 +76,17 @@ async function main() {
 
   await ensureConnected(client);
 
-  // Handshake — send the cwd-derived candidate as a CLAIM. The app
-  // decides the authoritative session_id (it can override the claim
-  // to disambiguate parallel sidecars sharing a cwd) and returns it
-  // in the response. Everything downstream uses the granted id.
-  const helloResp = await client.request({
-    kind: "hello",
-    session_id: candidateId,
-    client: process.env.MCP_CLIENT_ID ?? "claude-code",
-    parent_pid: process.ppid,
-  });
-  if (helloResp.kind !== "ok") {
-    const err = "error" in helloResp ? helloResp.error : helloResp.kind;
-    throw new Error(`hello rejected: ${err}`);
-  }
-  const granted = (helloResp.result as HelloResult).session_id;
-  const sessionId = granted;
-  if (granted === candidateId) {
+  // Handshake — send the cwd-derived candidate as a CLAIM. The app's
+  // allocator decides the authoritative session_id (it can override
+  // the claim to disambiguate parallel sidecars sharing a cwd) and
+  // returns it in the response. Everything downstream uses the
+  // granted id.
+  const sessionId = await helloHandshake(
+    client,
+    candidateId,
+    process.env.MCP_CLIENT_ID ?? "claude-code",
+  );
+  if (sessionId === candidateId) {
     console.error(`[mcp-quick-show] connected (session=${sessionId})`);
   } else {
     console.error(

@@ -14,6 +14,7 @@
 import * as fs from "node:fs";
 import { SocketClient, DEFAULT_SOCKET_PATH } from "../socket.ts";
 import { markupEventsLog } from "../session.ts";
+import { helloHandshake } from "../handshake.ts";
 
 const BURST_HTML = `<!doctype html><html><body>
 <h1>throttle smoke</h1>
@@ -31,21 +32,13 @@ const BURST_HTML = `<!doctype html><html><body>
 
 async function main(): Promise<number> {
   const socketPath = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
-  const sessionId = process.env.QUICKSHOW_VERIFY_SESSION ?? "panel-throttle";
+  const claim = process.env.QUICKSHOW_VERIFY_SESSION ?? "panel-throttle";
   const panel = "throttle-pe";
 
   const client = new SocketClient(socketPath);
   await client.connect(2000);
 
-  const hello = await client.request({
-    kind: "hello",
-    session_id: sessionId,
-    client: "verify-panel-throttle",
-  });
-  if (hello.kind !== "ok") {
-    console.error("verify-panel-throttle: hello rejected");
-    return 1;
-  }
+  const sessionId = await helloHandshake(client, claim, "verify-panel-throttle");
   const armed = await client.request({
     kind: "set_session_flag",
     session: sessionId,

@@ -24,6 +24,7 @@
 import * as fs from "node:fs";
 import { SocketClient, DEFAULT_SOCKET_PATH } from "../socket.ts";
 import { markupEventsLog } from "../session.ts";
+import { helloHandshake } from "../handshake.ts";
 
 const EMIT_HTML = `<!doctype html><html><head><meta charset="utf-8"></head>
 <body>
@@ -44,32 +45,32 @@ const EMIT_HTML = `<!doctype html><html><head><meta charset="utf-8"></head>
 </script>
 </body></html>`;
 
-async function helloAndArm(client: SocketClient, sessionId: string, arm: boolean): Promise<boolean> {
-  const hello = await client.request({
-    kind: "hello",
-    session_id: sessionId,
-    client: "verify-panel-events",
-  });
-  if (hello.kind !== "ok") {
-    console.error("verify-panel-events: hello rejected:", JSON.stringify(hello));
-    return false;
+/// Hello → optional arm. Returns the GRANTED session_id (caller uses
+/// it for downstream upsert + log read) or null on failure.
+async function helloAndArm(client: SocketClient, claim: string, arm: boolean): Promise<string | null> {
+  let granted: string;
+  try {
+    granted = await helloHandshake(client, claim, "verify-panel-events");
+  } catch (err) {
+    console.error("verify-panel-events: hello rejected:", err instanceof Error ? err.message : String(err));
+    return null;
   }
   if (arm) {
     const armed = await client.request({
       kind: "set_session_flag",
-      session: sessionId,
+      session: granted,
       key: "panel_events_armed",
       value: true,
     });
     if (armed.kind !== "ok") {
       console.error("verify-panel-events: set_session_flag rejected:", JSON.stringify(armed));
-      return false;
+      return null;
     }
-    console.error(`verify-panel-events: armed session ${sessionId}`);
+    console.error(`verify-panel-events: armed session ${granted}`);
   } else {
-    console.error(`verify-panel-events: session ${sessionId} left un-armed (gate test)`);
+    console.error(`verify-panel-events: session ${granted} left un-armed (gate test)`);
   }
-  return true;
+  return granted;
 }
 
 async function renderAndWait(client: SocketClient, sessionId: string, panel: string): Promise<boolean> {
@@ -100,15 +101,16 @@ function readLines(sessionId: string): string[] {
 async function main(): Promise<number> {
   const gate = process.argv.includes("--gate");
   const socketPath = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
-  const armedSession = process.env.QUICKSHOW_VERIFY_SESSION ?? "panel-verify-armed";
-  const unarmedSession = (process.env.QUICKSHOW_VERIFY_SESSION ?? "panel-verify") + "-unarmed";
+  const armedClaim = process.env.QUICKSHOW_VERIFY_SESSION ?? "panel-verify-armed";
+  const unarmedClaim = (process.env.QUICKSHOW_VERIFY_SESSION ?? "panel-verify") + "-unarmed";
   const panel = "verify-pe";
 
   const client = new SocketClient(socketPath);
   await client.connect(2000);
 
   // (1) Armed path: arm, render, expect a panel_event line.
-  if (!(await helloAndArm(client, armedSession, true))) return 1;
+  const armedSession = await helloAndArm(client, armedClaim, true);
+  if (!armedSession) return 1;
   if (!(await renderAndWait(client, armedSession, panel))) return 1;
 
   const lines = readLines(armedSession);
@@ -129,7 +131,8 @@ async function main(): Promise<number> {
   // (2) Optional gate test: un-armed session must NOT produce panel_event lines.
   if (gate) {
     // Re-hello under a different session id; we deliberately skip arming.
-    if (!(await helloAndArm(client, unarmedSession, false))) return 1;
+    const unarmedSession = await helloAndArm(client, unarmedClaim, false);
+    if (!unarmedSession) return 1;
     if (!(await renderAndWait(client, unarmedSession, panel))) return 1;
     const ungated = readLines(unarmedSession).filter((l) => l.includes('"panel_event"'));
     console.error(`verify-panel-events: un-armed panel_event=${ungated.length}`);

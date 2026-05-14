@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { SocketClient, DEFAULT_SOCKET_PATH } from "../socket.ts";
+import { helloHandshake } from "../handshake.ts";
 
 function arg(args: string[], flag: string): string | undefined {
   const i = args.indexOf(flag);
@@ -49,16 +50,13 @@ async function main(): Promise<number> {
   const html = helper(...helperArgs);
 
   const socketPath = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
-  const session = process.env.QUICKSHOW_CHESS_SESSION ?? "chess-live";
+  const claim = process.env.QUICKSHOW_CHESS_SESSION ?? "chess-live";
   const panel = "chess-board";
 
   const c = new SocketClient(socketPath);
   await c.connect(2000);
 
-  const hello = await c.request({
-    kind: "hello", session_id: session, client: "chess-test-render",
-  });
-  if (hello.kind !== "ok") { console.error("hello failed:", hello); return 1; }
+  const session = await helloHandshake(c, claim, "chess-test-render");
 
   const armed = await c.request({
     kind: "set_session_flag", session, key: "panel_events_armed", value: true,

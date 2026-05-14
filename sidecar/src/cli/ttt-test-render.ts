@@ -6,6 +6,7 @@
 //   bun run src/cli/ttt-test-render.ts --banner "X wins!"
 
 import { SocketClient, DEFAULT_SOCKET_PATH } from "../socket.ts";
+import { helloHandshake } from "../handshake.ts";
 
 function parseList(args: string[], flag: string): number[] {
   const i = args.indexOf(flag);
@@ -127,17 +128,14 @@ async function main(): Promise<number> {
   const user = parseList(args, "--user");
   const claude = parseList(args, "--claude");
   const banner = parseStr(args, "--banner");
-  const session = process.env.QUICKSHOW_TTT_SESSION ?? "ttt-live";
+  const claim = process.env.QUICKSHOW_TTT_SESSION ?? "ttt-live";
   const panel = "ttt-board";
   const socketPath = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
 
   const c = new SocketClient(socketPath);
   await c.connect(2000);
 
-  const hello = await c.request({
-    kind: "hello", session_id: session, client: "ttt-test-render",
-  });
-  if (hello.kind !== "ok") { console.error("hello failed:", hello); return 1; }
+  const session = await helloHandshake(c, claim, "ttt-test-render");
 
   const armed = await c.request({
     kind: "set_session_flag", session, key: "panel_events_armed", value: true,

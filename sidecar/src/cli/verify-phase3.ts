@@ -2,6 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 import { SocketClient, DEFAULT_SOCKET_PATH } from "../socket.ts";
+import { helloHandshake } from "../handshake.ts";
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) {
@@ -14,10 +15,8 @@ function assert(cond: unknown, msg: string): asserts cond {
 async function main() {
   const socketPath = process.env.QUICKSHOW_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
   const client = new SocketClient(socketPath);
-  const sessionId = randomUUID();
-
   await client.connect(2000);
-  await client.request({ kind: "hello", session_id: sessionId, client: "verify-phase3" });
+  const sessionId = await helloHandshake(client, randomUUID(), "verify-phase3");
 
   // Open three different-named panels in the same session.
   for (const [name, body] of [
@@ -68,9 +67,11 @@ async function main() {
   const inspectGone = await client.request({ kind: "inspect", session: sessionId, name: "plan" });
   assert(inspectGone.kind === "protocol_error", `inspect on closed panel → protocol_error (got ${inspectGone.kind})`);
 
-  // Two sessions should be isolated.
-  const otherSession = randomUUID();
-  await client.request({ kind: "hello", session_id: otherSession, client: "verify-phase3-other" });
+  // Two sessions should be isolated. Reuses the same socket connection,
+  // so the FD-mapping in the app's allocator gets rebound to the new
+  // session_id on this hello (pre-existing quirk of the current
+  // single-FD-multi-hello flow; not regressed by allocator).
+  const otherSession = await helloHandshake(client, randomUUID(), "verify-phase3-other");
   const otherList = await client.request({ kind: "list", session: otherSession });
   const otherPanels = (otherList as { result: Array<unknown> }).result;
   assert(otherPanels.length === 0, `other session sees 0 panels (got ${otherPanels.length})`);
