@@ -156,3 +156,47 @@ test("get_markup: 404 when artifact never existed", async () => {
   expect(result.isError).toBe(true);
   expect((result.content[0] as { text: string }).text).toContain("no artifact");
 });
+
+test("enable_panel_events: issues set_session_flag with panel_events_armed, returns Monitor instructions", async () => {
+  await import("../src/handlers/enablePanelEvents.ts");
+  const { findRawHandler } = await import("../src/handlers/registry.ts");
+  const h = findRawHandler("enable_panel_events")!;
+  expect(h).toBeDefined();
+
+  let captured: unknown = null;
+  const stubClient = {
+    request: async (req: unknown) => {
+      captured = req;
+      return { kind: "ok", id: "x", result: {} };
+    },
+  } as any;
+
+  const result = await h.call({}, { client: stubClient, sessionId: "test-sess-PE-A" });
+  expect(result.isError).toBeUndefined();
+  const text = (result.content[0] as { text: string }).text;
+  expect(text).toContain("Panel events armed");
+  expect(text).toContain("tail -n 0 -F");
+  expect(text).toContain("test-sess-PE-A/events.ndjson");
+  expect(text).toContain("window.quickshow.emit");
+  expect(text).toContain("panel_event");
+  expect(text).toContain("panel_event_dropped");
+  expect(captured).toMatchObject({
+    kind: "set_session_flag",
+    session: "test-sess-PE-A",
+    key: "panel_events_armed",
+    value: true,
+  });
+});
+
+test("enable_panel_events: surfaces set_session_flag rejection as isError", async () => {
+  await import("../src/handlers/enablePanelEvents.ts");
+  const { findRawHandler } = await import("../src/handlers/registry.ts");
+  const h = findRawHandler("enable_panel_events")!;
+  const stubClient = {
+    request: async () => ({ kind: "protocol_error", id: "x", error: "boom" }),
+  } as any;
+  const result = await h.call({}, { client: stubClient, sessionId: "test-sess-PE-B" });
+  expect(result.isError).toBe(true);
+  const text = (result.content[0] as { text: string }).text;
+  expect(text).toContain("boom");
+});

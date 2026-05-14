@@ -2,13 +2,17 @@ import Darwin
 import Foundation
 
 /// Appends NDJSON events to the per-session log that Claude tails via
-/// the `Monitor` tool. Two event types are emitted, no more:
-///   `markup_sent`      — user pressed Send on a markup-capable panel
-///   `markup_dismissed` — user closed the panel without sending
+/// the `Monitor` tool. Four event types are emitted:
+///   `markup_sent`         — user pressed Send on a markup-capable panel
+///   `markup_dismissed`    — user closed the panel without sending
+///   `panel_event`         — agent HTML called `window.quickshow.emit(payload)`
+///   `panel_event_dropped` — throttle summary; emitted at most 1Hz/panel
+///                           and only when drops actually occurred.
 ///
 /// Volume discipline matters: Monitor auto-stops on too many events, so
 /// internal HUD chatter (clicks, drags, tab switches) must never reach
-/// this file.
+/// this file. `panel_event` lines are gated by an arming flag + a token
+/// bucket — see `SessionManager.wirePanelEvents` for the throttle.
 ///
 /// Concurrency model: one writer per session, serialized through a
 /// dedicated queue. The underlying file is opened `O_APPEND` so even
@@ -51,12 +55,75 @@ final class EventLogWriter: @unchecked Sendable {
         ])
     }
 
+    /// Emit a `panel_event` line. `payload` is the agent-defined value
+    /// passed to `window.quickshow.emit(...)`; we serialize whatever
+    /// JSON-shaped value it is (object, array, scalar, null). Anything
+    /// not JSON-serializable is dropped at the `JSONValue.from(_:)`
+    /// step with an NSLog.
+    func emitPanelEvent(panel: String, payload: Any) {
+        emit([
+            "type": .string("panel_event"),
+            "panel": .string(panel),
+            "payload": JSONValue.from(payload),
+            "ts": .number(Date().timeIntervalSince1970 * 1000),
+        ])
+    }
+
+    /// Emit a `panel_event_dropped` summary. Fired at most 1Hz/panel
+    /// by the throttle, and only when `dropped > 0`.
+    func emitPanelEventDropped(panel: String, dropped: Int) {
+        emit([
+            "type": .string("panel_event_dropped"),
+            "panel": .string(panel),
+            "dropped": .number(Double(dropped)),
+            "ts": .number(Date().timeIntervalSince1970 * 1000),
+        ])
+    }
+
     // MARK: - Internals
 
-    private enum JSONValue {
+    enum JSONValue {
         case string(String)
         case number(Double)
         case bool(Bool)
+        case null
+        case array([JSONValue])
+        /// Ordered key/value pairs (insertion order preserved, used so
+        /// nested objects round-trip in a predictable order for
+        /// grep-readability and tests).
+        case object([(String, JSONValue)])
+
+        /// Convert an arbitrary JSON-shaped Swift value (typically what
+        /// arrives off `WKScriptMessage.body`) into a `JSONValue`.
+        /// Returns `.null` for anything we can't represent and NSLog's
+        /// the offending type — keeps the writer side total.
+        static func from(_ value: Any) -> JSONValue {
+            if value is NSNull { return .null }
+            if let s = value as? String { return .string(s) }
+            // NSNumber tri-state: bool / int / double. CFNumberGetType
+            // is the only reliable way to distinguish bool from
+            // 0/1-valued numerics (Swift's `as? Bool` succeeds for
+            // NSNumber("1"), giving false positives).
+            if let n = value as? NSNumber {
+                if CFGetTypeID(n) == CFBooleanGetTypeID() {
+                    return .bool(n.boolValue)
+                }
+                return .number(n.doubleValue)
+            }
+            if let b = value as? Bool { return .bool(b) }
+            if let arr = value as? [Any] {
+                return .array(arr.map { JSONValue.from($0) })
+            }
+            if let dict = value as? [String: Any] {
+                // Sort keys for deterministic encoding so tests and
+                // diffs are stable. Round-trip order matters less than
+                // determinism.
+                let pairs = dict.keys.sorted().map { k in (k, JSONValue.from(dict[k] as Any)) }
+                return .object(pairs)
+            }
+            NSLog("QuickShow: EventLogWriter.JSONValue.from received unsupported type \(type(of: value)) — coerced to null")
+            return .null
+        }
     }
 
     private func emit(_ fields: [String: JSONValue]) {
@@ -117,12 +184,21 @@ final class EventLogWriter: @unchecked Sendable {
         case .string(let s): return jsonString(s)
         case .number(let n):
             // Integer-valued doubles render without a trailing `.0`
-            // so timestamps stay compact and JSON-numeric.
+            // so timestamps stay compact and JSON-numeric. Guard
+            // against NaN/Inf (not JSON-valid) — emit null instead.
+            if n.isNaN || n.isInfinite { return "null" }
             if n.truncatingRemainder(dividingBy: 1) == 0 && abs(n) < 1e15 {
                 return String(Int64(n))
             }
             return String(n)
         case .bool(let b): return b ? "true" : "false"
+        case .null: return "null"
+        case .array(let items):
+            return "[" + items.map { encode($0) }.joined(separator: ",") + "]"
+        case .object(let pairs):
+            let body = pairs.map { (k, v) in "\(jsonString(k)):\(encode(v))" }
+                .joined(separator: ",")
+            return "{" + body + "}"
         }
     }
 

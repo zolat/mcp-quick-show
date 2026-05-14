@@ -110,13 +110,16 @@ mcp-quick-show/
 │   ├── bin/                     compiled sidecar binary (gitignored; built by tools/build-plugin.sh)
 │   ├── skills/quickshow/        foundational "how to use QuickShow" skill
 │   ├── skills/frontend-design/  bold-aesthetic design + markup loop
-│   └── skills/tic-tac-toe/      demo skill (markup-driven gameplay)
+│   ├── skills/tic-tac-toe/      demo skill (markup-driven gameplay)
+│   ├── skills/chess/            demo skill (markup-driven chess vs. minimax-2)
+│   └── skills/click-demo/       demo skill (panel_event channel — click → emit → re-render)
 ├── QuickShow/                   Swift app
 │   ├── Info.plist               LSUIElement
 │   ├── Resources/
 │   │   ├── templates/           markdown.html / svg.html / mermaid.html / theme.css
 │   │   ├── libs/                marked / mermaid / DOMPurify (bundled, inlined)
-│   │   └── scripts/             markup-canvas.js (in-DOM stroke capture)
+│   │   └── scripts/             markup-canvas.js (in-DOM stroke capture),
+│   │                            quickshow-bridge.js (window.quickshow.emit shim)
 │   └── Sources/
 │       ├── App/                 QuickShowApp (@main), AppDelegate
 │       ├── Server/              ControlServer / ControlProtocol / ControlHandlers
@@ -127,6 +130,7 @@ mcp-quick-show/
 │       │                        Markdown/SVG/Mermaid/Image/HTML + RendererRegistry
 │       ├── Snapshot/            SnapshotService (PNG capture)
 │       ├── Events/              EventLogWriter + MarkupPaths (NDJSON event log)
+│       │                        + PanelEventThrottle (per-panel token bucket)
 │       ├── Promote/             PromoteToWindowController (HUD → standard window)
 │       └── Settings/            Settings + SettingsWindow
 ├── ROADMAP.md                   phase pointer
@@ -151,6 +155,11 @@ commit.** Borrowed from PipAnything's CLAUDE.md.
 Current verbs (sidecar → app): `hello`, `ping`, `upsert`, `close`,
 `list`, `inspect`, `set_session_flag`. Responses: `ok`,
 `render_error`, `protocol_error`.
+
+`set_session_flag` is generic over its `key`; adding a new flag name
+(today: `markup_events_armed`, `panel_events_armed`) is *not* a
+wire-protocol change. Only new verbs / response kinds require the
+paired-file edit.
 
 ## Adding a new content type
 
@@ -201,6 +210,47 @@ keep them in lockstep.
 
 The `skills/quickshow-design` skill is the canonical consumer: render
 HTML → arm events → wait for `markup_sent` → fetch + iterate.
+
+## Panel event channel
+
+Sibling of the markup loop. Lets agent-supplied HTML emit structured
+events back to Claude — turning `show_html` panels into real
+two-way UIs (click-to-act, form submission, drag/drop) instead of
+PNG-with-arrows markup.
+
+- `enable_panel_events()` flips `panel_events_armed` (via
+  `set_session_flag`) and returns the same `Monitor` / `tail -F`
+  command. Independent of `enable_markup_events`: arm one, the
+  other, or both — all events share the session's `events.ndjson`.
+- A third script-message channel — `panelEvent`, peer of
+  `renderComplete` and `markupStroke` — on every WebView. Wired in
+  `WebViewPanelRenderer.makeView()`.
+- `QuickShow/Resources/scripts/quickshow-bridge.js` is injected as a
+  `WKUserScript` at `.atDocumentStart` so `window.quickshow.emit`
+  is defined before agent inline scripts run. Works for both
+  `loadHTMLString`-driven `show_html` panels and template-based
+  renderers (markdown / svg / mermaid / image).
+- Persistence is gated twice:
+  1. `session.flags["panel_events_armed"]?.asBool` — symmetric with
+     how the Send button is gated.
+  2. `PanelEventThrottle` (`QuickShow/Sources/Events/`): token
+     bucket, capacity 20 events/sec/panel. Excess emits drop and a
+     1Hz `panel_event_dropped {panel, dropped}` summary line lands
+     in the log when drops occurred. No drops → no summary.
+- Line shapes (`events.ndjson`):
+  ```json
+  {"type":"panel_event","panel":"<name>","payload":<json>,"ts":<ms>}
+  {"type":"panel_event_dropped","panel":"<name>","dropped":<n>,"ts":<ms>}
+  ```
+  `payload` is whatever the page passed; semantics live in the
+  skill + the rendered HTML, not in the app or sidecar.
+- Pointer-events caveat: while the user is in markup draw mode the
+  in-DOM canvas swallows clicks, so `quickshow.emit` only fires
+  when the user is *not* drawing. Same trade-off the markup loop
+  has lived with.
+
+Canonical consumer: `plugin/skills/click-demo` — minimal HTML page,
+one button, one emit, one re-render.
 
 ## Logging convention
 

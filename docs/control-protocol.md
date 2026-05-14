@@ -18,8 +18,13 @@ commit.
 
 Every line is a JSON object. Direction is implicit by `kind`:
 
-- Sidecar → app: `hello`, `ping`, `upsert`, `close`, `list`, `inspect`.
+- Sidecar → app: `hello`, `ping`, `upsert`, `close`, `list`, `inspect`,
+  `set_session_flag`.
 - App → sidecar: `ok`, `render_error`, `protocol_error`.
+
+Side channel (app → Claude, **not** sidecar→app): the app appends
+NDJSON events to a per-session log on disk that the sidecar exposes
+via `Monitor`. See [Events log](#events-log) below.
 
 Every request carries an optional `id` (string). The matching response
 echoes the same `id` so concurrent requests are correlated.
@@ -81,6 +86,26 @@ Response: `{"id": "...", "kind": "ok", "result": [{"name": "...", "content_type"
 
 Response: same shape as `upsert`'s success response.
 
+### `set_session_flag` — set a per-session flag on the app
+
+```json
+{"id": "<msg-id>", "kind": "set_session_flag", "session": "<uuid>",
+ "key": "<flag-name>", "value": <bool|number|string|null>}
+```
+
+Generic key/value pair. The app stores flags in a per-session dict
+and consumers (UI bits, message-handler gates) read them by name.
+Adding a new flag is a string-key addition — no envelope change.
+
+Current flag keys:
+
+| Key                   | Value | Set by                  | Effect |
+|-----------------------|-------|-------------------------|--------|
+| `markup_events_armed` | `true`| `enable_markup_events`  | HUD's Send button enabled on markup-capable panels; `markup_sent` / `markup_dismissed` lines append to the events log. |
+| `panel_events_armed`  | `true`| `enable_panel_events`   | The `panelEvent` JS bridge persists `panel_event` lines to the events log (gated; otherwise emits are dropped silently). |
+
+Response: `{"id": "...", "kind": "ok", "result": {}}`.
+
 ## App → sidecar
 
 ### `ok` — success
@@ -107,6 +132,71 @@ agent fix and retry without asking the user.
 {"id": "<msg-id>", "kind": "protocol_error", "error": "<details>"}
 ```
 
+## Events log
+
+Out-of-band channel for app → Claude notifications. The app appends
+one JSON object per line (NDJSON) to a per-session file; the sidecar
+hands Claude a `Monitor` command (`tail -n 0 -F <path>`) that streams
+new lines as notifications.
+
+**Path:**
+`~/Library/Caches/QuickShow/events/<sessionId>/events.ndjson`
+(overridable via `QUICKSHOW_EVENTS_DIR`).
+
+**Mirror discipline:** the path-derivation pair —
+`QuickShow/Sources/Events/MarkupPaths.swift` and
+`sidecar/src/session.ts` — must change together. The line shapes
+below are append-only (no removals, no renames; new kinds are fine).
+
+### Line shapes
+
+All lines carry `type` (kind discriminator), `panel` (panel name so
+multi-panel sessions disambiguate), and `ts` (milliseconds since
+Unix epoch). Other fields vary by `type`.
+
+**`markup_sent`** — user pressed **Send** on a markup-capable panel.
+Gated by `markup_events_armed`.
+
+```json
+{"type":"markup_sent","panel":"<name>","artifact":"<uuid>","ts":<ms>}
+```
+
+The PNG artifact lives at
+`~/Library/Caches/QuickShow/events/<sessionId>/artifacts/<uuid>.png`.
+Fetch via the `get_markup` MCP tool.
+
+**`markup_dismissed`** — user closed a markup-capable panel without
+sending. Gated by `markup_events_armed`. No artifact.
+
+```json
+{"type":"markup_dismissed","panel":"<name>","ts":<ms>}
+```
+
+**`panel_event`** — agent-supplied HTML called
+`window.quickshow.emit(payload)`. Gated by `panel_events_armed`.
+`payload` is a free-form JSON value (object, array, scalar, null) —
+agent-defined semantics.
+
+```json
+{"type":"panel_event","panel":"<name>","payload":<json>,"ts":<ms>}
+```
+
+**`panel_event_dropped`** — token-bucket throttle (capacity 20
+events/sec/panel) discarded `dropped` emits in the last second.
+Emitted at most 1Hz/panel and only when drops occurred — a
+well-behaved page never produces this line. Gated by
+`panel_events_armed`.
+
+```json
+{"type":"panel_event_dropped","panel":"<name>","dropped":<n>,"ts":<ms>}
+```
+
+### Independence of channels
+
+`enable_markup_events` and `enable_panel_events` are independent.
+A session may arm one, the other, both, or neither. All four event
+kinds share the same `events.ndjson` file; Claude filters by `type`.
+
 ## Implementation status
 
 | Verb | Phase | Status |
@@ -117,3 +207,4 @@ agent fix and retry without asking the user.
 | `close` | 1 | ✅ implemented |
 | `list` | 1 | ✅ implemented |
 | `inspect` | 1 | ✅ implemented |
+| `set_session_flag` | post-v0.1 | ✅ implemented |

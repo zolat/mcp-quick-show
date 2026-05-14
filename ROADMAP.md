@@ -1,10 +1,11 @@
 # Roadmap
 
-**Current:** v0.1 feature-complete; significant post-v0.1 work has
-shipped (markup feedback loop, in-DOM canvas, `show_html` renderer,
-`quickshow-design` skill, Arthur theming). No active phase. The
-project has not been publicly released yet — a v0.1.1 tag + signed
-DMG + refreshed README is the natural next milestone.
+**Current:** v0.1 shipped; significant post-v0.1 work has landed
+(markup feedback loop, in-DOM canvas, `show_html` renderer,
+`quickshow-design` skill, Arthur theming, interactive panels). No
+active phase. The project has not been publicly released yet — a
+v0.1.1 tag + signed DMG + refreshed README is the natural next
+milestone.
 
 ## v0.1 — Original scope (shipped)
 
@@ -50,6 +51,11 @@ DMG + refreshed README is the natural next milestone.
 - [x] Demo skill: chess — `plugin/skills/chess/` with `chess_helper.py`
   (uv inline-deps + python-chess), Unicode-glyph board renderer,
   minimax-2 opponent
+- [x] Interactive panels — `window.quickshow.emit(payload)` JS→Swift
+  bridge, third `panelEvent` script-message channel, new
+  `enable_panel_events` sidecar tool gated on `panel_events_armed`,
+  token-bucket throttle (20/s/panel) with 1Hz drop summaries, demo
+  skill `plugin/skills/click-demo/`
 
 ## Backlog
 
@@ -63,12 +69,6 @@ work as priorities firm up. Longer outlines live in `BACKLOG.md`.
   loop + design skill, rebuild the DMG against current `main`, sign
   + notarize, tag `v0.1.1`, publish to GitHub Releases. This is
   the highest-ROI move — work is done, story isn't told.
-- **Interactive panels — DOM events back to Claude.** Generic
-  `window.quickshow.emit(...)` JS → Swift bridge → new
-  `panel_event` line in `events.ndjson`. Turns `show_html` panels
-  into real two-way UIs (click-to-move chess, dropdowns, form
-  submissions) instead of static renderings with arrow-on-PNG
-  markup. Full outline in `BACKLOG.md`.
 - **Top-bar rework.** Current top bar got a quick Arthur tint pass
   but is otherwise unchanged from v0.1. Open question: what
   belongs there once the markup loop is the marquee feature

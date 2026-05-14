@@ -169,6 +169,7 @@ final class SessionManager: NSObject {
             let view = renderer.makeView()
             let newPanel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
             wireStrokePersistence(renderer: renderer, sessionId: sessionId, panelName: name)
+        wirePanelEvents(renderer: renderer, sessionId: sessionId, panelName: name)
             let idx = hud.panels.firstIndex(where: { $0.name == name })!
             hud.panels[idx] = newPanel
             hud.window.installPanel(name: name, view: view)
@@ -188,6 +189,7 @@ final class SessionManager: NSObject {
         let view = renderer.makeView()
         let panel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
         wireStrokePersistence(renderer: renderer, sessionId: sessionId, panelName: name)
+        wirePanelEvents(renderer: renderer, sessionId: sessionId, panelName: name)
         primary.panels.append(panel)
         primary.window.installPanel(name: name, view: view)
         return try await renderPanel(panel: panel, hud: primary,
@@ -224,6 +226,29 @@ final class SessionManager: NSObject {
             if hud.window.isInDrawMode {
                 hud.window.toggleDrawMode()
             }
+        }
+    }
+
+    /// Hook a renderer's `panelEvent` bridge so payloads emitted by
+    /// `window.quickshow.emit(...)` land in the session's events log
+    /// as `panel_event` NDJSON lines.
+    ///
+    /// Two filters before persistence:
+    /// 1. Arming flag — `session.flags["panel_events_armed"]?.asBool`
+    ///    must be true. Symmetric with how `markup_events_armed` gates
+    ///    the Send button; lets the sidecar opt in per-session.
+    /// 2. Token bucket — `PanelEventThrottle` caps emission at
+    ///    `~20/s/panel` and emits a 1Hz `panel_event_dropped` summary
+    ///    line when drops occur. Protects Monitor (which auto-stops on
+    ///    high event volume) from a misbehaving page.
+    private func wirePanelEvents(renderer: any PanelRenderer, sessionId: String, panelName: String) {
+        guard let web = renderer as? WebViewPanelRenderer else { return }
+        let throttle = PanelEventThrottle(panel: panelName)
+        web.onPanelEvent = { [weak self] payload in
+            guard let self = self,
+                  let session = self.sessions[sessionId] else { return }
+            guard session.flags["panel_events_armed"]?.asBool == true else { return }
+            throttle.admit(payload: payload, writer: session.eventWriter)
         }
     }
 

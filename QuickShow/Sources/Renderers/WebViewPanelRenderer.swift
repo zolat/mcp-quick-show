@@ -51,6 +51,7 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
     private(set) var webView: WKWebView!
     private let messageHandler = ScriptMessageRelay()
     private let strokeRelay = ScriptMessageRelay()
+    private let panelEventRelay = ScriptMessageRelay()
 
     /// Fired when the in-DOM `<canvas>` posts a stroke-changed event
     /// (pen up / Cmd+Z). The payload is the full strokes array as the
@@ -61,6 +62,13 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
     /// Fired when the JS canvas receives an Escape keypress in draw
     /// mode. Host (HUDWindow) toggles draw mode off.
     var onMarkupEscape: (() -> Void)?
+
+    /// Fired when agent-supplied HTML calls `window.quickshow.emit(...)`.
+    /// The payload is whatever the page passed through — typically a
+    /// `[String: Any]` but the contract is "any JSON-serializable value".
+    /// Bound by SessionManager at panel-creation time; the binding side
+    /// owns arming-flag gating + throttling before persisting events.
+    var onPanelEvent: ((Any) -> Void)?
 
     /// Host wrapper that bubbles wheel events past WKWebView to the
     /// parent scroll view (WKWebView would otherwise eat them). Public
@@ -107,6 +115,26 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
             self?.handleMarkupStrokeMessage(body)
         }
         controller.add(strokeRelay, name: "markupStroke")
+        panelEventRelay.onMessage = { [weak self] body in
+            self?.handlePanelEventMessage(body)
+        }
+        controller.add(panelEventRelay, name: "panelEvent")
+
+        // Inject the `window.quickshow.emit(payload)` shim at
+        // .atDocumentStart so it's defined before any agent inline
+        // scripts run. Re-runs on every full document load
+        // (HTMLRenderer's loadHTMLString) and persists across
+        // innerHTML swaps for template-based renderers.
+        if let bridgeJS = Self.quickshowBridgeScriptSource() {
+            let userScript = WKUserScript(
+                source: bridgeJS,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            )
+            controller.addUserScript(userScript)
+        } else {
+            NSLog("QuickShow: quickshow-bridge.js missing from bundle — window.quickshow.emit disabled for this WebView")
+        }
 
         // Inject the in-DOM markup canvas (`window.__qsMarkup`) into
         // every WebView. Runs at .atDocumentEnd so <body> exists, then
@@ -299,6 +327,23 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
             return []
         }
         return (try? JSONDecoder().decode([MarkupStroke].self, from: data)) ?? []
+    }
+
+    /// Forward the raw payload posted to `webkit.messageHandlers.panelEvent`
+    /// to the renderer's binding. We accept anything `WKScriptMessage.body`
+    /// can carry; SessionManager handles arming-flag gating, throttling,
+    /// and JSON conversion downstream.
+    private func handlePanelEventMessage(_ body: Any) {
+        onPanelEvent?(body)
+    }
+
+    private static func quickshowBridgeScriptSource() -> String? {
+        guard let url = Bundle.main.url(
+            forResource: "quickshow-bridge",
+            withExtension: "js",
+            subdirectory: "scripts"
+        ) else { return nil }
+        return try? String(contentsOf: url, encoding: .utf8)
     }
 
     private static func markupCanvasScriptSource() -> String? {
