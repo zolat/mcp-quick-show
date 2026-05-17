@@ -56,18 +56,14 @@ milestone.
   `enable_panel_events` sidecar tool gated on `panel_events_armed`,
   token-bucket throttle (20/s/panel) with 1Hz drop summaries, demo
   skill `plugin/skills/fun/click-demo.md`
-
-## Post-v0.1 (in progress)
-
-- [ ] **Top-bar revamp.** 28pt bar (was 22pt), 22×22 buttons (was
+- [x] Top-bar revamp — 28pt bar (was 22pt), 22×22 buttons (was
   18×18), SF Symbols replace Unicode glyphs, in-place mode swap
   for draw mode (title region yields to tool palette at the same
   height), single-button dropdown pickers for stroke color +
-  weight, Send becomes a labelled accent pill. Ships the picker
-  UI surfaces without behaviour wiring — color + weight still
-  hard-coded `#d8392c` / 3px on `markup-canvas.js`. Sets up the
-  surfaces the next four follow-ups need. Plan:
-  `~/.claude/plans/yeah-plan-and-road-abundant-gem.md`.
+  weight (`NSPopover`-backed), Send becomes a labelled accent
+  pill. Picker UI surfaces without behaviour wiring — color +
+  weight still hard-coded `#d8392c` / 3px on `markup-canvas.js`.
+  Surfaces the next four follow-ups (in Backlog below) need.
 
 ## Backlog
 
