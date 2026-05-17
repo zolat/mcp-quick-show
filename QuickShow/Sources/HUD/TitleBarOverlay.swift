@@ -187,14 +187,19 @@ final class TitleBarOverlay: NSView {
         markupButton.target = self
         markupButton.action = #selector(handleMarkup)
         markupButton.toolTip = "Toggle markup draw mode"
-        markupButton.isHidden = true   // only revealed when armed
+        // `isHidden = true` is set AFTER the parent stack is built — see
+        // the "hide-after-stack" block below. NSStackView reads
+        // `isHidden` on `init(views:)` with the default
+        // `detachesHiddenViews = true`, which permanently detaches the
+        // view from the arranged subviews even if you flip the flag
+        // back later. Setting `detachesHiddenViews = false` afterwards
+        // doesn't re-attach. So we hide AFTER the flag is in place.
 
         overflowButton.contentTintColor = Self.arthurTextMuted
         overflowButton.target = self
         overflowButton.action = #selector(handleOverflow)
         // Empty for now — once a third top-bar item earns its keep
         // (per-HUD opacity, pin-to-Space toggle), this hosts the menu.
-        overflowButton.isHidden = true
 
         closeButton.contentTintColor = Self.arthurTextMuted
         closeButton.target = self
@@ -226,7 +231,8 @@ final class TitleBarOverlay: NSView {
         clearMarkupButton.contentTintColor = Self.arthurTextMuted
         clearMarkupButton.target = self
         clearMarkupButton.action = #selector(handleClearMarkup)
-        clearMarkupButton.isHidden = true   // depends on hasStrokes
+        // `isHidden = true` deferred until after the stack is set up
+        // (see comment on markupButton above).
 
         // Send is the only labelled button in the bar — accent-filled pill
         // with a small `paperplane.fill` glyph + "Send" label. Highest
@@ -270,8 +276,19 @@ final class TitleBarOverlay: NSView {
         idleRightGroup.spacing = 2
         idleRightGroup.detachesHiddenViews = false
 
+        // Flex spacer between the markup toggle and the right cluster.
+        // NSStackView's default `.fill` distribution doesn't actually pin
+        // the rightmost child to the trailing edge — we need a view with
+        // the lowest hugging priority to soak up slack. Without this the
+        // close button drifts inward as soon as title + visible icons
+        // total less than the bar's width.
+        let idleSpacer = NSView()
+        idleSpacer.translatesAutoresizingMaskIntoConstraints = false
+        idleSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        idleSpacer.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+
         idleContents = NSStackView(views: [
-            titleLabel, badgeView, snapshotButton, markupButton, idleRightGroup,
+            titleLabel, badgeView, snapshotButton, markupButton, idleSpacer, idleRightGroup,
         ])
         idleContents.orientation = .horizontal
         idleContents.alignment = .centerY
@@ -280,6 +297,15 @@ final class TitleBarOverlay: NSView {
         idleContents.translatesAutoresizingMaskIntoConstraints = false
         idleContents.setCustomSpacing(6, after: titleLabel)
         idleContents.setCustomSpacing(8, after: badgeView)
+
+        // Hide-after-stack: now that the parent stacks have
+        // `detachesHiddenViews = false`, it's safe to mark these
+        // buttons hidden — they'll stay in the arranged-subviews list
+        // and reappear cleanly when `setArmed(true)` / `setHasStrokes`
+        // flip them back on.
+        markupButton.isHidden = true       // revealed by setArmed
+        overflowButton.isHidden = true     // empty until a third item exists
+        clearMarkupButton.isHidden = true  // revealed by setHasStrokes
 
         let drawToolsGroup = NSStackView(views: [
             colorPickerButton, weightPickerButton,
