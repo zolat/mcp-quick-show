@@ -228,7 +228,30 @@ final class TitleBarOverlay: NSView {
         clearMarkupButton.action = #selector(handleClearMarkup)
         clearMarkupButton.isHidden = true   // depends on hasStrokes
 
-        sendButton.contentTintColor = .controlAccentColor
+        // Send is the only labelled button in the bar — accent-filled pill
+        // with a small `paperplane.fill` glyph + "Send" label. Highest
+        // visual emphasis in the draw palette (it's the primary commit
+        // point of the markup loop).
+        sendButton.wantsLayer = true
+        sendButton.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        sendButton.layer?.cornerRadius = 11
+        sendButton.imagePosition = .imageLeading
+        sendButton.imageHugsTitle = true
+        // Use a smaller / less heavy glyph so it pairs visually with the
+        // label rather than dominating it.
+        let sendCfg = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+        sendButton.image = NSImage(
+            systemSymbolName: "paperplane.fill",
+            accessibilityDescription: "Send markup to agent"
+        )?.withSymbolConfiguration(sendCfg)
+        sendButton.contentTintColor = .white
+        sendButton.attributedTitle = NSAttributedString(
+            string: "Send",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: NSColor.white,
+            ]
+        )
         sendButton.target = self
         sendButton.action = #selector(handleSend)
 
@@ -322,7 +345,7 @@ final class TitleBarOverlay: NSView {
             undoButton.heightAnchor.constraint(equalToConstant: buttonSize),
             clearMarkupButton.widthAnchor.constraint(equalToConstant: buttonSize),
             clearMarkupButton.heightAnchor.constraint(equalToConstant: buttonSize),
-            sendButton.widthAnchor.constraint(equalToConstant: buttonSize),
+            sendButton.widthAnchor.constraint(equalToConstant: 58),
             sendButton.heightAnchor.constraint(equalToConstant: buttonSize),
         ])
 
