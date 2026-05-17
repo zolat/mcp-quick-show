@@ -723,6 +723,11 @@ fileprivate final class SwatchView: NSView {
         self.color = color
         super.init(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
         toolTip = color.label
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 22),
+            heightAnchor.constraint(equalToConstant: 22),
+        ])
     }
     required init?(coder: NSCoder) { fatalError("not used") }
 
@@ -757,6 +762,11 @@ fileprivate final class WeightOptionView: NSView {
         self.weight = weight
         super.init(frame: NSRect(x: 0, y: 0, width: 44, height: 22))
         toolTip = weight.label
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 44),
+            heightAnchor.constraint(equalToConstant: 22),
+        ])
     }
     required init?(coder: NSCoder) { fatalError("not used") }
 
@@ -818,6 +828,11 @@ fileprivate final class ColorPickerViewController: NSViewController {
             stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         view = container
+        // 4 swatches × 22 + 3 × 6 gap + 10+10 insets = 128 wide,
+        // 22 + 8+8 = 38 tall. NSPopover sizes itself to this hint —
+        // without it, the popover defaults to ~50pt and crushes
+        // the swatches into the left edge.
+        preferredContentSize = NSSize(width: 128, height: 38)
     }
 
     func setActive(_ color: StrokeColor) {
@@ -858,6 +873,8 @@ fileprivate final class WeightPickerViewController: NSViewController {
             stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
         view = container
+        // 44 wide + 8+8 insets = 60, 3 × 22 + 2 × 4 gap + 8+8 = 82.
+        preferredContentSize = NSSize(width: 60, height: 82)
     }
 
     func setActive(_ weight: StrokeWeight) {
