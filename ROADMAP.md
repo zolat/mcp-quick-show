@@ -1,11 +1,9 @@
 # Roadmap
 
-**Current:** v0.1 shipped; significant post-v0.1 work has landed
-(markup feedback loop, in-DOM canvas, `show_html` renderer,
-`quickshow-design` skill, Arthur theming, interactive panels). No
-active phase. The project has not been publicly released yet — a
-v0.1.1 tag + signed DMG + refreshed README is the natural next
-milestone.
+**Current:** v0.1.1 released — first public tag + binary. The
+backlog narrows to a `show_html` security pass (deferred from v0.1)
+and Developer-ID signing + notarization (v0.1.1 ships ad-hoc signed,
+Apple-Silicon only).
 
 ## v0.1 — Original scope (shipped)
 
@@ -78,19 +76,28 @@ milestone.
   and broadcast `strokesChanged`. New `eraser.line.dashed`
   button in the draw-tools group; picking a color implicitly
   returns to draw mode.
+- [x] **v0.1.1 release** — first public tag + DMG. README rewritten
+  to lead with what's shipped (markup loop, `show_html`, design
+  skill, interactive panels, Claude-Space placement, plugin
+  distribution). `MARKETING_VERSION` + `marketplace.json` +
+  `plugin.json` bumped to 0.1.1. Fresh `dist/QuickShow-0.1.1.dmg`
+  built against current `main` (Apple-Silicon, ad-hoc signed —
+  Developer-ID + notarization remain in backlog). Tag pushed +
+  GitHub release published with DMG attached.
 
 ## Backlog
 
 Loosely sorted, no commitment. Pulled into a phase or into ad-hoc
 work as priorities firm up. Longer outlines live in `BACKLOG.md`.
 
-- **Public release: v0.1.1.** README is stale (still pitches "v0.1
-  in development" and doesn't mention the markup loop, `show_html`,
-  or the design skill). The DMG in `dist/` is unsigned and predates
-  the markup work. To ship: refresh README to feature the markup
-  loop + design skill, rebuild the DMG against current `main`, sign
-  + notarize, tag `v0.1.1`, publish to GitHub Releases. This is
-  the highest-ROI move — work is done, story isn't told.
+- **Developer-ID signing + notarization.** v0.1.1 ships ad-hoc
+  signed; Gatekeeper blocks first-launch from the DMG without a
+  right-click → Open (or `xattr -d com.apple.quarantine`). To
+  remove that hurdle: enroll a Developer ID Application cert,
+  switch `tools/make-dmg.sh` to sign with it, submit the bundle
+  + DMG to `notarytool`, staple. Also a good moment to make the
+  sidecar universal (current `build-sidecar.sh` is
+  `--target=bun-darwin-arm64` only).
 - **Security pass on `show_html`.** v0.1 trades CSP rigor for
   ergonomics — agent HTML is accepted at face value. PRD § show_html
   deferred a strict-CSP / allowlisted-CDN posture to v0.2.

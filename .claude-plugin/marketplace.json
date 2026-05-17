@@ -10,7 +10,7 @@
       "name": "quickshow",
       "description": "Floating HUD panels for Claude. MCP tools (show_markdown / show_svg / show_mermaid / show_image / show_html / enable_markup_events / get_markup) plus foundational + demo skills. Pairs with QuickShow.app.",
       "source": "./plugin",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "category": "productivity",
       "tags": ["mcp", "rendering", "hud", "visual", "design", "feedback-loop"]
     }
