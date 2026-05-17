@@ -61,9 +61,14 @@ milestone.
   for draw mode (title region yields to tool palette at the same
   height), single-button dropdown pickers for stroke color +
   weight (`NSPopover`-backed), Send becomes a labelled accent
-  pill. Picker UI surfaces without behaviour wiring — color +
-  weight still hard-coded `#d8392c` / 3px on `markup-canvas.js`.
-  Surfaces the next four follow-ups (in Backlog below) need.
+  pill.
+- [x] Multi-color markup + stroke-weight wiring — `window.__qsMarkup`
+  exposes `setColor(hex)` and `setWidth(px)`; SessionManager
+  forwards `onPickMarkupColor` / `onPickMarkupWeight` from the
+  title-bar pickers through `WebViewPanelRenderer` to those
+  methods. New strokes use the picker's current selection;
+  committed strokes preserve their captured color/width across
+  re-renders.
 
 ## Backlog
 
@@ -77,14 +82,6 @@ work as priorities firm up. Longer outlines live in `BACKLOG.md`.
   loop + design skill, rebuild the DMG against current `main`, sign
   + notarize, tag `v0.1.1`, publish to GitHub Releases. This is
   the highest-ROI move — work is done, story isn't told.
-- **Multi-color markup wiring.** Top-bar revamp ships the picker
-  UI; this hooks `onPickMarkupColor` through
-  `WebViewPanelRenderer` to `window.__qsMarkup.setColor(hex)` so
-  the selection actually changes stroke color. Semantic colors —
-  red for "fix", green for "this is good", blue for "note",
-  yellow for "caution".
-- **Stroke-weight wiring.** Same shape as multi-color wiring;
-  `setWidth(px)` mutates `DEFAULT_WIDTH` in `markup-canvas.js`.
 - **Undo button wiring.** Top-bar button is in place; needs a
   `canUndo` JS→Swift channel so the button's enabled state tracks
   reality. `markup-canvas.js` already has `popLastStroke()`.

@@ -68,6 +68,14 @@ final class HUDWindow: NSWindow {
     /// Clear ⌫ click — wipes the active panel's strokes both Swift-
     /// side and in the WebView's in-DOM canvas.
     var onClearActivePanelMarkup: (() -> Void)?
+    /// Color picker selection in the title bar. Argument is the hex
+    /// string (`"#d8392c"` etc.). Forwarded to SessionManager →
+    /// `WebViewPanelRenderer.setMarkupColor(_:)` which seeds the
+    /// active panel's canvas with the new default stroke color.
+    var onPickMarkupColor: ((String) -> Void)?
+    /// Stroke-weight picker selection. Argument is the line width in
+    /// points; symmetric with `onPickMarkupColor`.
+    var onPickMarkupWeight: ((CGFloat) -> Void)?
     /// Fired by `toggleDrawMode()` with the new state. SessionManager
     /// translates this into `enterDrawMode()` / `exitDrawMode()`
     /// calls on the active panel's renderer.
@@ -227,6 +235,8 @@ final class HUDWindow: NSWindow {
         titleBar.onToggleDrawMode = { [weak self] in self?.toggleDrawMode() }
         titleBar.onSend = { [weak self] in self?.onSendActivePanelMarkup?() }
         titleBar.onClearMarkup = { [weak self] in self?.onClearActivePanelMarkup?() }
+        titleBar.onPickMarkupColor = { [weak self] hex in self?.onPickMarkupColor?(hex) }
+        titleBar.onPickMarkupWeight = { [weak self] pts in self?.onPickMarkupWeight?(pts) }
         root.addSubview(titleBar)
         NSLayoutConstraint.activate([
             titleBar.topAnchor.constraint(equalTo: root.topAnchor),

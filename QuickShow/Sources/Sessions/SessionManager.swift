@@ -687,6 +687,12 @@ final class SessionManager: NSObject {
         window.onDrawModeChanged = { [weak self] enter in
             self?.applyDrawMode(sessionId: sessionId, hudId: hudId, enter: enter)
         }
+        window.onPickMarkupColor = { [weak self] hex in
+            self?.applyMarkupColor(sessionId: sessionId, hudId: hudId, hex: hex)
+        }
+        window.onPickMarkupWeight = { [weak self] pts in
+            self?.applyMarkupWidth(sessionId: sessionId, hudId: hudId, pts: pts)
+        }
         window.onResolveActiveStrokesEmpty = { [weak self] in
             guard let self = self,
                   let session = self.sessions[sessionId],
@@ -723,6 +729,29 @@ final class SessionManager: NSObject {
         Task { @MainActor in
             if enter { await web.enterDrawMode() } else { await web.exitDrawMode() }
         }
+    }
+
+    /// Forward a color picker selection to the active panel's
+    /// renderer. Seeds the JS canvas's `DEFAULT_COLOR` — only new
+    /// strokes pick up the change; committed strokes preserve their
+    /// captured color.
+    private func applyMarkupColor(sessionId: String, hudId: UUID, hex: String) {
+        guard let session = sessions[sessionId],
+              let hud = session.huds.first(where: { $0.id == hudId }),
+              let activeName = hud.window.activePanelName,
+              let panel = hud.panels.first(where: { $0.name == activeName }),
+              let web = panel.renderer as? WebViewPanelRenderer else { return }
+        Task { @MainActor in await web.setMarkupColor(hex) }
+    }
+
+    /// Symmetric counterpart for stroke width.
+    private func applyMarkupWidth(sessionId: String, hudId: UUID, pts: CGFloat) {
+        guard let session = sessions[sessionId],
+              let hud = session.huds.first(where: { $0.id == hudId }),
+              let activeName = hud.window.activePanelName,
+              let panel = hud.panels.first(where: { $0.name == activeName }),
+              let web = panel.renderer as? WebViewPanelRenderer else { return }
+        Task { @MainActor in await web.setMarkupWidth(pts) }
     }
 
     /// Clear all strokes from the active panel — wipes both the

@@ -25,13 +25,13 @@ final class TitleBarOverlay: NSView {
     /// local UI escape hatch, not a feedback signal).
     var onClearMarkup: (() -> Void)?
     /// Fired when the user picks a stroke color from the popover.
-    /// Argument is the hex string (`"#d8392c"`). No-op for now — the
-    /// markup-canvas JS bridge wiring is a follow-up; this slot just
-    /// exists so SessionManager can bind ahead of time.
+    /// Argument is the hex string (`"#d8392c"`). SessionManager
+    /// forwards through `WebViewPanelRenderer.setMarkupColor(_:)` →
+    /// `window.__qsMarkup.setColor(hex)`, which seeds `DEFAULT_COLOR`
+    /// for subsequent strokes. Committed strokes keep their captured
+    /// color (per-stroke fields persist in the JS canvas).
     var onPickMarkupColor: ((String) -> Void)?
-    /// Fired when the user picks a stroke weight from the popover.
-    /// Argument is the line width in points. Same "no wiring yet"
-    /// caveat as `onPickMarkupColor`.
+    /// Symmetric counterpart for stroke weight in points.
     var onPickMarkupWeight: ((CGFloat) -> Void)?
     /// Fired when the user clicks the undo `↶` button. Wiring deferred
     /// — needs a `canUndo` JS→Swift channel before the button can

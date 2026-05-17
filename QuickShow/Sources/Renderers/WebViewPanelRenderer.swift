@@ -408,6 +408,24 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
         await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.popLastStroke();")
     }
 
+    /// Seed subsequent strokes' color. Driven by the title bar's color
+    /// picker — selection fires `onPickMarkupColor` → SessionManager →
+    /// here. Only affects strokes drawn AFTER the call; committed
+    /// strokes preserve their captured color.
+    func setMarkupColor(_ hex: String) async {
+        await evalIgnoringError(
+            "window.__qsMarkup && window.__qsMarkup.setColor(\"\(hex)\");"
+        )
+    }
+
+    /// Symmetric counterpart for stroke width. Fires from the title
+    /// bar's weight picker.
+    func setMarkupWidth(_ pts: CGFloat) async {
+        await evalIgnoringError(
+            "window.__qsMarkup && window.__qsMarkup.setWidth(\(pts));"
+        )
+    }
+
     /// Test-only: synthesize a stroke directly into the JS canvas as
     /// if the user had drawn it. Used by `QUICKSHOW_TEST_MARKUP_UI` to
     /// drive a deterministic stroke without dispatching pointer events.

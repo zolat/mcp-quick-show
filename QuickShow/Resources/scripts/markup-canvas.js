@@ -247,6 +247,23 @@
         hasStrokes: function () {
             return strokes.length > 0;
         },
+        // Stroke color/width pickers in the title bar call these.
+        // Only seeds NEW strokes — in-progress strokes keep their
+        // captured color/width, and committed strokes preserve theirs
+        // (per-stroke fields persist in `strokes[]`). So switching mid-
+        // session lets the user paint different annotations in different
+        // colors without disturbing earlier ones.
+        setColor: function (hex) {
+            if (typeof hex === "string" && hex.length > 0) {
+                DEFAULT_COLOR = hex;
+            }
+        },
+        setWidth: function (px) {
+            var n = Number(px);
+            if (isFinite(n) && n > 0) {
+                DEFAULT_WIDTH = n;
+            }
+        },
         // Diagnostic: pixel dimensions of the canvas right now.
         canvasInfo: function () {
             ensureCanvas();
