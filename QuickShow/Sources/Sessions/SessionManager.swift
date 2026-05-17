@@ -693,6 +693,12 @@ final class SessionManager: NSObject {
         window.onPickMarkupWeight = { [weak self] pts in
             self?.applyMarkupWidth(sessionId: sessionId, hudId: hudId, pts: pts)
         }
+        window.onUndoMarkup = { [weak self] in
+            self?.applyUndoMarkup(sessionId: sessionId, hudId: hudId)
+        }
+        window.onToggleEraser = { [weak self] erasing in
+            self?.applyEraserMode(sessionId: sessionId, hudId: hudId, erasing: erasing)
+        }
         window.onResolveActiveStrokesEmpty = { [weak self] in
             guard let self = self,
                   let session = self.sessions[sessionId],
@@ -752,6 +758,31 @@ final class SessionManager: NSObject {
               let panel = hud.panels.first(where: { $0.name == activeName }),
               let web = panel.renderer as? WebViewPanelRenderer else { return }
         Task { @MainActor in await web.setMarkupWidth(pts) }
+    }
+
+    /// Pop the last stroke off the active panel — the title bar's
+    /// undo button. Triggered strokes-changed broadcast updates
+    /// `Panel.strokes` mirror + the title bar's enabled-state gate
+    /// via the existing `onStrokesChanged` plumbing.
+    private func applyUndoMarkup(sessionId: String, hudId: UUID) {
+        guard let session = sessions[sessionId],
+              let hud = session.huds.first(where: { $0.id == hudId }),
+              let activeName = hud.window.activePanelName,
+              let panel = hud.panels.first(where: { $0.name == activeName }),
+              let web = panel.renderer as? WebViewPanelRenderer else { return }
+        Task { @MainActor in await web.popLastStroke() }
+    }
+
+    /// Toggle eraser tool on the active panel. `setMarkupTool` flips
+    /// `currentTool` in `markup-canvas.js` between "draw" and "erase";
+    /// the JS side branches pointer-handling accordingly.
+    private func applyEraserMode(sessionId: String, hudId: UUID, erasing: Bool) {
+        guard let session = sessions[sessionId],
+              let hud = session.huds.first(where: { $0.id == hudId }),
+              let activeName = hud.window.activePanelName,
+              let panel = hud.panels.first(where: { $0.name == activeName }),
+              let web = panel.renderer as? WebViewPanelRenderer else { return }
+        Task { @MainActor in await web.setMarkupTool(erasing ? "erase" : "draw") }
     }
 
     /// Clear all strokes from the active panel — wipes both the

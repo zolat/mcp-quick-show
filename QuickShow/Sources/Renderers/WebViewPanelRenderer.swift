@@ -426,6 +426,15 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
         )
     }
 
+    /// Switch the markup canvas tool. Accepts `"draw"` or `"erase"`.
+    /// Draw is the default — pointer events extend a new stroke.
+    /// Erase splices any stroke within ~12pt of the pointer.
+    func setMarkupTool(_ tool: String) async {
+        await evalIgnoringError(
+            "window.__qsMarkup && window.__qsMarkup.setTool(\"\(tool)\");"
+        )
+    }
+
     /// Test-only: synthesize a stroke directly into the JS canvas as
     /// if the user had drawn it. Used by `QUICKSHOW_TEST_MARKUP_UI` to
     /// drive a deterministic stroke without dispatching pointer events.

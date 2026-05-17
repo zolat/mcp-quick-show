@@ -69,6 +69,15 @@ milestone.
   methods. New strokes use the picker's current selection;
   committed strokes preserve their captured color/width across
   re-renders.
+- [x] Markup undo + eraser wiring — undo button calls
+  `popLastStroke` and gates its enabled state on `hasStrokes`
+  (reusing the existing strokes-changed channel — no new
+  JS↔Swift wire). Eraser is a new `setTool("erase")` mode on
+  `window.__qsMarkup`; pointer events in erase mode splice any
+  stroke whose closest point is within `ERASE_RADIUS` (12pt)
+  and broadcast `strokesChanged`. New `eraser.line.dashed`
+  button in the draw-tools group; picking a color implicitly
+  returns to draw mode.
 
 ## Backlog
 
@@ -82,11 +91,6 @@ work as priorities firm up. Longer outlines live in `BACKLOG.md`.
   loop + design skill, rebuild the DMG against current `main`, sign
   + notarize, tag `v0.1.1`, publish to GitHub Releases. This is
   the highest-ROI move — work is done, story isn't told.
-- **Undo button wiring.** Top-bar button is in place; needs a
-  `canUndo` JS→Swift channel so the button's enabled state tracks
-  reality. `markup-canvas.js` already has `popLastStroke()`.
-- **Eraser tool.** Tool-mode flag in `markup-canvas.js` + one more
-  top-bar button. The dropdown-picker pattern means we have room.
 - **Security pass on `show_html`.** v0.1 trades CSP rigor for
   ergonomics — agent HTML is accepted at face value. PRD § show_html
   deferred a strict-CSP / allowlisted-CDN posture to v0.2.

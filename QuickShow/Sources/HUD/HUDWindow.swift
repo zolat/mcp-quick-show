@@ -76,6 +76,15 @@ final class HUDWindow: NSWindow {
     /// Stroke-weight picker selection. Argument is the line width in
     /// points; symmetric with `onPickMarkupColor`.
     var onPickMarkupWeight: ((CGFloat) -> Void)?
+    /// Undo `↶` click — pops the last stroke from the active panel
+    /// via `WebViewPanelRenderer.popLastStroke()`. The button's
+    /// enabled state is gated on `hasStrokes` (re-used signal — no
+    /// dedicated canUndo channel since we don't have batched undo
+    /// history).
+    var onUndoMarkup: (() -> Void)?
+    /// Eraser button toggle. Argument is the new erasing state.
+    /// Forwarded to `WebViewPanelRenderer.setMarkupTool("erase" / "draw")`.
+    var onToggleEraser: ((Bool) -> Void)?
     /// Fired by `toggleDrawMode()` with the new state. SessionManager
     /// translates this into `enterDrawMode()` / `exitDrawMode()`
     /// calls on the active panel's renderer.
@@ -237,6 +246,8 @@ final class HUDWindow: NSWindow {
         titleBar.onClearMarkup = { [weak self] in self?.onClearActivePanelMarkup?() }
         titleBar.onPickMarkupColor = { [weak self] hex in self?.onPickMarkupColor?(hex) }
         titleBar.onPickMarkupWeight = { [weak self] pts in self?.onPickMarkupWeight?(pts) }
+        titleBar.onUndoMarkup = { [weak self] in self?.onUndoMarkup?() }
+        titleBar.onToggleEraser = { [weak self] erasing in self?.onToggleEraser?(erasing) }
         root.addSubview(titleBar)
         NSLayoutConstraint.activate([
             titleBar.topAnchor.constraint(equalTo: root.topAnchor),

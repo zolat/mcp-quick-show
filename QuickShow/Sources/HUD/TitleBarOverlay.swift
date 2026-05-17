@@ -33,10 +33,17 @@ final class TitleBarOverlay: NSView {
     var onPickMarkupColor: ((String) -> Void)?
     /// Symmetric counterpart for stroke weight in points.
     var onPickMarkupWeight: ((CGFloat) -> Void)?
-    /// Fired when the user clicks the undo `↶` button. Wiring deferred
-    /// — needs a `canUndo` JS→Swift channel before the button can
-    /// honestly gate its enabled state. Slot in place for symmetry.
+    /// Fired when the user clicks the undo `↶` button. SessionManager
+    /// forwards to `WebViewPanelRenderer.popLastStroke()`. The button's
+    /// enabled state is gated on `hasStrokes` (re-used signal — no
+    /// dedicated canUndo channel since we don't have batched undo).
     var onUndoMarkup: (() -> Void)?
+    /// Fired when the user clicks the eraser button. Argument is the
+    /// new erasing state (`true` = enter erase mode, `false` = back to
+    /// draw mode). SessionManager forwards to
+    /// `WebViewPanelRenderer.setMarkupTool("erase"/"draw")` which
+    /// flips `currentTool` in `markup-canvas.js`.
+    var onToggleEraser: ((Bool) -> Void)?
     /// Fired once when a drag gesture starts (after a 3-pt threshold,
     /// so a click on the title bar doesn't accidentally trigger a
     /// "drag" with zero movement).
@@ -70,6 +77,8 @@ final class TitleBarOverlay: NSView {
         "circle.fill", weight: .regular, ax: "Stroke color")
     private let weightPickerButton = TitleBarOverlay.symbolButton(
         "minus", weight: .bold, ax: "Stroke weight")
+    private let eraserButton = TitleBarOverlay.symbolButton(
+        "eraser.line.dashed", weight: .medium, ax: "Eraser")
     private let undoButton = TitleBarOverlay.symbolButton(
         "arrow.uturn.backward", weight: .medium, ax: "Undo last stroke")
     private let clearMarkupButton = TitleBarOverlay.symbolButton(
@@ -139,6 +148,12 @@ final class TitleBarOverlay: NSView {
     /// clear button's visibility so it only shows when there's
     /// something to clear.
     private var hasStrokes: Bool = false
+    /// Whether the eraser tool is currently active. Drives the
+    /// eraser button's "active" background tint. Flipped by
+    /// `handleEraser`; cleared automatically when the user picks a
+    /// color (color pick = "draw with this", which is incompatible
+    /// with erase mode).
+    private var erasing: Bool = false
 
     /// Arthur "elevated" surface — sits one step above the contentHost
     /// background (#1c1c1c). Hex matches the style guide's `elevated`
@@ -224,6 +239,15 @@ final class TitleBarOverlay: NSView {
         weightPickerButton.target = self
         weightPickerButton.action = #selector(handleWeightPicker)
 
+        // Eraser button: layer-backed so we can paint a faint background
+        // when active (the visual "you're in erase mode" hint). Toggles
+        // `erasing` state and fires `onToggleEraser`.
+        eraserButton.contentTintColor = Self.arthurTextMuted
+        eraserButton.target = self
+        eraserButton.action = #selector(handleEraser)
+        eraserButton.wantsLayer = true
+        eraserButton.layer?.cornerRadius = 5
+
         undoButton.contentTintColor = Self.arthurTextMuted
         undoButton.target = self
         undoButton.action = #selector(handleUndo)
@@ -308,7 +332,7 @@ final class TitleBarOverlay: NSView {
         clearMarkupButton.isHidden = true  // revealed by setHasStrokes
 
         let drawToolsGroup = NSStackView(views: [
-            colorPickerButton, weightPickerButton,
+            colorPickerButton, weightPickerButton, eraserButton,
         ])
         drawToolsGroup.orientation = .horizontal
         drawToolsGroup.alignment = .centerY
@@ -367,6 +391,8 @@ final class TitleBarOverlay: NSView {
             colorPickerButton.heightAnchor.constraint(equalToConstant: buttonSize),
             weightPickerButton.widthAnchor.constraint(equalToConstant: buttonSize),
             weightPickerButton.heightAnchor.constraint(equalToConstant: buttonSize),
+            eraserButton.widthAnchor.constraint(equalToConstant: buttonSize),
+            eraserButton.heightAnchor.constraint(equalToConstant: buttonSize),
             undoButton.widthAnchor.constraint(equalToConstant: buttonSize),
             undoButton.heightAnchor.constraint(equalToConstant: buttonSize),
             clearMarkupButton.widthAnchor.constraint(equalToConstant: buttonSize),
@@ -399,9 +425,12 @@ final class TitleBarOverlay: NSView {
         weightPopover.appearance = NSAppearance(named: .darkAqua)
 
         // Initial indicator state — drives the symbol weight + tint to
-        // match the (default) currentColor / currentWeight.
+        // match the (default) currentColor / currentWeight. Also seed
+        // the stroke-dependent buttons (undo dim, clear hidden) since
+        // hasStrokes starts false.
         applyColor(currentColor)
         applyWeight(currentWeight)
+        refreshStrokeDependentButtons()
 
         NotificationCenter.default.addObserver(
             self,
@@ -441,24 +470,30 @@ final class TitleBarOverlay: NSView {
     func setArmed(_ on: Bool) {
         armed = on
         markupButton.isHidden = !on
-        refreshClearButtonVisibility()
+        refreshStrokeDependentButtons()
     }
 
     /// Reflect whether the active panel has any strokes. Called by
-    /// the host HUD on every overlay change + tab switch so the clear
-    /// button can vanish when there's nothing to clear.
+    /// the host HUD on every overlay change + tab switch. Drives:
+    /// (a) the clear button's visibility — vanishes when nothing
+    /// to clear — and (b) the undo button's enabled state — stays
+    /// visible but dims when no strokes to undo.
     func setHasStrokes(_ has: Bool) {
         hasStrokes = has
-        refreshClearButtonVisibility()
+        refreshStrokeDependentButtons()
     }
 
-    /// Clear is meaningful only when the user has strokes to wipe.
-    /// The button lives on the draw bar; idle mode never sees it
-    /// regardless of `hasStrokes`, so we only need the strokes gate
-    /// here — `armed` is implicit (no armed ⇒ no draw mode ⇒ no
-    /// draw bar to show the button on).
-    private func refreshClearButtonVisibility() {
+    /// Centralized gate for buttons whose meaning depends on
+    /// `hasStrokes`. Clear is hidden entirely when no strokes;
+    /// undo stays visible but goes muted + disabled (a permanent
+    /// affordance with feedback rather than something that
+    /// teleports in and out of the bar).
+    private func refreshStrokeDependentButtons() {
         clearMarkupButton.isHidden = !hasStrokes
+        undoButton.isEnabled = hasStrokes
+        undoButton.contentTintColor = hasStrokes
+            ? Self.arthurTextMuted
+            : Self.arthurTextMuted.withAlphaComponent(0.35)
     }
 
     /// Reflect the host HUD's draw-mode state. The bar swaps its
@@ -576,6 +611,24 @@ final class TitleBarOverlay: NSView {
         onUndoMarkup?()
     }
 
+    @objc private func handleEraser() {
+        setErasing(!erasing)
+        onToggleEraser?(erasing)
+    }
+
+    /// Internal state-flip + visual refresh for the eraser button.
+    /// Also called from `applyColor` to auto-deactivate when the user
+    /// picks a swatch.
+    private func setErasing(_ on: Bool) {
+        erasing = on
+        eraserButton.layer?.backgroundColor = on
+            ? NSColor.white.withAlphaComponent(0.08).cgColor
+            : NSColor.clear.cgColor
+        eraserButton.contentTintColor = on
+            ? .controlAccentColor
+            : Self.arthurTextMuted
+    }
+
     /// Toggle a popover anchored below its trigger button. Closing on
     /// re-click keeps the picker buttons behaving as toggles rather
     /// than re-presenting a fresh popover each click.
@@ -588,14 +641,19 @@ final class TitleBarOverlay: NSView {
     }
 
     /// Persist the chosen color, refresh the trigger indicator, and
-    /// notify SessionManager. The actual canvas-draw color update is
-    /// a separate post-merge follow-up (JS-bridge wiring) — for now
-    /// only the indicator changes.
+    /// notify SessionManager (→ JS bridge → `setColor`). If the
+    /// eraser was active, picking a color implicitly returns to draw
+    /// mode — selecting a color reads as "I want to draw with this",
+    /// which is incompatible with erasing.
     private func applyColor(_ color: StrokeColor) {
         currentColor = color
         colorPickerButton.contentTintColor = color.nsColor
         if let vc = colorPopover.contentViewController as? ColorPickerViewController {
             vc.setActive(color)
+        }
+        if erasing {
+            setErasing(false)
+            onToggleEraser?(false)
         }
         onPickMarkupColor?(color.rawValue)
     }

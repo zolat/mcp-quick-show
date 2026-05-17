@@ -12,6 +12,10 @@
 //                               Swift called us, Swift already knows)
 //   getStrokes()              — read current array
 //   popLastStroke()           — undo (Cmd+Z), send strokesChanged
+//   setColor(hex)             — seed DEFAULT_COLOR for new strokes
+//   setWidth(px)              — seed DEFAULT_WIDTH for new strokes
+//   setTool("draw"/"erase")   — switch pointer behaviour; erase splices
+//                               strokes within ~12pt of the pointer
 //   appendStrokeForTest(s)    — test hook; no message back
 //
 // Messages posted to webkit.messageHandlers.markupStroke:
@@ -26,6 +30,14 @@
 
     var DEFAULT_COLOR = "#d8392c";
     var DEFAULT_WIDTH = 3;
+
+    // Tool modes. `currentTool` flips between "draw" (new strokes via
+    // pointer events) and "erase" (pointer events splice intersecting
+    // strokes within `ERASE_RADIUS`). Set via `window.__qsMarkup.setTool`.
+    var TOOL_DRAW = "draw";
+    var TOOL_ERASE = "erase";
+    var currentTool = TOOL_DRAW;
+    var ERASE_RADIUS = 12;  // CSS pt; tolerant enough for a casual flick
 
     var canvas = null;
     var ctx = null;
@@ -126,6 +138,10 @@
         canvas.setPointerCapture(e.pointerId);
         drawing = true;
         var p = pointFromEvent(e);
+        if (currentTool === TOOL_ERASE) {
+            eraseAt(p);
+            return;
+        }
         currentStroke = {
             points: [p],
             color: DEFAULT_COLOR,
@@ -135,9 +151,14 @@
     }
 
     function onPointerMove(e) {
-        if (!drawing || !currentStroke) { return; }
+        if (!drawing) { return; }
         e.preventDefault();
         var p = pointFromEvent(e);
+        if (currentTool === TOOL_ERASE) {
+            eraseAt(p);
+            return;
+        }
+        if (!currentStroke) { return; }
         currentStroke.points.push(p);
         redraw();
     }
@@ -147,6 +168,11 @@
         e.preventDefault();
         drawing = false;
         try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+        if (currentTool === TOOL_ERASE) {
+            // Erase has no in-progress state — each pointerdown / move
+            // already spliced strokes inline. Nothing to commit here.
+            return;
+        }
         if (currentStroke && currentStroke.points.length > 1) {
             strokes.push(currentStroke);
             currentStroke = null;
@@ -155,6 +181,34 @@
         } else {
             currentStroke = null;
             redraw();
+        }
+    }
+
+    // Walk strokes; splice any whose closest point lies within
+    // `ERASE_RADIUS` of `p`. Coarse O(n*m) hit test — fine for the
+    // small stroke counts the markup loop deals with.
+    function eraseAt(p) {
+        var removed = false;
+        for (var i = strokes.length - 1; i >= 0; i--) {
+            var s = strokes[i];
+            var pts = s.points;
+            var hit = false;
+            for (var j = 0; j < pts.length; j++) {
+                var dx = pts[j].x - p.x;
+                var dy = pts[j].y - p.y;
+                if (dx * dx + dy * dy <= ERASE_RADIUS * ERASE_RADIUS) {
+                    hit = true;
+                    break;
+                }
+            }
+            if (hit) {
+                strokes.splice(i, 1);
+                removed = true;
+            }
+        }
+        if (removed) {
+            redraw();
+            postStrokesChanged();
         }
     }
 
@@ -262,6 +316,22 @@
             var n = Number(px);
             if (isFinite(n) && n > 0) {
                 DEFAULT_WIDTH = n;
+            }
+        },
+        // Tool switch driven by the title-bar eraser button.
+        // Resets any in-progress stroke; updates the cursor hint
+        // so the user sees the mode change immediately. Unknown
+        // tool names are a no-op (defensive against future
+        // additions on the Swift side).
+        setTool: function (name) {
+            if (name !== TOOL_DRAW && name !== TOOL_ERASE) { return; }
+            currentTool = name;
+            currentStroke = null;
+            drawing = false;
+            if (canvas) {
+                canvas.style.cursor = (name === TOOL_ERASE)
+                    ? "not-allowed"
+                    : "crosshair";
             }
         },
         // Diagnostic: pixel dimensions of the canvas right now.
