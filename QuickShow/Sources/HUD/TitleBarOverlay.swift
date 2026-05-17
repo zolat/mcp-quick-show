@@ -113,84 +113,88 @@ final class TitleBarOverlay: NSView {
         titleLabel.textColor = Self.arthurTextMuted
         titleLabel.alignment = .left
         titleLabel.lineBreakMode = .byTruncatingTail
-        addSubview(titleLabel)
+        titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         badgeView.translatesAutoresizingMaskIntoConstraints = false
         badgeView.font = .systemFont(ofSize: 10, weight: .medium)
         badgeView.textColor = .systemRed
         badgeView.isHidden = true
-        addSubview(badgeView)
 
-        snapshotButton.translatesAutoresizingMaskIntoConstraints = false
         snapshotButton.contentTintColor = Self.arthurTextMuted
         snapshotButton.target = self
         snapshotButton.action = #selector(handleSnapshot)
         snapshotButton.toolTip = "Save snapshot to ~/Downloads"
-        addSubview(snapshotButton)
 
         // Markup, Clear, and Send live between snapshot and close.
         // Markup + Send appear when `setArmed(true)` reveals them; the
         // Clear button additionally requires strokes to exist — it'd
         // be visual noise as a perpetual no-op.
-        markupButton.translatesAutoresizingMaskIntoConstraints = false
         markupButton.contentTintColor = Self.arthurTextMuted
         markupButton.target = self
         markupButton.action = #selector(handleMarkup)
         markupButton.toolTip = "Toggle markup draw mode"
         markupButton.isHidden = true
-        addSubview(markupButton)
 
-        clearMarkupButton.translatesAutoresizingMaskIntoConstraints = false
         clearMarkupButton.contentTintColor = Self.arthurTextMuted
         clearMarkupButton.target = self
         clearMarkupButton.action = #selector(handleClearMarkup)
         clearMarkupButton.isHidden = true
-        addSubview(clearMarkupButton)
 
-        sendButton.translatesAutoresizingMaskIntoConstraints = false
         sendButton.contentTintColor = .controlAccentColor
         sendButton.target = self
         sendButton.action = #selector(handleSend)
         sendButton.isHidden = true
-        addSubview(sendButton)
 
-        closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.contentTintColor = Self.arthurTextMuted
         closeButton.target = self
         closeButton.action = #selector(handleClose)
-        addSubview(closeButton)
 
-        // Layout chain right-to-left from the closeButton anchor. The
-        // markup + send buttons are part of the chain even when hidden
-        // (their width constraints keep the spacing consistent if/when
-        // they become visible) — visibility is toggled via `isHidden`,
-        // not by removing them from the constraint graph.
+        // Markup cluster: 2pt internal spacing so the three buttons read
+        // as one unit. `detachesHiddenViews = false` keeps hidden buttons
+        // occupying their slot so the bar doesn't reflow when the armed
+        // flag flips — same behaviour the old explicit-constraint chain
+        // gave us.
+        let markupGroup = NSStackView(views: [
+            markupButton, clearMarkupButton, sendButton,
+        ])
+        markupGroup.orientation = .horizontal
+        markupGroup.alignment = .centerY
+        markupGroup.spacing = 2
+        markupGroup.detachesHiddenViews = false
+        markupGroup.translatesAutoresizingMaskIntoConstraints = false
+
+        // Outer chain: title (greedy) → badge → snapshot → markup group →
+        // close. 10pt group gutter; tighter custom spacing inside the
+        // title+badge pair to keep the orphaned-session indicator close
+        // to the panel name.
+        let outerStack = NSStackView(views: [
+            titleLabel, badgeView, snapshotButton, markupGroup, closeButton,
+        ])
+        outerStack.orientation = .horizontal
+        outerStack.alignment = .centerY
+        outerStack.spacing = 10
+        outerStack.detachesHiddenViews = false
+        outerStack.translatesAutoresizingMaskIntoConstraints = false
+        outerStack.setCustomSpacing(6, after: titleLabel)
+        outerStack.setCustomSpacing(8, after: badgeView)
+        addSubview(outerStack)
+
+        let buttonSize: CGFloat = 22
         NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: badgeView.leadingAnchor, constant: -6),
-            badgeView.trailingAnchor.constraint(equalTo: snapshotButton.leadingAnchor, constant: -8),
-            badgeView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            snapshotButton.trailingAnchor.constraint(equalTo: markupButton.leadingAnchor, constant: -4),
-            snapshotButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            snapshotButton.widthAnchor.constraint(equalToConstant: 18),
-            snapshotButton.heightAnchor.constraint(equalToConstant: 18),
-            markupButton.trailingAnchor.constraint(equalTo: clearMarkupButton.leadingAnchor, constant: -4),
-            markupButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            markupButton.widthAnchor.constraint(equalToConstant: 18),
-            markupButton.heightAnchor.constraint(equalToConstant: 18),
-            clearMarkupButton.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor, constant: -4),
-            clearMarkupButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            clearMarkupButton.widthAnchor.constraint(equalToConstant: 18),
-            clearMarkupButton.heightAnchor.constraint(equalToConstant: 18),
-            sendButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -4),
-            sendButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            sendButton.widthAnchor.constraint(equalToConstant: 18),
-            sendButton.heightAnchor.constraint(equalToConstant: 18),
-            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            closeButton.widthAnchor.constraint(equalToConstant: 18),
-            closeButton.heightAnchor.constraint(equalToConstant: 18),
+            outerStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            outerStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            outerStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            snapshotButton.widthAnchor.constraint(equalToConstant: buttonSize),
+            snapshotButton.heightAnchor.constraint(equalToConstant: buttonSize),
+            markupButton.widthAnchor.constraint(equalToConstant: buttonSize),
+            markupButton.heightAnchor.constraint(equalToConstant: buttonSize),
+            clearMarkupButton.widthAnchor.constraint(equalToConstant: buttonSize),
+            clearMarkupButton.heightAnchor.constraint(equalToConstant: buttonSize),
+            sendButton.widthAnchor.constraint(equalToConstant: buttonSize),
+            sendButton.heightAnchor.constraint(equalToConstant: buttonSize),
+            closeButton.widthAnchor.constraint(equalToConstant: buttonSize),
+            closeButton.heightAnchor.constraint(equalToConstant: buttonSize),
         ])
 
         NotificationCenter.default.addObserver(
