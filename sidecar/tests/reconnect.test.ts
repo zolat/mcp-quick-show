@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { SocketClient } from "../src/socket.ts";
-import { withReconnect, isSocketDeadError } from "../src/reconnect.ts";
+import { withReconnect, isSocketDeadError, APP_UNREACHABLE_MESSAGE } from "../src/reconnect.ts";
 
 let server: net.Server | null = null;
 let socketPath: string;
@@ -131,7 +131,12 @@ test("withReconnect calls onReconnect and retries fn exactly once on socket-dead
   expect(reconnectCalls).toBe(1);
 });
 
-test("withReconnect does not loop — second failure propagates as-is", async () => {
+test("withReconnect does not loop — second socket-dead failure surfaces APP_UNREACHABLE_MESSAGE", async () => {
+  // Reconnect claims success but the very next request still finds no
+  // live FD. That's not a transient — the app is gone or crashing on
+  // launch. The wrapper replaces the SocketClient's plumbing-level
+  // "socket not connected" string with a single actionable line so
+  // the agent (and the user reading the MCP error) knows what to do.
   let reconnectCalls = 0;
   let fnCalls = 0;
   let caught = "";
@@ -148,8 +153,35 @@ test("withReconnect does not loop — second failure propagates as-is", async ()
   } catch (err) {
     caught = err instanceof Error ? err.message : "";
   }
-  expect(caught).toBe("socket not connected");
+  expect(caught).toBe(APP_UNREACHABLE_MESSAGE);
   // fn called once, retried once → 2 total. No third attempt.
+  expect(fnCalls).toBe(2);
+  expect(reconnectCalls).toBe(1);
+});
+
+test("withReconnect propagates non-socket errors raised on the retry verbatim", async () => {
+  // After reconnect, if the retry throws something OTHER than a
+  // socket-dead error (e.g., a render_error from the app, or a
+  // validation failure), we surface it unchanged — the
+  // APP_UNREACHABLE replacement only fires for socket-dead retries.
+  let reconnectCalls = 0;
+  let fnCalls = 0;
+  let caught = "";
+  try {
+    await withReconnect(
+      async () => {
+        fnCalls += 1;
+        if (fnCalls === 1) throw new Error("socket closed");
+        throw new Error("render error: template missing placeholder");
+      },
+      async () => {
+        reconnectCalls += 1;
+      },
+    );
+  } catch (err) {
+    caught = err instanceof Error ? err.message : "";
+  }
+  expect(caught).toBe("render error: template missing placeholder");
   expect(fnCalls).toBe(2);
   expect(reconnectCalls).toBe(1);
 });
