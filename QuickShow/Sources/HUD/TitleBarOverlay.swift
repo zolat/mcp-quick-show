@@ -85,6 +85,18 @@ final class TitleBarOverlay: NSView {
     private var idleContents: NSStackView!
     private var drawContents: NSStackView!
 
+    /// Current stroke color (drives the color picker indicator). The
+    /// picker's selection writes here and fires `onPickMarkupColor`;
+    /// the JS-bridge wiring that makes the canvas actually draw in
+    /// this color is a separate post-merge follow-up.
+    private var currentColor: StrokeColor = .red
+    private var currentWeight: StrokeWeight = .medium
+
+    /// Popovers presenting the swatch / weight option grids. Created
+    /// eagerly so they can be re-shown without rebuilding the VC.
+    private let colorPopover = NSPopover()
+    private let weightPopover = NSPopover()
+
     /// SF-Symbol-backed icon button — used for every action button in the
     /// bar. Borderless, image-only, tintable via `contentTintColor`. Symbol
     /// rendered at 13pt so it fits comfortably in the current 18pt button
@@ -314,6 +326,34 @@ final class TitleBarOverlay: NSView {
             sendButton.heightAnchor.constraint(equalToConstant: buttonSize),
         ])
 
+        // Pickers — content view controllers are reused across opens.
+        let colorVC = ColorPickerViewController(
+            initial: currentColor,
+            onSelect: { [weak self] color in
+                self?.applyColor(color)
+                self?.colorPopover.performClose(nil)
+            }
+        )
+        colorPopover.contentViewController = colorVC
+        colorPopover.behavior = .transient
+        colorPopover.appearance = NSAppearance(named: .darkAqua)
+
+        let weightVC = WeightPickerViewController(
+            initial: currentWeight,
+            onSelect: { [weak self] weight in
+                self?.applyWeight(weight)
+                self?.weightPopover.performClose(nil)
+            }
+        )
+        weightPopover.contentViewController = weightVC
+        weightPopover.behavior = .transient
+        weightPopover.appearance = NSAppearance(named: .darkAqua)
+
+        // Initial indicator state — drives the symbol weight + tint to
+        // match the (default) currentColor / currentWeight.
+        applyColor(currentColor)
+        applyWeight(currentWeight)
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleSessionFlagChanged(_:)),
@@ -382,10 +422,16 @@ final class TitleBarOverlay: NSView {
     /// Single chokepoint for the layout swap — flips `isHidden` on
     /// each container stack. Kept private; outside callers go through
     /// `setDrawModeActive(_:)` so the public surface stays small.
+    /// Dismisses any open picker popover on transition so it doesn't
+    /// linger pointing at a now-hidden trigger button.
     private func setMode(_ newMode: Mode) {
         mode = newMode
         idleContents.isHidden = (newMode != .idle)
         drawContents.isHidden = (newMode != .draw)
+        if newMode == .idle {
+            if colorPopover.isShown { colorPopover.performClose(nil) }
+            if weightPopover.isShown { weightPopover.performClose(nil) }
+        }
     }
 
     @objc private func handleSessionFlagChanged(_ note: Notification) {
@@ -470,17 +516,57 @@ final class TitleBarOverlay: NSView {
     }
 
     @objc private func handleColorPicker() {
-        // Placeholder. Step 4 swaps this for an `NSPopover` presenting
-        // the swatch grid. Selection then fires `onPickMarkupColor`.
+        toggle(popover: colorPopover, anchor: colorPickerButton)
     }
 
     @objc private func handleWeightPicker() {
-        // Placeholder. Step 4 swaps this for an `NSPopover` presenting
-        // the three stroke samples. Selection fires `onPickMarkupWeight`.
+        toggle(popover: weightPopover, anchor: weightPickerButton)
     }
 
     @objc private func handleUndo() {
         onUndoMarkup?()
+    }
+
+    /// Toggle a popover anchored below its trigger button. Closing on
+    /// re-click keeps the picker buttons behaving as toggles rather
+    /// than re-presenting a fresh popover each click.
+    private func toggle(popover: NSPopover, anchor: NSView) {
+        if popover.isShown {
+            popover.performClose(nil)
+        } else {
+            popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+        }
+    }
+
+    /// Persist the chosen color, refresh the trigger indicator, and
+    /// notify SessionManager. The actual canvas-draw color update is
+    /// a separate post-merge follow-up (JS-bridge wiring) — for now
+    /// only the indicator changes.
+    private func applyColor(_ color: StrokeColor) {
+        currentColor = color
+        colorPickerButton.contentTintColor = color.nsColor
+        if let vc = colorPopover.contentViewController as? ColorPickerViewController {
+            vc.setActive(color)
+        }
+        onPickMarkupColor?(color.rawValue)
+    }
+
+    /// Persist the chosen weight + refresh the trigger indicator. The
+    /// `minus` SF Symbol's weight tracks the choice (`.regular` →
+    /// `.bold` → `.heavy`) so the button silhouette grows/shrinks
+    /// with the user's selection. Wiring through to the actual
+    /// stroke width on the canvas is the follow-up.
+    private func applyWeight(_ weight: StrokeWeight) {
+        currentWeight = weight
+        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: weight.symbolWeight)
+        weightPickerButton.image = NSImage(
+            systemSymbolName: "minus",
+            accessibilityDescription: "Stroke weight"
+        )?.withSymbolConfiguration(cfg)
+        if let vc = weightPopover.contentViewController as? WeightPickerViewController {
+            vc.setActive(weight)
+        }
+        onPickMarkupWeight?(weight.points)
     }
 
     // MARK: - Test affordances
@@ -498,5 +584,234 @@ final class TitleBarOverlay: NSView {
     /// the user's click would fire.
     func performSendForTest() {
         sendButton.performClick(nil)
+    }
+
+    /// Programmatic open of the color picker popover — lets tests
+    /// assert on the popover's content + presentation without
+    /// synthesizing an NSEvent.
+    func openColorPickerForTest() {
+        handleColorPicker()
+    }
+
+    /// Programmatic open of the weight picker popover.
+    func openWeightPickerForTest() {
+        handleWeightPicker()
+    }
+}
+
+// MARK: - Picker types
+
+/// Four semantic stroke colors. Hex strings match the swatches in the
+/// approved mockup and the eventual `markup-canvas.js` palette.
+fileprivate enum StrokeColor: String, CaseIterable {
+    case red    = "#d8392c"
+    case green  = "#4ade80"
+    case blue   = "#60a5fa"
+    case yellow = "#fbbf24"
+
+    /// Display label — used for the popover swatch tooltips.
+    var label: String {
+        switch self {
+        case .red:    return "Red — fix"
+        case .green:  return "Green — good"
+        case .blue:   return "Blue — note"
+        case .yellow: return "Yellow — caution"
+        }
+    }
+
+    var nsColor: NSColor {
+        let hex = rawValue.dropFirst()  // strip leading "#"
+        var v: UInt64 = 0
+        Scanner(string: String(hex)).scanHexInt64(&v)
+        let r = CGFloat((v >> 16) & 0xFF) / 255.0
+        let g = CGFloat((v >>  8) & 0xFF) / 255.0
+        let b = CGFloat( v        & 0xFF) / 255.0
+        return NSColor(red: r, green: g, blue: b, alpha: 1.0)
+    }
+}
+
+/// Three stroke widths, in points. Matches the mockup's thin / medium
+/// / thick triplet. The medium 3pt value mirrors
+/// `markup-canvas.js`'s current `DEFAULT_WIDTH`.
+fileprivate enum StrokeWeight: CGFloat, CaseIterable {
+    case thin   = 1.5
+    case medium = 3.0
+    case thick  = 5.0
+
+    var points: CGFloat { rawValue }
+
+    /// SF Symbol weight that produces a `minus` glyph at roughly the
+    /// matching visual thickness. Approximate — SF Symbol weights
+    /// don't map exactly to stroke widths, but the trio reads as
+    /// three distinct line thicknesses.
+    var symbolWeight: NSFont.Weight {
+        switch self {
+        case .thin:   return .regular
+        case .medium: return .bold
+        case .thick:  return .black
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .thin:   return "Thin (1.5pt)"
+        case .medium: return "Medium (3pt)"
+        case .thick:  return "Thick (5pt)"
+        }
+    }
+}
+
+// MARK: - Swatch + weight option views (popover content)
+
+/// Single swatch in the color popover. Draws a filled 14pt circle
+/// with an optional white ring when active.
+fileprivate final class SwatchView: NSView {
+    let color: StrokeColor
+    var isActive: Bool = false { didSet { needsDisplay = true } }
+    var onClick: (() -> Void)?
+
+    init(color: StrokeColor) {
+        self.color = color
+        super.init(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
+        toolTip = color.label
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let circle = NSRect(x: 4, y: 4, width: 14, height: 14)
+        color.nsColor.setFill()
+        NSBezierPath(ovalIn: circle).fill()
+        if isActive {
+            let ring = NSRect(x: 1, y: 1, width: 20, height: 20)
+            NSColor.white.withAlphaComponent(0.9).setStroke()
+            let path = NSBezierPath(ovalIn: ring)
+            path.lineWidth = 1.5
+            path.stroke()
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+    }
+}
+
+/// Single stroke-weight option in the weight popover. Draws a
+/// horizontal sample at the given weight. Faint background when
+/// active.
+fileprivate final class WeightOptionView: NSView {
+    let weight: StrokeWeight
+    var isActive: Bool = false { didSet { needsDisplay = true } }
+    var onClick: (() -> Void)?
+
+    init(weight: StrokeWeight) {
+        self.weight = weight
+        super.init(frame: NSRect(x: 0, y: 0, width: 44, height: 22))
+        toolTip = weight.label
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        if isActive {
+            NSColor.white.withAlphaComponent(0.08).setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 4, yRadius: 4).fill()
+        }
+        let path = NSBezierPath()
+        let y = bounds.midY
+        path.move(to: NSPoint(x: 10, y: y))
+        path.line(to: NSPoint(x: bounds.width - 10, y: y))
+        path.lineWidth = weight.points
+        path.lineCapStyle = .round
+        // Match the bar's muted icon tint so the sample reads as a
+        // neutral preview rather than as the active stroke color.
+        NSColor(red: 168/255.0, green: 169/255.0, blue: 158/255.0, alpha: 1.0).setStroke()
+        path.stroke()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+    }
+}
+
+// MARK: - Picker view controllers
+
+fileprivate final class ColorPickerViewController: NSViewController {
+    private let onSelect: (StrokeColor) -> Void
+    private var swatchViews: [SwatchView] = []
+
+    init(initial: StrokeColor, onSelect: @escaping (StrokeColor) -> Void) {
+        self.onSelect = onSelect
+        super.init(nibName: nil, bundle: nil)
+        loadSwatches(active: initial)
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    private func loadSwatches(active: StrokeColor) {
+        let container = NSView()
+        let stack = NSStackView(views: StrokeColor.allCases.map { color in
+            let v = SwatchView(color: color)
+            v.isActive = (color == active)
+            v.onClick = { [weak self] in self?.onSelect(color) }
+            swatchViews.append(v)
+            return v
+        })
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: container.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        view = container
+    }
+
+    func setActive(_ color: StrokeColor) {
+        for v in swatchViews { v.isActive = (v.color == color) }
+    }
+}
+
+fileprivate final class WeightPickerViewController: NSViewController {
+    private let onSelect: (StrokeWeight) -> Void
+    private var optionViews: [WeightOptionView] = []
+
+    init(initial: StrokeWeight, onSelect: @escaping (StrokeWeight) -> Void) {
+        self.onSelect = onSelect
+        super.init(nibName: nil, bundle: nil)
+        loadOptions(active: initial)
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    private func loadOptions(active: StrokeWeight) {
+        let container = NSView()
+        let stack = NSStackView(views: StrokeWeight.allCases.map { weight in
+            let v = WeightOptionView(weight: weight)
+            v.isActive = (weight == active)
+            v.onClick = { [weak self] in self?.onSelect(weight) }
+            optionViews.append(v)
+            return v
+        })
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 4
+        stack.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: container.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        view = container
+    }
+
+    func setActive(_ weight: StrokeWeight) {
+        for v in optionViews { v.isActive = (v.weight == weight) }
     }
 }
