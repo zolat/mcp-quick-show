@@ -13,6 +13,7 @@ import {
 import { SocketClient, DEFAULT_SOCKET_PATH } from "./socket.ts";
 import { resolveSessionId } from "./session.ts";
 import { helloHandshake } from "./handshake.ts";
+import { withReconnect } from "./reconnect.ts";
 import { locateAppBundle, launchAndWaitFor } from "./autolaunch.ts";
 import {
   allHandlers,
@@ -81,24 +82,39 @@ async function main() {
   const { id: candidateId, source } = await resolveSessionId();
   console.error(`[mcp-quick-show] session id source: ${source} (claim=${candidateId})`);
 
+  const clientName = process.env.MCP_CLIENT_ID ?? "claude-code";
+
   await ensureConnected(client);
 
   // Handshake — send the resolved id as the CLAIM. The app's
   // allocator still does a live-FD contest check as belt-and-braces
   // (with conversation-UUID claims this should never fire) and
   // returns the granted id we adopt for everything downstream.
-  const sessionId = await helloHandshake(
-    client,
-    candidateId,
-    process.env.MCP_CLIENT_ID ?? "claude-code",
-  );
-  if (sessionId === candidateId) {
-    console.error(`[mcp-quick-show] connected (session=${sessionId})`);
+  //
+  // `sessionRef` keeps the granted id mutable so `withReconnect()` can
+  // refresh it after an app-restart-driven re-handshake. Handlers read
+  // `sessionRef.id` at call time via the per-request ctx.
+  const sessionRef: { id: string } = { id: "" };
+  sessionRef.id = await helloHandshake(client, candidateId, clientName);
+  if (sessionRef.id === candidateId) {
+    console.error(`[mcp-quick-show] connected (session=${sessionRef.id})`);
   } else {
     console.error(
-      `[mcp-quick-show] connected (session=${sessionId}, claim=${candidateId} contested)`,
+      `[mcp-quick-show] connected (session=${sessionRef.id}, claim=${candidateId} contested)`,
     );
   }
+
+  /// Reconnect + re-handshake closure passed into `withReconnect()`.
+  /// Pulled out so the message logging stays here rather than inside
+  /// the (otherwise pure) helper.
+  const reconnect = async (): Promise<void> => {
+    console.error(
+      "[mcp-quick-show] socket disconnected — reconnecting + re-handshaking",
+    );
+    await ensureConnected(client);
+    sessionRef.id = await helloHandshake(client, candidateId, clientName);
+    console.error(`[mcp-quick-show] reconnected (session=${sessionRef.id})`);
+  };
 
   const server = new Server(
     { name: "mcp-quick-show", version: "0.1.0" },
@@ -125,7 +141,10 @@ async function main() {
     // Raw handlers own their full call flow (own MCP CallToolResult).
     const rawHandler = findRawHandler(request.params.name);
     if (rawHandler) {
-      return rawHandler.call(args, { client, sessionId });
+      return withReconnect(
+        () => rawHandler.call(args, { client, sessionId: sessionRef.id }),
+        reconnect,
+      );
     }
 
     const handler = findHandler(request.params.name);
@@ -143,15 +162,19 @@ async function main() {
       } as CallToolResult;
     }
     const payload = validation.payload;
-    const resp = await client.request({
-      kind: "upsert",
-      session: sessionId,
-      name: payload.name,
-      content_type: payload.contentType,
-      form: payload.form,
-      body: payload.body,
-      ...(payload.width !== undefined ? { width: payload.width } : {}),
-    });
+    const resp = await withReconnect(
+      () =>
+        client.request({
+          kind: "upsert",
+          session: sessionRef.id,
+          name: payload.name,
+          content_type: payload.contentType,
+          form: payload.form,
+          body: payload.body,
+          ...(payload.width !== undefined ? { width: payload.width } : {}),
+        }),
+      reconnect,
+    );
 
     if (resp.kind === "ok") {
       const result = resp.result as { width: number; height: number; screenshot_b64?: string };

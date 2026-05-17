@@ -123,3 +123,94 @@ test("helloHandshake throws on protocol_error", async () => {
   expect(threw).toBe(true);
   client.close();
 });
+
+// --- Wire-protocol version validation -------------------------------
+//
+// Today's failure mode: a stale Swift binary reports `version: "0.1"`,
+// the sidecar (built against 0.2) silently adopts `undefined` for
+// `session_id`, and downstream handlers throw cryptic path.join errors.
+// The fail-fast check turns this into a clear, actionable message.
+
+test("helloHandshake throws on wire-protocol version mismatch", async () => {
+  // Simulate an older app: hello replies with version "0.1" instead of "0.2".
+  await startMockServer((req) => ({
+    kind: "ok",
+    result: { version: "0.1", pid: 12345, session_id: req.session_id },
+  }));
+
+  const client = new SocketClient(socketPath);
+  await client.connect(2000);
+  let threw = false;
+  let msg = "";
+  try {
+    await helloHandshake(client, "claim-v", "test-version-mismatch");
+  } catch (err) {
+    threw = true;
+    msg = err instanceof Error ? err.message : String(err);
+  }
+  expect(threw).toBe(true);
+  // Must name both versions so the user can see the drift.
+  expect(/version "0\.1"/.test(msg)).toBe(true);
+  expect(/expects "0\.2"/.test(msg)).toBe(true);
+  // Must include the rebuild incantation so the fix is obvious.
+  expect(/xcodebuild .* clean build/.test(msg)).toBe(true);
+  client.close();
+});
+
+test("helloHandshake throws when hello response omits session_id", async () => {
+  // Simulate an app that speaks 0.2's version field but pre-dates the
+  // session_id allocator (or whose granted id was dropped en route).
+  await startMockServer((_req) => ({
+    kind: "ok",
+    // Deliberately missing session_id. Cast through unknown so we can
+    // model a malformed wire payload without fighting the type system.
+    result: { version: "0.2", pid: 1 } as unknown as {
+      version: string;
+      pid: number;
+      session_id: string;
+    },
+  }));
+
+  const client = new SocketClient(socketPath);
+  await client.connect(2000);
+  let threw = false;
+  let msg = "";
+  try {
+    await helloHandshake(client, "claim-z", "test-missing-sid");
+  } catch (err) {
+    threw = true;
+    msg = err instanceof Error ? err.message : String(err);
+  }
+  expect(threw).toBe(true);
+  expect(/missing session_id/.test(msg)).toBe(true);
+  expect(/version "0\.2"/.test(msg)).toBe(true);
+  expect(/xcodebuild .* clean build/.test(msg)).toBe(true);
+  client.close();
+});
+
+test("helloHandshake throws when hello response omits version", async () => {
+  await startMockServer((req) => ({
+    kind: "ok",
+    // Missing version field.
+    result: { pid: 1, session_id: req.session_id } as unknown as {
+      version: string;
+      pid: number;
+      session_id: string;
+    },
+  }));
+
+  const client = new SocketClient(socketPath);
+  await client.connect(2000);
+  let threw = false;
+  let msg = "";
+  try {
+    await helloHandshake(client, "claim-nv", "test-missing-version");
+  } catch (err) {
+    threw = true;
+    msg = err instanceof Error ? err.message : String(err);
+  }
+  expect(threw).toBe(true);
+  // The validator surfaces the missing field via the "<missing>" sentinel.
+  expect(/version "<missing>"/.test(msg)).toBe(true);
+  client.close();
+});
