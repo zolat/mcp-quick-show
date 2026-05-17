@@ -9,7 +9,7 @@ import Cocoa
 /// `mouseDownCanMoveWindow = true`); the close button consumes its
 /// own click via `mouseDownCanMoveWindow = false`.
 final class TitleBarOverlay: NSView {
-    static let height: CGFloat = 22
+    static let height: CGFloat = 28
 
     var onClose: (() -> Void)?
     var onSnapshot: (() -> Void)?
@@ -36,12 +36,38 @@ final class TitleBarOverlay: NSView {
     var onDragEnd: ((NSPoint) -> Void)?
 
     private let titleLabel = NSTextField(labelWithString: "")
-    private let closeButton = NSButton(title: "×", target: nil, action: nil)
-    private let snapshotButton = NSButton(title: "⇩", target: nil, action: nil)
-    private let markupButton = NSButton(title: "✏︎", target: nil, action: nil)
-    private let clearMarkupButton = NSButton(title: "⌫", target: nil, action: nil)
-    private let sendButton = NSButton(title: "✓", target: nil, action: nil)
+    private let closeButton = TitleBarOverlay.symbolButton(
+        "xmark", weight: .medium, ax: "Close")
+    private let snapshotButton = TitleBarOverlay.symbolButton(
+        "square.and.arrow.down", weight: .medium, ax: "Save snapshot")
+    private let markupButton = TitleBarOverlay.symbolButton(
+        "pencil.tip", weight: .medium, ax: "Toggle markup")
+    private let clearMarkupButton = TitleBarOverlay.symbolButton(
+        "delete.left", weight: .medium, ax: "Clear markup strokes")
+    private let sendButton = TitleBarOverlay.symbolButton(
+        "paperplane.fill", weight: .bold, ax: "Send markup to agent")
     private let badgeView = NSTextField(labelWithString: "")
+
+    /// SF-Symbol-backed icon button — used for every action button in the
+    /// bar. Borderless, image-only, tintable via `contentTintColor`. Symbol
+    /// rendered at 13pt so it fits comfortably in the current 18pt button
+    /// (and the planned 22pt button in step 2 of the revamp). First SF
+    /// Symbol usage in the app — `NSImage(systemSymbolName:)` is macOS 11+,
+    /// well below our 13.0 deployment target.
+    private static func symbolButton(
+        _ name: String,
+        weight: NSFont.Weight,
+        ax: String
+    ) -> NSButton {
+        let btn = NSButton(title: "", target: nil, action: nil)
+        btn.isBordered = false
+        btn.imagePosition = .imageOnly
+        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: weight)
+        btn.image = NSImage(systemSymbolName: name, accessibilityDescription: ax)?
+            .withSymbolConfiguration(cfg)
+        btn.toolTip = ax
+        return btn
+    }
     private let backgroundLayer = CALayer()
 
     private var mouseDownPoint: NSPoint = .zero
@@ -96,8 +122,6 @@ final class TitleBarOverlay: NSView {
         addSubview(badgeView)
 
         snapshotButton.translatesAutoresizingMaskIntoConstraints = false
-        snapshotButton.isBordered = false
-        snapshotButton.font = .systemFont(ofSize: 13, weight: .medium)
         snapshotButton.contentTintColor = Self.arthurTextMuted
         snapshotButton.target = self
         snapshotButton.action = #selector(handleSnapshot)
@@ -109,8 +133,6 @@ final class TitleBarOverlay: NSView {
         // Clear button additionally requires strokes to exist — it'd
         // be visual noise as a perpetual no-op.
         markupButton.translatesAutoresizingMaskIntoConstraints = false
-        markupButton.isBordered = false
-        markupButton.font = .systemFont(ofSize: 13, weight: .medium)
         markupButton.contentTintColor = Self.arthurTextMuted
         markupButton.target = self
         markupButton.action = #selector(handleMarkup)
@@ -119,28 +141,20 @@ final class TitleBarOverlay: NSView {
         addSubview(markupButton)
 
         clearMarkupButton.translatesAutoresizingMaskIntoConstraints = false
-        clearMarkupButton.isBordered = false
-        clearMarkupButton.font = .systemFont(ofSize: 13, weight: .medium)
         clearMarkupButton.contentTintColor = Self.arthurTextMuted
         clearMarkupButton.target = self
         clearMarkupButton.action = #selector(handleClearMarkup)
-        clearMarkupButton.toolTip = "Clear markup strokes"
         clearMarkupButton.isHidden = true
         addSubview(clearMarkupButton)
 
         sendButton.translatesAutoresizingMaskIntoConstraints = false
-        sendButton.isBordered = false
-        sendButton.font = .systemFont(ofSize: 13, weight: .bold)
         sendButton.contentTintColor = .controlAccentColor
         sendButton.target = self
         sendButton.action = #selector(handleSend)
-        sendButton.toolTip = "Send markup to agent"
         sendButton.isHidden = true
         addSubview(sendButton)
 
         closeButton.translatesAutoresizingMaskIntoConstraints = false
-        closeButton.isBordered = false
-        closeButton.font = .systemFont(ofSize: 14, weight: .medium)
         closeButton.contentTintColor = Self.arthurTextMuted
         closeButton.target = self
         closeButton.action = #selector(handleClose)
