@@ -35,6 +35,20 @@ final class SessionManager: NSObject {
         var huds: [HUDInstance] = []
         var orphanTimerTask: Task<Void, Never>?
         var orphaned: Bool = false
+        /// Sidecar's `parent_pid` from `hello`. The root of the
+        /// process-tree walk used by `SpaceResolver` to find the
+        /// terminal window hosting this Claude session. Optional
+        /// because legacy callers and CLI smokes may not provide it.
+        /// Refreshed on reconnect — a `claude --resume` against the
+        /// same conversation UUID may come from a new terminal.
+        var parentPid: pid_t?
+        /// Last successfully resolved Space id for this session.
+        /// Lets `.claudeSpace` placement degrade gracefully when the
+        /// terminal becomes temporarily invisible (minimised, full-
+        /// screen sibling app) — we re-use the last known Space
+        /// rather than dumping the panel on whichever Space the user
+        /// happens to be on.
+        var lastResolvedSpaceID: UInt64?
         /// Generic per-session flags driven by the `set_session_flag`
         /// control verb. First consumer: `markup_events_armed`.
         var flags: [String: SessionFlagValue] = [:]
@@ -107,7 +121,7 @@ final class SessionManager: NSObject {
 
     // MARK: - Session lifecycle
 
-    func registerSession(_ sessionId: String) {
+    func registerSession(_ sessionId: String, parentPid: pid_t? = nil) {
         if let existing = sessions[sessionId] {
             existing.orphanTimerTask?.cancel()
             existing.orphanTimerTask = nil
@@ -116,11 +130,19 @@ final class SessionManager: NSObject {
                 for hud in existing.huds { hud.window.setSessionEnded(false) }
                 NSLog("QuickShow: session \(sessionId) reattached (orphan badge cleared)")
             }
+            // Refresh parent_pid on reconnect — a `claude --resume`
+            // (or a fresh sidecar against the same conversation UUID)
+            // can come from a different terminal, so the previous
+            // pid is stale. Skip when caller passed nil to preserve
+            // whatever we already had.
+            if let pid = parentPid { existing.parentPid = pid }
             return
         }
         let idx = sessionsRegisteredOrder
         sessionsRegisteredOrder += 1
-        sessions[sessionId] = SessionState(id: sessionId, cascadeIndex: idx)
+        let state = SessionState(id: sessionId, cascadeIndex: idx)
+        state.parentPid = parentPid
+        sessions[sessionId] = state
     }
 
     func sidecarDisconnected(sessionId: String) {
@@ -922,8 +944,41 @@ final class SessionManager: NSObject {
         session.huds.append(hud)
         wireHudCallbacks(hud, sessionId: session.id)
         window.setSessionEnded(session.orphaned)
+        // For `.claudeSpace`: we move the window THREE times. (1)
+        // Before `orderFront`, so the window's first visible frame
+        // is on the target Space — no flash on the user's Space.
+        // (2) Immediately after `orderFront`, because AppKit's
+        // `makeKeyAndOrderFront` resets the Space on visible
+        // windows. (3) Once more from the next main-queue tick, in
+        // case AppKit's window-lifecycle does another reset after
+        // ordering completes. Empirically required: a single move
+        // (either before or after orderFront) gets reverted by
+        // AppKit's window-server interaction.
+        applyClaudeSpacePlacement(window: window, session: session)
         window.makeKeyAndOrderFront(nil)
+        applyClaudeSpacePlacement(window: window, session: session)
+        DispatchQueue.main.async { [weak self] in
+            self?.applyClaudeSpacePlacement(window: window, session: session)
+        }
         return hud
+    }
+
+    /// Per the "first create only" rule from the feasibility plan,
+    /// nudges `window` onto the Space containing the terminal that
+    /// hosts the Claude session — but only when the current policy
+    /// is `.claudeSpace`. Updates `session.lastResolvedSpaceID` on
+    /// success so subsequent placements can fall back to it when the
+    /// terminal becomes temporarily invisible.
+    private func applyClaudeSpacePlacement(window: HUDWindow, session: SessionState) {
+        guard Settings.shared.hudSpacePolicy == .claudeSpace else { return }
+        let resolved = SpaceResolver.placeOnClaudeSpace(
+            window: window,
+            parentPid: session.parentPid,
+            cachedSpace: session.lastResolvedSpaceID
+        )
+        if let resolved = resolved {
+            session.lastResolvedSpaceID = resolved
+        }
     }
 
     /// Close a HUD: tear down its window and remove from `session.huds`.

@@ -1,11 +1,16 @@
 import Cocoa
 
 /// Borderless floating window. Always-on-top via `.floating` level.
-/// Space scoping is driven by `Settings.pinHudsToCurrentSpace`:
-/// pinned = Space-bound (`.fullScreenAuxiliary`); unpinned = cross-
-/// Space (`.canJoinAllSpaces + .fullScreenAuxiliary + .stationary`).
-/// The window observes `Settings.pinHudsToCurrentSpaceChanged` and
-/// re-applies `collectionBehavior` live.
+/// Space scoping is driven by `Settings.hudSpacePolicy`:
+///   .userSpace / .claudeSpace → `.fullScreenAuxiliary` (Space-bound)
+///   .allSpaces                → `.canJoinAllSpaces + .fullScreenAuxiliary + .stationary`
+/// `.claudeSpace` differs from `.userSpace` only in *where* the window
+/// is first placed — `SessionManager` calls `SpaceResolver` to nudge
+/// new HUDs onto the terminal's Space. Both modes use the same
+/// `CollectionBehavior` because once a window is on a Space, the same
+/// rules govern visibility.
+/// The window observes `Settings.hudSpacePolicyChanged` and re-applies
+/// `collectionBehavior` live.
 /// Lifted-from-and-simplified from PipAnything's `OverlayWindow`.
 ///
 /// Phase 3 update: multi-panel. The HUD holds N renderer views; the
@@ -107,8 +112,8 @@ final class HUDWindow: NSWindow {
         configureContentView()
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(handlePinToSpaceChanged),
-            name: Settings.pinHudsToCurrentSpaceChanged,
+            selector: #selector(handleSpacePolicyChanged),
+            name: Settings.hudSpacePolicyChanged,
             object: nil
         )
     }
@@ -121,7 +126,7 @@ final class HUDWindow: NSWindow {
         isOpaque = false
         backgroundColor = .clear
         level = .floating
-        collectionBehavior = Self.collectionBehavior(forPinned: Settings.shared.pinHudsToCurrentSpace)
+        collectionBehavior = Self.collectionBehavior(forPolicy: Settings.shared.hudSpacePolicy)
         isMovableByWindowBackground = true
         hasShadow = true
         ignoresMouseEvents = false
@@ -133,18 +138,31 @@ final class HUDWindow: NSWindow {
     }
 
     /// Single source of truth for HUD Space scoping.
-    /// `.stationary` is intentionally only set in the cross-Space
-    /// variant — it means "don't follow Space switches" and is moot
-    /// when the window is already pinned to one Space.
-    static func collectionBehavior(forPinned pinned: Bool) -> NSWindow.CollectionBehavior {
-        if pinned {
+    /// `.userSpace` and `.claudeSpace` use the same behaviour
+    /// (`.fullScreenAuxiliary`) — the difference is the placement
+    /// step run by `SessionManager` on first create. `.stationary` is
+    /// intentionally only set in the cross-Space variant — it means
+    /// "don't follow Space switches" and is moot when the window is
+    /// already bound to one Space.
+    static func collectionBehavior(forPolicy policy: HudSpacePolicy) -> NSWindow.CollectionBehavior {
+        switch policy {
+        case .userSpace:
             return [.fullScreenAuxiliary]
+        case .claudeSpace:
+            // No `.fullScreenAuxiliary` here — that flag couples the
+            // window to whatever Space hosts the current full-screen
+            // presentation, which fights `CGSMoveWindowsToManagedSpace`
+            // (AppKit re-asserts the active Space after orderFront).
+            // `.managed` default behaviour is exactly what we want:
+            // window stays on whichever Space it was last placed on.
+            return []
+        case .allSpaces:
+            return [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         }
-        return [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
     }
 
-    @objc private func handlePinToSpaceChanged() {
-        collectionBehavior = Self.collectionBehavior(forPinned: Settings.shared.pinHudsToCurrentSpace)
+    @objc private func handleSpacePolicyChanged() {
+        collectionBehavior = Self.collectionBehavior(forPolicy: Settings.shared.hudSpacePolicy)
     }
 
     override var canBecomeKey: Bool { true }

@@ -14,7 +14,8 @@ import ServiceManagement
 @MainActor
 final class SettingsWindow: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     private let launchAtLoginCheckbox = NSButton(checkboxWithTitle: "Launch QuickShow at login", target: nil, action: nil)
-    private let pinToSpaceCheckbox = NSButton(checkboxWithTitle: "Pin HUDs to current Space", target: nil, action: nil)
+    private let spacePolicyPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let spacePolicyHelp = NSTextField(labelWithString: "")
     private let opacitySlider = NSSlider(value: 100, minValue: 10, maxValue: 100, target: nil, action: nil)
     private let opacityValueLabel = NSTextField(labelWithString: "100 %")
     private let sizeWidthField = NSTextField()
@@ -61,15 +62,31 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate, NSTextFieldDel
         launchAtLoginCheckbox.state = isLaunchAtLoginEnabled() ? .on : .off
         stack.addArrangedSubview(launchAtLoginCheckbox)
 
-        // --- Pin HUDs to current Space ---
-        pinToSpaceCheckbox.target = self
-        pinToSpaceCheckbox.action = #selector(pinToSpaceChanged(_:))
-        pinToSpaceCheckbox.state = Settings.shared.pinHudsToCurrentSpace ? .on : .off
-        stack.addArrangedSubview(pinToSpaceCheckbox)
-        let pinToSpaceNote = NSTextField(labelWithString: "When off, HUDs appear on every Space. Applies immediately to all HUDs.")
-        pinToSpaceNote.font = .systemFont(ofSize: 10)
-        pinToSpaceNote.textColor = .secondaryLabelColor
-        stack.addArrangedSubview(pinToSpaceNote)
+        // --- Where new HUDs open across macOS Spaces ---
+        let policyRow = NSStackView()
+        policyRow.orientation = .horizontal
+        policyRow.spacing = 10
+        policyRow.alignment = .centerY
+        let policyLabel = NSTextField(labelWithString: "Open new panels on:")
+        policyLabel.widthAnchor.constraint(equalToConstant: 150).isActive = true
+        spacePolicyPopup.target = self
+        spacePolicyPopup.action = #selector(spacePolicyChanged(_:))
+        for policy in HudSpacePolicy.allCases {
+            spacePolicyPopup.addItem(withTitle: policy.displayName)
+            spacePolicyPopup.lastItem?.representedObject = policy
+        }
+        let current = Settings.shared.hudSpacePolicy
+        if let idx = HudSpacePolicy.allCases.firstIndex(of: current) {
+            spacePolicyPopup.selectItem(at: idx)
+        }
+        spacePolicyPopup.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        policyRow.addArrangedSubview(policyLabel)
+        policyRow.addArrangedSubview(spacePolicyPopup)
+        stack.addArrangedSubview(policyRow)
+        spacePolicyHelp.stringValue = current.helpText
+        spacePolicyHelp.font = .systemFont(ofSize: 10)
+        spacePolicyHelp.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(spacePolicyHelp)
 
         stack.addArrangedSubview(separator())
 
@@ -182,12 +199,13 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate, NSTextFieldDel
         opacityValueLabel.stringValue = "\(pct) %"
     }
 
-    // MARK: - Pin to current Space
+    // MARK: - HUD space policy
 
-    @objc private func pinToSpaceChanged(_ sender: NSButton) {
-        let pinned = sender.state == .on
-        Settings.shared.pinHudsToCurrentSpace = pinned
-        NotificationCenter.default.post(name: Settings.pinHudsToCurrentSpaceChanged, object: nil)
+    @objc private func spacePolicyChanged(_ sender: NSPopUpButton) {
+        guard let policy = sender.selectedItem?.representedObject as? HudSpacePolicy else { return }
+        Settings.shared.hudSpacePolicy = policy
+        spacePolicyHelp.stringValue = policy.helpText
+        NotificationCenter.default.post(name: Settings.hudSpacePolicyChanged, object: nil)
     }
 
     // MARK: - Size cap (NSTextFieldDelegate)
