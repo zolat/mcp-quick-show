@@ -46,16 +46,28 @@ milestone.
   at repo root + `plugin/` tree (manifest, `.mcp.json` pointing at
   bundled sidecar, foundational `quickshow` skill, adapted
   `frontend-design` skill, `tic-tac-toe` demo skill)
-- [x] Demo skill: tic-tac-toe — `plugin/skills/fun-tic-tac-toe/` ships
+- [x] Demo skill: tic-tac-toe — `plugin/skills/fun/tic-tac-toe.md` ships
   with the plugin; SVG board + markup-driven gameplay
-- [x] Demo skill: chess — `plugin/skills/fun-chess/` with `chess_helper.py`
+- [x] Demo skill: chess — `plugin/skills/fun/chess.md` with `chess_helper.py`
   (uv inline-deps + python-chess), Unicode-glyph board renderer,
   minimax-2 opponent
 - [x] Interactive panels — `window.quickshow.emit(payload)` JS→Swift
   bridge, third `panelEvent` script-message channel, new
   `enable_panel_events` sidecar tool gated on `panel_events_armed`,
   token-bucket throttle (20/s/panel) with 1Hz drop summaries, demo
-  skill `plugin/skills/fun-click-demo/`
+  skill `plugin/skills/fun/click-demo.md`
+
+## Post-v0.1 (in progress)
+
+- [ ] **Top-bar revamp.** 28pt bar (was 22pt), 22×22 buttons (was
+  18×18), SF Symbols replace Unicode glyphs, in-place mode swap
+  for draw mode (title region yields to tool palette at the same
+  height), single-button dropdown pickers for stroke color +
+  weight, Send becomes a labelled accent pill. Ships the picker
+  UI surfaces without behaviour wiring — color + weight still
+  hard-coded `#d8392c` / 3px on `markup-canvas.js`. Sets up the
+  surfaces the next four follow-ups need. Plan:
+  `~/.claude/plans/yeah-plan-and-road-abundant-gem.md`.
 
 ## Backlog
 
@@ -69,16 +81,19 @@ work as priorities firm up. Longer outlines live in `BACKLOG.md`.
   loop + design skill, rebuild the DMG against current `main`, sign
   + notarize, tag `v0.1.1`, publish to GitHub Releases. This is
   the highest-ROI move — work is done, story isn't told.
-- **Top-bar rework.** Current top bar got a quick Arthur tint pass
-  but is otherwise unchanged from v0.1. Open question: what
-  belongs there once the markup loop is the marquee feature
-  (panel name? session indicator? markup state hints? per-stroke
-  color picker?).
-- **Multi-color markup.** Today's stroke is always red
-  (`#d8392c`). Semantic colors — red for "fix", green for "this is
-  good", maybe one more — would let the user encode review intent
-  in the markup itself. Small JS-bridge addition + a title-bar
-  color selector.
+- **Multi-color markup wiring.** Top-bar revamp ships the picker
+  UI; this hooks `onPickMarkupColor` through
+  `WebViewPanelRenderer` to `window.__qsMarkup.setColor(hex)` so
+  the selection actually changes stroke color. Semantic colors —
+  red for "fix", green for "this is good", blue for "note",
+  yellow for "caution".
+- **Stroke-weight wiring.** Same shape as multi-color wiring;
+  `setWidth(px)` mutates `DEFAULT_WIDTH` in `markup-canvas.js`.
+- **Undo button wiring.** Top-bar button is in place; needs a
+  `canUndo` JS→Swift channel so the button's enabled state tracks
+  reality. `markup-canvas.js` already has `popLastStroke()`.
+- **Eraser tool.** Tool-mode flag in `markup-canvas.js` + one more
+  top-bar button. The dropdown-picker pattern means we have room.
 - **Security pass on `show_html`.** v0.1 trades CSP rigor for
   ergonomics — agent HTML is accepted at face value. PRD § show_html
   deferred a strict-CSP / allowlisted-CDN posture to v0.2.
