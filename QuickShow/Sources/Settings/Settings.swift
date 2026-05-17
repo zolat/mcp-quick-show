@@ -93,12 +93,16 @@ final class Settings {
                let v = HudSpacePolicy(rawValue: raw) {
                 return v
             }
-            // One-time migration from the v0.1 bool key. true → userSpace,
-            // false → allSpaces. Preserves existing-user behaviour; new
-            // installs get the .claudeSpace default below.
+            // One-time migration from the v0.1 bool key. true means
+            // "panels are Space-bound" — `.claudeSpace` is the new
+            // smarter version of that intent (still Space-bound, but
+            // bound to the right Space). false meant "follow me
+            // everywhere", which maps cleanly to `.allSpaces`. Users
+            // who explicitly want the v0.1 "land on whatever Space
+            // I'm on right now" can pick `.userSpace` from the picker.
             if defaults.object(forKey: Key.legacyPinHudsToCurrentSpace) != nil {
                 let legacyPinned = defaults.bool(forKey: Key.legacyPinHudsToCurrentSpace)
-                let migrated: HudSpacePolicy = legacyPinned ? .userSpace : .allSpaces
+                let migrated: HudSpacePolicy = legacyPinned ? .claudeSpace : .allSpaces
                 defaults.set(migrated.rawValue, forKey: Key.hudSpacePolicy)
                 defaults.removeObject(forKey: Key.legacyPinHudsToCurrentSpace)
                 return migrated
