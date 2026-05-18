@@ -84,6 +84,22 @@ Apple-Silicon only).
   built against current `main` (Apple-Silicon, ad-hoc signed —
   Developer-ID + notarization remain in backlog). Tag pushed +
   GitHub release published with DMG attached.
+- [x] Tab grouping + description banner — every `show_*` grows an
+  optional `group`, `description`, `hud_description`. Panels sharing
+  a group land in one HUD with a tab strip; descriptions render in
+  a new `DescriptionBanner` under the tab strip. Shared
+  `_groupingFields.ts` validator chokepoint on the sidecar side.
+  Smoke: `sidecar/src/cli/verify-tab-groups.ts`.
+- [x] `show_url` renderer — new content type. `URLRenderer.swift`
+  loads a live URL in a `WKWebView` with same-origin in-place
+  navigation + cross-origin via `NSWorkspace.open`. Width hint sizes
+  the CSS viewport before load. Validator rejects
+  `file:`/`javascript:`/`data:` URLs. Smoke:
+  `sidecar/src/cli/verify-url.ts` (hermetic Bun.serve + ATS
+  render_error path).
+- [x] CI — `.github/workflows/ci.yml` runs `bun test` on
+  ubuntu-latest and `xcodebuild Debug` on macos-14, concurrency-
+  grouped per ref with cancel-in-progress.
 
 ## Backlog
 
