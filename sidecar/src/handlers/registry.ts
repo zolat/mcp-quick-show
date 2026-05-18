@@ -18,13 +18,19 @@ import type { SocketClient } from "../socket.ts";
 
 /** Normalized payload bound for the control socket. */
 export type NormalizedUpsert = {
-  contentType: "markdown" | "svg" | "image" | "mermaid" | "html";
+  contentType: "markdown" | "svg" | "image" | "mermaid" | "html" | "url";
   name: string;
-  form: "inline" | "path";
+  form: "inline" | "path" | "url";
   body: string;
   returnScreenshot: boolean;
-  /** Optional canvas-width hint in points (HTMLRenderer only today). */
+  /** Optional canvas-width hint in points (HTMLRenderer + URLRenderer). */
   width?: number;
+  /** Optional grouping key — HUD identity. See `_groupingFields.ts`. */
+  group?: string;
+  /** Optional per-tab framing line for the banner. */
+  description?: string;
+  /** Optional HUD-level framing line for the banner. */
+  hudDescription?: string;
 };
 
 /** Validation result a handler returns from `validate()`. */

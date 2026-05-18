@@ -26,12 +26,17 @@ final class HUDWindow: NSWindow {
     private let contentHost = NSView()
     private let titleBar = TitleBarOverlay()
     private let tabStrip = TabStripView()
+    private let descriptionBanner = DescriptionBanner()
     let resizeHandle = ResizeHandle()
 
     /// Currently-installed renderer views, keyed by panel name.
     /// At most one is visible at a time; the others are hidden in
     /// place so their state (scroll position, JS context) survives.
     private var rendererViews: [String: NSView] = [:]
+    /// Per-panel description strings (the `description` field). Empty
+    /// string and absent are both rendered as "no per-tab line". Mirrors
+    /// `rendererViews`' lifecycle — removed on `removePanel`.
+    private var panelDescriptions: [String: String] = [:]
     private(set) var activePanelName: String?
 
     /// Per-HUD draw-mode flag. `true` while the user is annotating;
@@ -269,6 +274,18 @@ final class HUDWindow: NSWindow {
             tabStrip.heightAnchor.constraint(equalToConstant: TabStripView.height),
         ])
 
+        // Description banner sits between the tab strip and the content
+        // host. Floats above content (drawn after) so its backdrop is
+        // visible. Auto-collapses to 0pt height when no description is
+        // set on either the HUD-group or the active panel.
+        descriptionBanner.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(descriptionBanner)
+        NSLayoutConstraint.activate([
+            descriptionBanner.topAnchor.constraint(equalTo: tabStrip.bottomAnchor),
+            descriptionBanner.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            descriptionBanner.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+        ])
+
         // Markup is now drawn into a transparent <canvas> injected
         // into every WebView by `markup-canvas.js`. The HUD itself
         // doesn't need a Swift-side overlay anymore — strokes are
@@ -291,7 +308,11 @@ final class HUDWindow: NSWindow {
     /// has a view registered, replace it (caller used a different
     /// content_type for the same slot, e.g. user typoed). The newly
     /// installed view becomes active.
-    func installPanel(name: String, view: NSView) {
+    ///
+    /// `description` is optional per-tab framing text rendered in the
+    /// description banner when the panel is active. Pass `""` to clear,
+    /// `nil` to leave any prior description for this slot untouched.
+    func installPanel(name: String, view: NSView, description: String? = nil) {
         if let existing = rendererViews[name], existing !== view {
             existing.removeFromSuperview()
         }
@@ -306,7 +327,26 @@ final class HUDWindow: NSWindow {
             ])
         }
         rendererViews[name] = view
+        if let description = description {
+            panelDescriptions[name] = description
+        }
         setActivePanel(name)
+    }
+
+    /// Update the per-panel description for `name` without changing the
+    /// active panel. Empty string clears. Refreshes the banner if this
+    /// is the active panel.
+    func setPanelDescription(_ description: String, for name: String) {
+        panelDescriptions[name] = description
+        if activePanelName == name {
+            descriptionBanner.setPanelDescription(description)
+        }
+    }
+
+    /// Update the HUD-level (group) description string. Empty string
+    /// clears. Stays visible across tab switches.
+    func setHudDescription(_ description: String) {
+        descriptionBanner.setGroupDescription(description)
     }
 
     /// Make `name` the visible panel; hide the others in place. The
@@ -327,6 +367,7 @@ final class HUDWindow: NSWindow {
         let activeEmpty = onResolveActiveStrokesEmpty?() ?? true
         titleBar.setHasStrokes(!activeEmpty)
         titleBar.setTitle(name)
+        descriptionBanner.setPanelDescription(panelDescriptions[name] ?? "")
     }
 
     /// Mirror the active panel's stroke state into the title bar so
@@ -342,8 +383,10 @@ final class HUDWindow: NSWindow {
     func removePanel(_ name: String) {
         rendererViews[name]?.removeFromSuperview()
         rendererViews.removeValue(forKey: name)
+        panelDescriptions.removeValue(forKey: name)
         if activePanelName == name {
             activePanelName = nil
+            descriptionBanner.setPanelDescription("")
         }
     }
 

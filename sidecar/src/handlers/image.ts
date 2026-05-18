@@ -13,6 +13,7 @@
 
 import { registerHandler, type ContentTypeHandler, type ValidationResult } from "./registry.ts";
 import { resolvePath } from "../pathResolver.ts";
+import { groupingSchemaProps, parseGroupingFields } from "./_groupingFields.ts";
 
 const PATH_MAX_BYTES = 1024 * 1024 * 1024; // 1 GB
 
@@ -41,6 +42,7 @@ const handler: ContentTypeHandler = {
           "If true (default), include the image bytes in the response. Set to false to save tokens when the agent doesn't need to inspect.",
         default: true,
       },
+      ...groupingSchemaProps,
     },
     required: ["name", "path"],
   },
@@ -54,6 +56,8 @@ const handler: ContentTypeHandler = {
     if (typeof pathArg !== "string" || !pathArg.trim()) {
       return { ok: false, error: "`path` must be a non-empty string" };
     }
+    const grouping = parseGroupingFields(args);
+    if (!grouping.ok) return { ok: false, error: grouping.error };
     try {
       const resolved = await resolvePath(pathArg, {
         maxBytes: PATH_MAX_BYTES,
@@ -67,6 +71,7 @@ const handler: ContentTypeHandler = {
           form: "path",
           body: resolved.absolutePath,
           returnScreenshot: args.return_screenshot !== false,
+          ...grouping.fields,
         },
       };
     } catch (err) {

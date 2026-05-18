@@ -172,6 +172,9 @@ async function main() {
           form: payload.form,
           body: payload.body,
           ...(payload.width !== undefined ? { width: payload.width } : {}),
+          ...(payload.group !== undefined ? { group: payload.group } : {}),
+          ...(payload.description !== undefined ? { description: payload.description } : {}),
+          ...(payload.hudDescription !== undefined ? { hud_description: payload.hudDescription } : {}),
         }),
       reconnect,
     );

@@ -22,6 +22,7 @@
 // below steers agents toward self-contained output as the discipline.
 
 import { registerHandler, type ContentTypeHandler, type ValidationResult } from "./registry.ts";
+import { groupingSchemaProps, parseGroupingFields } from "./_groupingFields.ts";
 
 const INLINE_MAX_BYTES = 10 * 1024 * 1024;
 
@@ -63,6 +64,7 @@ const handler: ContentTypeHandler = {
           "If true (default), the tool response includes a PNG screenshot of the rendered panel. Set to false to save tokens when you don't need to verify the output.",
         default: true,
       },
+      ...groupingSchemaProps,
     },
     required: ["name", "content"],
   },
@@ -95,6 +97,8 @@ const handler: ContentTypeHandler = {
       }
       width = Math.round(args.width);
     }
+    const grouping = parseGroupingFields(args);
+    if (!grouping.ok) return { ok: false, error: grouping.error };
     return {
       ok: true,
       payload: {
@@ -104,6 +108,7 @@ const handler: ContentTypeHandler = {
         body: content,
         returnScreenshot,
         width,
+        ...grouping.fields,
       },
     };
   },

@@ -14,6 +14,7 @@
 import * as fs from "node:fs";
 import { registerHandler, type ContentTypeHandler, type ValidationResult } from "./registry.ts";
 import { resolvePath } from "../pathResolver.ts";
+import { groupingSchemaProps, parseGroupingFields } from "./_groupingFields.ts";
 
 const INLINE_MAX_BYTES = 10 * 1024 * 1024;
 const PATH_MAX_BYTES = 50 * 1024 * 1024;
@@ -49,6 +50,7 @@ const handler: ContentTypeHandler = {
           "If true (default), the tool response includes a PNG screenshot of the rendered panel. Set to false to save tokens when you don't need to verify the output.",
         default: true,
       },
+      ...groupingSchemaProps,
     },
     required: ["name"],
   },
@@ -71,6 +73,9 @@ const handler: ContentTypeHandler = {
       };
     }
 
+    const grouping = parseGroupingFields(args);
+    if (!grouping.ok) return { ok: false, error: grouping.error };
+
     if (hasContent) {
       const bytes = Buffer.byteLength(content as string, "utf8");
       if (bytes > INLINE_MAX_BYTES) {
@@ -87,6 +92,7 @@ const handler: ContentTypeHandler = {
           form: "inline",
           body: content as string,
           returnScreenshot,
+          ...grouping.fields,
         },
       };
     }
@@ -111,6 +117,7 @@ const handler: ContentTypeHandler = {
           form: "inline",
           body,
           returnScreenshot,
+          ...grouping.fields,
         },
       };
     } catch (err) {

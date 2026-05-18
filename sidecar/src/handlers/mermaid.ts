@@ -9,6 +9,7 @@
 // Size cap: 1 MB (mermaid specs that big aren't usable anyway).
 
 import { registerHandler, type ContentTypeHandler, type ValidationResult } from "./registry.ts";
+import { groupingSchemaProps, parseGroupingFields } from "./_groupingFields.ts";
 
 const INLINE_MAX_BYTES = 1 * 1024 * 1024;
 
@@ -36,6 +37,7 @@ const handler: ContentTypeHandler = {
         description: "If true (default), include a PNG snapshot.",
         default: true,
       },
+      ...groupingSchemaProps,
     },
     required: ["name", "definition"],
   },
@@ -53,6 +55,8 @@ const handler: ContentTypeHandler = {
     if (bytes > INLINE_MAX_BYTES) {
       return { ok: false, error: `mermaid spec too large: ${bytes} bytes > 1 MB cap` };
     }
+    const grouping = parseGroupingFields(args);
+    if (!grouping.ok) return { ok: false, error: grouping.error };
     return {
       ok: true,
       payload: {
@@ -61,6 +65,7 @@ const handler: ContentTypeHandler = {
         form: "inline",
         body: definition,
         returnScreenshot: args.return_screenshot !== false,
+        ...grouping.fields,
       },
     };
   },

@@ -67,11 +67,22 @@ final class SessionManager: NSObject {
         let id: UUID
         let window: HUDWindow
         var panels: [Panel]
+        /// The agent-supplied grouping key this HUD was opened with.
+        /// `nil` for the session's default (unnamed) HUD and for HUDs
+        /// spawned by tear-out. Sticky once set: re-routing on
+        /// `upsert(group:)` is by lookup (group equality), so changing
+        /// this field at runtime isn't necessary.
+        var group: String?
+        /// The HUD-level description paragraph (last-writer-wins
+        /// among upserts that route here). `nil` means unset; the
+        /// banner's "group line" shows `""` in that case (collapsed).
+        var hudDescription: String?
 
-        init(window: HUDWindow, panels: [Panel] = []) {
+        init(window: HUDWindow, panels: [Panel] = [], group: String? = nil) {
             self.id = window.hudInstanceId
             self.window = window
             self.panels = panels
+            self.group = group
         }
     }
 
@@ -93,6 +104,10 @@ final class SessionManager: NSObject {
         /// emission that would otherwise double-fire after Send.
         /// Reset to false on each re-render in `renderPanel`.
         var markupSentPending: Bool = false
+        /// Per-tab framing line shown in the HUD's description banner
+        /// while this panel is active. `nil` = no banner line for this
+        /// panel; `""` is treated the same (cleared).
+        var description: String?
 
         init(name: String, contentType: String, renderer: any PanelRenderer, view: NSView) {
             self.name = name
@@ -170,11 +185,21 @@ final class SessionManager: NSObject {
                 contentType: String,
                 form: String,
                 body: String,
-                width: Double? = nil) async throws -> (RenderResult, Data) {
+                width: Double? = nil,
+                group: String? = nil,
+                description: String? = nil,
+                hudDescription: String? = nil) async throws -> (RenderResult, Data) {
         let session = ensureSession(sessionId)
 
         // Locate the panel across all HUDs first (in-place update path).
         if let (hud, panel) = locate(in: session, name: name) {
+            // `group` on update calls is intentionally ignored — panels
+            // are sticky to the HUD where they were first created.
+            // `description` / `hud_description` may still apply.
+            applyDescriptionFields(
+                hud: hud, panel: panel,
+                description: description, hudDescription: hudDescription
+            )
             if panel.contentType == contentType {
                 return try await renderPanel(panel: panel, hud: hud,
                                              name: name, contentType: contentType,
@@ -190,18 +215,21 @@ final class SessionManager: NSObject {
             }
             let view = renderer.makeView()
             let newPanel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
+            newPanel.description = panel.description
             wireStrokePersistence(renderer: renderer, sessionId: sessionId, panelName: name)
-        wirePanelEvents(renderer: renderer, sessionId: sessionId, panelName: name)
+            wirePanelEvents(renderer: renderer, sessionId: sessionId, panelName: name)
             let idx = hud.panels.firstIndex(where: { $0.name == name })!
             hud.panels[idx] = newPanel
-            hud.window.installPanel(name: name, view: view)
+            hud.window.installPanel(name: name, view: view, description: newPanel.description ?? "")
             return try await renderPanel(panel: newPanel, hud: hud,
                                          name: name, contentType: contentType,
                                          form: form, body: body, width: width)
         }
 
-        // Novel name → ensure primary HUD exists, append there.
-        let primary = ensurePrimaryHud(in: session)
+        // Novel name → resolve the target HUD by `group`. `nil` group
+        // routes to the session's default (unnamed) HUD; a present
+        // `group` finds or spawns the HUD with that key.
+        let hud = ensureHud(in: session, group: group)
         guard let renderer = renderers.make(forContentType: contentType) else {
             throw RenderFailure(
                 message: "no renderer registered for content_type '\(contentType)'",
@@ -210,13 +238,42 @@ final class SessionManager: NSObject {
         }
         let view = renderer.makeView()
         let panel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
+        if let d = description { panel.description = d }
         wireStrokePersistence(renderer: renderer, sessionId: sessionId, panelName: name)
         wirePanelEvents(renderer: renderer, sessionId: sessionId, panelName: name)
-        primary.panels.append(panel)
-        primary.window.installPanel(name: name, view: view)
-        return try await renderPanel(panel: panel, hud: primary,
+        hud.panels.append(panel)
+        hud.window.installPanel(name: name, view: view, description: panel.description ?? "")
+        if let h = hudDescription {
+            hud.hudDescription = h.isEmpty ? nil : h
+            hud.window.setHudDescription(h)
+        } else if let existing = hud.hudDescription {
+            // Re-apply existing HUD description in case the banner was
+            // just spawned (covers first-render-after-create paths).
+            hud.window.setHudDescription(existing)
+        }
+        return try await renderPanel(panel: panel, hud: hud,
                                      name: name, contentType: contentType,
                                      form: form, body: body, width: width)
+    }
+
+    /// Apply optional per-panel + HUD-level description fields. `nil`
+    /// means "leave alone"; `""` means "clear"; any other string sets.
+    /// Used by the same-name (in-place update) branch of `upsert` —
+    /// the novel-name branch threads these through `installPanel` and
+    /// `setHudDescription` directly so the banner reflects the new
+    /// values immediately on first render.
+    private func applyDescriptionFields(
+        hud: HUDInstance, panel: Panel,
+        description: String?, hudDescription: String?
+    ) {
+        if let d = description {
+            panel.description = d.isEmpty ? nil : d
+            hud.window.setPanelDescription(d, for: panel.name)
+        }
+        if let h = hudDescription {
+            hud.hudDescription = h.isEmpty ? nil : h
+            hud.window.setHudDescription(h)
+        }
     }
 
     /// Hook a renderer's markup-canvas bridge so strokes captured in
@@ -559,10 +616,13 @@ final class SessionManager: NSObject {
         )
         let newWindow = HUDWindow(initialPosition: origin)
         newWindow.sessionId = sessionId
-        let newHud = HUDInstance(window: newWindow, panels: [panel])
+        // Torn-out HUD has no group and no HUD-level description — a
+        // single torn tab is standalone. The panel's own description
+        // survives the move (it lives on the Panel object).
+        let newHud = HUDInstance(window: newWindow, panels: [panel], group: nil)
         session.huds.append(newHud)
         wireHudCallbacks(newHud, sessionId: sessionId)
-        newWindow.installPanel(name: name, view: panel.view)
+        newWindow.installPanel(name: name, view: panel.view, description: panel.description ?? "")
         newWindow.updateTabs([name])
         newWindow.setSessionEnded(session.orphaned)
         newWindow.makeKeyAndOrderFront(nil)
@@ -862,13 +922,19 @@ final class SessionManager: NSObject {
 
     /// Move all panels from `source` into `target`, then close
     /// `source`. The last-merged panel becomes the active one in the
-    /// target (so the user sees what they just dropped).
+    /// target (so the user sees what they just dropped). Target's
+    /// `group` and `hudDescription` win — symmetric with how target's
+    /// chrome dominates (size, position, title bar). Moved panels keep
+    /// their own per-tab `description`.
     private func performReattach(source: HUDInstance, target: HUDInstance, in session: SessionState) {
         let movedPanels = source.panels
         source.panels.removeAll()
         for panel in movedPanels {
             source.window.removePanel(panel.name)
-            target.window.installPanel(name: panel.name, view: panel.view)
+            target.window.installPanel(
+                name: panel.name, view: panel.view,
+                description: panel.description ?? ""
+            )
             target.panels.append(panel)
         }
         target.window.updateTabs(target.panels.map(\.name))
@@ -994,13 +1060,21 @@ final class SessionManager: NSObject {
         return nil
     }
 
-    /// Get or create the primary HUD for a session. Called only from
-    /// `upsert` when the named slot doesn't yet exist anywhere.
-    private func ensurePrimaryHud(in session: SessionState) -> HUDInstance {
-        if let primary = session.huds.first { return primary }
-        let window = HUDWindow(initialPosition: HUDWindow.cascadeTopRight(session.cascadeIndex))
+    /// Get or create a HUD for a session, keyed by `group`. `nil` group
+    /// → the default (unnamed) HUD; a present group resolves to the
+    /// existing HUD with that group, or spawns a new one. Called only
+    /// from `upsert`'s novel-name branch.
+    private func ensureHud(in session: SessionState, group: String?) -> HUDInstance {
+        if let existing = session.huds.first(where: { $0.group == group }) {
+            return existing
+        }
+        // Cascade origin per-HUD-rank so multiple groups don't pile up
+        // on top of each other. session.cascadeIndex anchors the first
+        // HUD; subsequent HUDs in this session shift by their position.
+        let rank = session.cascadeIndex + session.huds.count
+        let window = HUDWindow(initialPosition: HUDWindow.cascadeTopRight(rank))
         window.sessionId = session.id
-        let hud = HUDInstance(window: window)
+        let hud = HUDInstance(window: window, group: group)
         session.huds.append(hud)
         wireHudCallbacks(hud, sessionId: session.id)
         window.setSessionEnded(session.orphaned)

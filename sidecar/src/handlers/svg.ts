@@ -10,6 +10,7 @@
 // Size cap: 50 MB.
 
 import { registerHandler, type ContentTypeHandler, type ValidationResult } from "./registry.ts";
+import { groupingSchemaProps, parseGroupingFields } from "./_groupingFields.ts";
 
 const INLINE_MAX_BYTES = 50 * 1024 * 1024;
 
@@ -37,6 +38,7 @@ const handler: ContentTypeHandler = {
         description: "If true (default), include a PNG snapshot in the response.",
         default: true,
       },
+      ...groupingSchemaProps,
     },
     required: ["name", "content"],
   },
@@ -60,6 +62,8 @@ const handler: ContentTypeHandler = {
     if (!/<svg[\s>]/i.test(content)) {
       return { ok: false, error: "content does not contain an <svg> element" };
     }
+    const grouping = parseGroupingFields(args);
+    if (!grouping.ok) return { ok: false, error: grouping.error };
     return {
       ok: true,
       payload: {
@@ -68,6 +72,7 @@ const handler: ContentTypeHandler = {
         form: "inline",
         body: content,
         returnScreenshot: args.return_screenshot !== false,
+        ...grouping.fields,
       },
     };
   },

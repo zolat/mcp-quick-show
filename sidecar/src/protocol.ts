@@ -36,15 +36,35 @@ export type UpsertRequest = {
   kind: "upsert";
   session: string;
   name: string;
-  content_type: "markdown" | "svg" | "image" | "mermaid" | "html";
-  form: "inline" | "path";
+  content_type: "markdown" | "svg" | "image" | "mermaid" | "html" | "url";
+  form: "inline" | "path" | "url";
   body: string;
   /**
-   * Optional canvas-width hint in points. HTMLRenderer sizes the
-   * WebView's CSS viewport to this before `loadHTMLString` so
+   * Optional canvas-width hint in points. HTMLRenderer / URLRenderer
+   * size the WebView's CSS viewport to this before content loads so
    * responsive designs lay out at the intended width.
    */
   width?: number;
+  /**
+   * Optional grouping key. Panels sharing a `group` land in the same
+   * HUD; each distinct `group` spawns its own HUD with its own cascade
+   * origin. Omitted → the session's default (unnamed) HUD. Ignored on
+   * same-`name` updates: `name` is sticky to the HUD where it was
+   * first created.
+   */
+  group?: string;
+  /**
+   * Optional per-panel framing paragraph rendered in the HUD's
+   * description banner above the content. Empty string clears.
+   */
+  description?: string;
+  /**
+   * Optional HUD-level framing paragraph rendered in the description
+   * banner above per-tab `description`. Last-writer-wins across calls
+   * that route to the same HUD (same `group`, or default HUD when
+   * `group` is omitted). Empty string clears.
+   */
+  hud_description?: string;
 };
 
 export type CloseRequest = {

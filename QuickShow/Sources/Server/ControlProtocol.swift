@@ -156,23 +156,41 @@ struct PingResult: Encodable {
 }
 
 /// `kind: "upsert"` — render content into a named panel slot.
+///
+/// `contentType` is one of: "markdown" | "svg" | "image" | "mermaid" |
+/// "html" | "url" — paired with `sidecar/src/protocol.ts`.
 struct UpsertRequest: Decodable {
     let id: String?
     let kind: String
     let session: String
     let name: String
     let contentType: String
-    let form: String           // "inline" | "path"
+    let form: String           // "inline" | "path" | "url"
     let body: String
     /// Optional canvas-width hint, in points. Used by HTMLRenderer
-    /// (and potentially others) to size the WebView's CSS viewport
-    /// before rendering — so responsive designs lay out at the
-    /// intended width rather than the default 400pt.
+    /// and URLRenderer to size the WebView's CSS viewport before
+    /// content loads — so responsive designs lay out at the intended
+    /// width rather than the default 400pt.
     let width: Double?
+    /// Optional grouping key. Panels sharing a `group` land in the
+    /// same HUD; each distinct `group` spawns its own HUD with its
+    /// own cascade origin. Omitted → the session's default (unnamed)
+    /// HUD. Ignored on same-`name` updates: `name` is sticky to the
+    /// HUD where it was first created.
+    let group: String?
+    /// Optional per-panel framing paragraph rendered in the HUD's
+    /// description banner above the content. Empty string clears.
+    let description: String?
+    /// Optional HUD-level framing paragraph rendered in the
+    /// description banner above per-tab `description`. Last-writer-
+    /// wins across calls that route to the same HUD. Empty string
+    /// clears.
+    let hudDescription: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, session, name, form, body, width
+        case id, kind, session, name, form, body, width, group, description
         case contentType = "content_type"
+        case hudDescription = "hud_description"
     }
 }
 

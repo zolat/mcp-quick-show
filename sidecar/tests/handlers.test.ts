@@ -9,10 +9,11 @@ import "../src/handlers/svg.ts";
 import "../src/handlers/mermaid.ts";
 import "../src/handlers/image.ts";
 import "../src/handlers/html.ts";
+import "../src/handlers/url.ts";
 
-test("registry lists all v0.1 content-type tools", () => {
+test("registry lists all upsert content-type tools", () => {
   const names = allHandlers().map(h => h.toolName).sort();
-  expect(names).toEqual(["show_html", "show_image", "show_markdown", "show_mermaid", "show_svg"]);
+  expect(names).toEqual(["show_html", "show_image", "show_markdown", "show_mermaid", "show_svg", "show_url"]);
 });
 
 test("registry findHandler returns the right tool", () => {
@@ -122,4 +123,185 @@ test("html.validate: enforces 10 MB inline cap", async () => {
   const r = await h.validate({ name: "x", content: big });
   expect(r.ok).toBe(false);
   if (!r.ok) expect(r.error).toContain("10 MB");
+});
+
+test("url.validate: accepts an https URL", async () => {
+  const h = findHandler("show_url")!;
+  const r = await h.validate({ name: "spec", url: "https://example.com/docs" });
+  expect(r.ok).toBe(true);
+  if (r.ok) {
+    expect(r.payload.contentType).toBe("url");
+    expect(r.payload.form).toBe("url");
+    expect(r.payload.body).toBe("https://example.com/docs");
+  }
+});
+
+test("url.validate: accepts an http URL", async () => {
+  const h = findHandler("show_url")!;
+  const r = await h.validate({ name: "x", url: "http://localhost:3000/" });
+  expect(r.ok).toBe(true);
+});
+
+test("url.validate: rejects empty name", async () => {
+  const h = findHandler("show_url")!;
+  const r = await h.validate({ name: "  ", url: "https://example.com" });
+  expect(r.ok).toBe(false);
+});
+
+test("url.validate: rejects missing url", async () => {
+  const h = findHandler("show_url")!;
+  const r = await h.validate({ name: "x" });
+  expect(r.ok).toBe(false);
+});
+
+test("url.validate: rejects file: URLs", async () => {
+  const h = findHandler("show_url")!;
+  const r = await h.validate({ name: "x", url: "file:///etc/passwd" });
+  expect(r.ok).toBe(false);
+  if (!r.ok) expect(r.error).toContain("http");
+});
+
+test("url.validate: rejects javascript: URLs", async () => {
+  const h = findHandler("show_url")!;
+  const r = await h.validate({ name: "x", url: "javascript:alert(1)" });
+  expect(r.ok).toBe(false);
+});
+
+test("url.validate: rejects data: URLs", async () => {
+  const h = findHandler("show_url")!;
+  const r = await h.validate({ name: "x", url: "data:text/html,hi" });
+  expect(r.ok).toBe(false);
+});
+
+test("url.validate: rejects malformed URL", async () => {
+  const h = findHandler("show_url")!;
+  const r = await h.validate({ name: "x", url: "not a url" });
+  expect(r.ok).toBe(false);
+});
+
+test("url.validate: rejects scheme-less URL", async () => {
+  const h = findHandler("show_url")!;
+  const r = await h.validate({ name: "x", url: "example.com" });
+  expect(r.ok).toBe(false);
+});
+
+test("url.validate: enforces width bounds", async () => {
+  const h = findHandler("show_url")!;
+  const tooNarrow = await h.validate({ name: "x", url: "https://example.com", width: 99 });
+  expect(tooNarrow.ok).toBe(false);
+  const tooWide = await h.validate({ name: "x", url: "https://example.com", width: 4097 });
+  expect(tooWide.ok).toBe(false);
+  const ok = await h.validate({ name: "x", url: "https://example.com", width: 800 });
+  expect(ok.ok).toBe(true);
+  if (ok.ok) expect(ok.payload.width).toBe(800);
+});
+
+test("url.validate: return_screenshot=false flows through", async () => {
+  const h = findHandler("show_url")!;
+  const r = await h.validate({ name: "x", url: "https://example.com", return_screenshot: false });
+  expect(r.ok).toBe(true);
+  if (r.ok) expect(r.payload.returnScreenshot).toBe(false);
+});
+
+// ---------------------------------------------------------------------
+// Grouping fields (group / description / hud_description)
+// Each is independently optional on every show_* handler. We assert the
+// markdown + html handlers as representative inline-content tools and
+// the url handler as the "form=url" path — the parsing is shared via
+// `_groupingFields.ts`, so coverage of all six is unnecessary.
+// ---------------------------------------------------------------------
+
+test("grouping fields: round-trip through markdown.validate", async () => {
+  const h = findHandler("show_markdown")!;
+  const r = await h.validate({
+    name: "tab",
+    content: "hi",
+    group: "design-review",
+    description: "Bold serif.",
+    hud_description: "Hero variants.",
+  });
+  expect(r.ok).toBe(true);
+  if (r.ok) {
+    expect(r.payload.group).toBe("design-review");
+    expect(r.payload.description).toBe("Bold serif.");
+    expect(r.payload.hudDescription).toBe("Hero variants.");
+  }
+});
+
+test("grouping fields: undefined when absent (distinct from empty)", async () => {
+  const h = findHandler("show_markdown")!;
+  const r = await h.validate({ name: "tab", content: "hi" });
+  expect(r.ok).toBe(true);
+  if (r.ok) {
+    expect(r.payload.group).toBeUndefined();
+    expect(r.payload.description).toBeUndefined();
+    expect(r.payload.hudDescription).toBeUndefined();
+  }
+});
+
+test("grouping fields: empty strings round-trip as empty (clear signal)", async () => {
+  const h = findHandler("show_html")!;
+  const r = await h.validate({
+    name: "x",
+    content: "<html></html>",
+    description: "",
+    hud_description: "",
+  });
+  expect(r.ok).toBe(true);
+  if (r.ok) {
+    // Empty strings are preserved — the app side reads "" as "clear".
+    expect(r.payload.description).toBe("");
+    expect(r.payload.hudDescription).toBe("");
+  }
+});
+
+test("grouping fields: reject non-string types", async () => {
+  const h = findHandler("show_markdown")!;
+  const r = await h.validate({ name: "x", content: "hi", group: 42 });
+  expect(r.ok).toBe(false);
+  if (!r.ok) expect(r.error).toContain("`group`");
+});
+
+test("grouping fields: reject oversized `description`", async () => {
+  const h = findHandler("show_markdown")!;
+  const big = "x".repeat(257); // 257 bytes > 256-byte cap
+  const r = await h.validate({ name: "x", content: "hi", description: big });
+  expect(r.ok).toBe(false);
+  if (!r.ok) expect(r.error).toContain("description");
+});
+
+test("grouping fields: reject oversized `hud_description`", async () => {
+  const h = findHandler("show_markdown")!;
+  const big = "x".repeat(4 * 1024 + 1); // 4 KB + 1
+  const r = await h.validate({ name: "x", content: "hi", hud_description: big });
+  expect(r.ok).toBe(false);
+  if (!r.ok) expect(r.error).toContain("hud_description");
+});
+
+test("grouping fields: accept `description` at the 256-byte boundary", async () => {
+  const h = findHandler("show_html")!;
+  const exact = "x".repeat(256);
+  const r = await h.validate({
+    name: "x",
+    content: "<html></html>",
+    description: exact,
+  });
+  expect(r.ok).toBe(true);
+  if (r.ok) expect(r.payload.description?.length).toBe(256);
+});
+
+test("grouping fields: round-trip through url.validate", async () => {
+  const h = findHandler("show_url")!;
+  const r = await h.validate({
+    name: "spec",
+    url: "https://example.com",
+    group: "docs",
+    description: "API reference.",
+  });
+  expect(r.ok).toBe(true);
+  if (r.ok) {
+    expect(r.payload.group).toBe("docs");
+    expect(r.payload.description).toBe("API reference.");
+    expect(r.payload.hudDescription).toBeUndefined();
+  }
 });

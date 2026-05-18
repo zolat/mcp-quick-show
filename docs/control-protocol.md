@@ -54,13 +54,27 @@ Response: `{"id": "...", "kind": "ok", "result": {"version": "0.1", "pid": N}}`
 
 ```json
 {"id": "<msg-id>", "kind": "upsert", "session": "<uuid>", "name": "<slot>",
- "content_type": "markdown|svg|image|mermaid",
- "form": "inline|path",
- "body": "<text or path>"}
+ "content_type": "markdown|svg|image|mermaid|html|url",
+ "form": "inline|path|url",
+ "body": "<text, path, or absolute http(s) URL>",
+ "width": <optional points>}
 ```
 
 Same `name` updates the existing panel in place. Different `name`
 opens a new tab. Closed panels reopen on a subsequent `upsert`.
+
+`form` semantics by content type:
+- `markdown` / `svg` / `mermaid` — `inline` (body is the source) or
+  `path` (body is an absolute filesystem path).
+- `image` — `path` only.
+- `html` — `inline` only.
+- `url` — `url` only (body is an absolute http(s) URL; the page is
+  fetched live; same-origin nav stays in-panel, cross-origin opens
+  externally).
+
+`width` (points, 100–4096) is an optional viewport hint used by
+HTMLRenderer and URLRenderer to size the WebView's CSS viewport
+before content loads.
 
 Response (success): `{"id": "...", "kind": "ok", "result": {"width": N, "height": N, "screenshot_b64": "..."}}`.
 
@@ -203,7 +217,7 @@ kinds share the same `events.ndjson` file; Claude filters by `type`.
 |---|---|---|
 | `hello` | 0 | ✅ implemented |
 | `ping` | 0 | ✅ implemented |
-| `upsert` | 1 | ✅ markdown — svg/mermaid/image pending |
+| `upsert` | 1 | ✅ markdown / svg / mermaid / image / html / url |
 | `close` | 1 | ✅ implemented |
 | `list` | 1 | ✅ implemented |
 | `inspect` | 1 | ✅ implemented |
