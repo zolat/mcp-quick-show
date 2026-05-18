@@ -559,6 +559,17 @@ final class SessionManager: NSObject {
     /// the resulting PNG. No separate composite step: the strokes are
     /// part of the rendered document. Wired to the title-bar Send
     /// button in `wireHudCallbacks`.
+    ///
+    /// Two flavours:
+    ///   - Agent-panel session: writes `<artifact-id>.png` into the
+    ///     session's artifacts dir + appends a `markup_sent` line to
+    ///     `events.ndjson` so the agent's tail picks it up.
+    ///   - User-windows session (`userWindowsSessionID`): no agent is
+    ///     listening, so we instead write a share PNG + JSON to
+    ///     `MarkupPaths.sharesBaseDir`, put `[quickshow-share:<id>]`
+    ///     on the clipboard, and pop an NSAlert telling the user
+    ///     where the token is. The HUD lives on; a future
+    ///     `get_share(<id>)` migrates it into a Claude session.
     func sendActivePanelMarkup(sessionId: String, hudId: UUID) {
         guard let session = sessions[sessionId],
               let hud = session.huds.first(where: { $0.id == hudId }),
@@ -568,6 +579,7 @@ final class SessionManager: NSObject {
             return
         }
         _ = session  // used only for the locate-by-id chain above
+        let isUserShare = (sessionId == Self.userWindowsSessionID)
         Task { @MainActor [weak self] in
             guard let self = self else { return }
             do {
@@ -577,11 +589,20 @@ final class SessionManager: NSObject {
                 // events; the canvas content stays painted).
                 await web.exitDrawMode()
                 let png = try await SnapshotService.snapshotWebViewFullDoc(web.webView)
-                _ = self.recordMarkupSent(
-                    sessionId: sessionId,
-                    panel: activeName,
-                    pngBytes: png
-                )
+                if isUserShare {
+                    self.recordShareSent(
+                        hud: hud,
+                        panel: panel,
+                        contentType: panel.contentType,
+                        pngBytes: png
+                    )
+                } else {
+                    _ = self.recordMarkupSent(
+                        sessionId: sessionId,
+                        panel: activeName,
+                        pngBytes: png
+                    )
+                }
                 // Strokes stay on screen as visible proof the Send
                 // took. The user can clear with ⌫ or keep iterating;
                 // they survive re-render now (see renderPanel).
@@ -592,6 +613,55 @@ final class SessionManager: NSObject {
                 NSLog("QuickShow: sendActivePanelMarkup snapshot failed: \(error)")
             }
         }
+    }
+
+    /// Persist a user-windows share — flattened PNG + JSON metadata
+    /// next to it under `MarkupPaths.sharesBaseDir`. Copies the
+    /// `[quickshow-share:<id>]` token to the clipboard and surfaces a
+    /// brief NSAlert. The HUD itself stays on screen; a future
+    /// `claim_share` (called from Claude's `get_share`) is what
+    /// actually migrates it into the Claude session.
+    private func recordShareSent(
+        hud: HUDInstance,
+        panel: Panel,
+        contentType: String,
+        pngBytes: Data
+    ) {
+        let shareId = ShareID.mint()
+        let meta = ShareMetadata(
+            sourcePanelName: panel.name,
+            sourceHudId: hud.id.uuidString,
+            contentType: contentType,
+            displayName: panel.description,
+            createdAt: ISO8601DateFormatter().string(from: Date())
+        )
+        do {
+            try MarkupPaths.ensureShareDirs()
+            try pngBytes.write(to: MarkupPaths.sharePNG(id: shareId))
+            let metaData = try JSONEncoder().encode(meta)
+            try metaData.write(to: MarkupPaths.shareMeta(id: shareId))
+        } catch {
+            NSLog("QuickShow: recordShareSent failed to write share: \(error)")
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Couldn't save share"
+            alert.informativeText = String(describing: error)
+            alert.addButton(withTitle: "OK")
+            _ = alert.runModal()
+            return
+        }
+        let token = "[quickshow-share:\(shareId)]"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(token, forType: .string)
+        NSLog("QuickShow: share \(shareId) → clipboard (\(token))")
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Share link copied"
+        alert.informativeText =
+            "Paste this into Claude to deliver the panel:\n\n\(token)\n\n" +
+            "Claude will fetch the image and the window will move into its session."
+        alert.addButton(withTitle: "OK")
+        _ = alert.runModal()
     }
 
     /// Emit a `markup_dismissed` line for a panel that was closed
