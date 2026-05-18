@@ -23,6 +23,15 @@ final class SessionManager: NSObject {
         return 60
     }
 
+    /// Reserved session id for user-initiated HUDs (menu-bar "Open
+    /// URL…" / "Open File…" → AppDelegate → `userUpsert`). Deliberately
+    /// non-UUID so it can never collide with a real Claude conversation
+    /// id minted by `resolveSessionId()` on the sidecar. HUDs born here
+    /// migrate into a Claude session via `claimShare(...)` once the
+    /// user pastes the share token into Claude and Claude calls
+    /// `get_share(<id>)`.
+    static let userWindowsSessionID = "user-windows"
+
     private let renderers: RendererRegistry
     weak var promoteController: PromoteToWindowController?
 
@@ -179,6 +188,38 @@ final class SessionManager: NSObject {
     }
 
     // MARK: - Panel verbs
+
+    /// Render into a user-initiated HUD. Auto-arms `markup_events_armed`
+    /// for the reserved `userWindowsSessionID` session (so the user can
+    /// flip into draw mode and annotate just like an agent-armed HUD),
+    /// then routes through normal `upsert`. After the first render
+    /// lands, the HUD's "always-show Send" flag is flipped on so the
+    /// title bar's idle layout exposes a Send button without forcing
+    /// draw mode — URL/image panels stay interactive. Draw mode is
+    /// still one click away via the markup pencil.
+    func userUpsert(name: String,
+                    contentType: String,
+                    form: String,
+                    body: String,
+                    width: Double? = nil,
+                    displayName: String? = nil) async throws -> (RenderResult, Data) {
+        let sessionId = Self.userWindowsSessionID
+        setFlag(sessionId: sessionId, key: "markup_events_armed", value: .bool(true))
+        let result = try await upsert(
+            sessionId: sessionId,
+            name: name,
+            contentType: contentType,
+            form: form,
+            body: body,
+            width: width,
+            description: displayName
+        )
+        if let session = sessions[sessionId],
+           let (hud, _) = locate(in: session, name: name) {
+            hud.window.setAlwaysShowSend(true)
+        }
+        return result
+    }
 
     func upsert(sessionId: String,
                 name: String,
