@@ -54,12 +54,15 @@ final class UserOpenActions: NSObject {
         let panelName = "user-url-\(ShareID.mint())"
         Task { @MainActor in
             do {
+                // No `displayName` for URL panels — the full URL is
+                // usually too long for the description banner. The
+                // panel name + the loaded page chrome are enough.
                 _ = try await manager.userUpsert(
                     name: panelName,
                     contentType: "url",
                     form: "url",
                     body: url.absoluteString,
-                    displayName: url.absoluteString
+                    displayName: nil
                 )
             } catch {
                 presentError("Couldn't open URL", String(describing: error))
