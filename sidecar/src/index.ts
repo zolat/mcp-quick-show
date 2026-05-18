@@ -32,6 +32,7 @@ import "./handlers/image.ts";
 import "./handlers/html.ts";
 import "./handlers/enableMarkupEvents.ts";
 import "./handlers/getMarkup.ts";
+import "./handlers/getShare.ts";
 import "./handlers/enablePanelEvents.ts";
 
 async function ensureConnected(client: SocketClient): Promise<void> {
