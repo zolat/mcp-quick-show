@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var sessionManager: SessionManager!
     private(set) var rendererRegistry: RendererRegistry!
     private(set) var promoteController: PromoteToWindowController!
+    private(set) var userOpenActions: UserOpenActions!
     private var settingsWindow: SettingsWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -17,6 +18,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sessionManager = SessionManager(renderers: rendererRegistry)
         promoteController = PromoteToWindowController()
         sessionManager.promoteController = promoteController
+        userOpenActions = UserOpenActions()
+        userOpenActions.sessionManager = sessionManager
         installMenuBarItem()
         startControlServer()
         if ProcessInfo.processInfo.environment["QUICKSHOW_AUTO_PANEL"] == "1" {
@@ -948,6 +951,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "QuickShow v0.1", action: nil, keyEquivalent: ""))
+        menu.addItem(.separator())
+
+        let openURL = NSMenuItem(title: "Open URL…", action: #selector(UserOpenActions.openURL(_:)), keyEquivalent: "l")
+        openURL.keyEquivalentModifierMask = [.command, .shift]
+        openURL.target = userOpenActions
+        menu.addItem(openURL)
+
+        let openFile = NSMenuItem(title: "Open File…", action: #selector(UserOpenActions.openFile(_:)), keyEquivalent: "o")
+        openFile.keyEquivalentModifierMask = [.command, .shift]
+        openFile.target = userOpenActions
+        menu.addItem(openFile)
+
         menu.addItem(.separator())
         let prefs = NSMenuItem(title: "Preferences…", action: #selector(openPreferences), keyEquivalent: ",")
         prefs.target = self
