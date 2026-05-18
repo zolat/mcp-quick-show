@@ -15,7 +15,7 @@ import { SocketClient, DEFAULT_SOCKET_PATH } from "../socket.ts";
 import { getOrCreateSessionId } from "../session.ts";
 import { helloHandshake } from "../handshake.ts";
 
-const HELPER = resolve(import.meta.dir, "../../../plugin/skills/chess/chess_helper.py");
+const HELPER = resolve(import.meta.dir, "../../../plugin/skills/fun/chess_helper.py");
 
 function parseArgs(argv: string[]) {
   const [cmd, ...rest] = argv;

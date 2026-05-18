@@ -1,7 +1,4 @@
----
-name: fun-chess
-description: Play a casual chess game with the user in a floating QuickShow HUD panel. The board is rendered via python-chess wrapped in a draggable HTML page; the user drags a piece onto a legal target square and the page emits `{type:"move", from, to}` as a `panel_event`. Claude plays both sides using its own chess knowledge — the bundled `chess_helper.py` is the ground-truth keeper (validates moves, lists legal moves, renders the board) but does not pick moves. Use when the user asks to play chess, wants a drag-driven demo of the QuickShow panel-event loop, or asks for a quick game.
----
+# Chess
 
 A casual chess demo of the QuickShow `panel_event` channel. The user
 plays White by default; Claude plays Black. Moves are submitted by
@@ -47,14 +44,14 @@ moves. The state machine is on the page.
 2. **Bootstrap.** Get the starting FEN:
 
    ```sh
-   plugin/skills/fun-chess/chess_helper.py new
+   ${CLAUDE_PLUGIN_ROOT}/skills/fun/chess_helper.py new
    ```
 
    Store the returned FEN. That's the only state to track.
 3. **Render the board.**
 
    ```sh
-   plugin/skills/fun-chess/chess_helper.py render-html <FEN> --size 600
+   ${CLAUDE_PLUGIN_ROOT}/skills/fun/chess_helper.py render-html <FEN> --size 600
    ```
 
    Pipe into `show_html(name: "chess-board", content: <HTML>, width: 640)`.
@@ -71,7 +68,7 @@ already validated by the page; it WILL be legal in the current FEN.
 1. **Apply the user's move:**
 
    ```sh
-   plugin/skills/fun-chess/chess_helper.py move <FEN> <from><to>
+   ${CLAUDE_PLUGIN_ROOT}/skills/fun/chess_helper.py move <FEN> <from><to>
    ```
 
    Update `FEN` to the helper's returned value.
@@ -107,8 +104,8 @@ You play. The helper exists to validate, not to suggest.
    move (or just from one square):
 
    ```sh
-   plugin/skills/fun-chess/chess_helper.py legal <FEN>
-   plugin/skills/fun-chess/chess_helper.py legal <FEN> --from e4
+   ${CLAUDE_PLUGIN_ROOT}/skills/fun/chess_helper.py legal <FEN>
+   ${CLAUDE_PLUGIN_ROOT}/skills/fun/chess_helper.py legal <FEN> --from e4
    ```
 
    Useful when you want to scan for tactical targets or quickly
@@ -116,7 +113,7 @@ You play. The helper exists to validate, not to suggest.
 3. **Apply your move** via the helper. UCI notation:
 
    ```sh
-   plugin/skills/fun-chess/chess_helper.py move <FEN> <uci>
+   ${CLAUDE_PLUGIN_ROOT}/skills/fun/chess_helper.py move <FEN> <uci>
    ```
 
    - `ok: true` → update `FEN`, continue.
@@ -128,7 +125,7 @@ You play. The helper exists to validate, not to suggest.
 4. **Re-render** with the last-move highlight:
 
    ```sh
-   plugin/skills/fun-chess/chess_helper.py render-html <new-FEN> --size 600 \
+   ${CLAUDE_PLUGIN_ROOT}/skills/fun/chess_helper.py render-html <new-FEN> --size 600 \
      --last-move <your-uci>
    ```
 

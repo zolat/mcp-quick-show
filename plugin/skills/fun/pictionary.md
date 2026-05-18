@@ -1,7 +1,4 @@
----
-name: fun-pictionary
-description: Play pictionary with the user in a floating QuickShow HUD panel — the user draws on the panel's markup overlay, hits Send, and Claude guesses what they drew. Renders a blank canvas via `show_html`, arms `enable_markup_events`, and reads each `markup_sent` event by fetching the flattened PNG with `get_markup`. Use when the user asks to play pictionary, wants a drawing-guessing game, or wants a demo of the QuickShow markup feedback loop in a game-shaped form.
----
+# Pictionary
 
 A drawing-guessing demo of the QuickShow **markup feedback loop**.
 The user draws on the panel's markup overlay. Each time they hit
@@ -10,9 +7,9 @@ it back to guess what they drew. No engine, no clever vision
 pipeline — Claude just looks at the PNG and reasons about it the
 same way it would about any image.
 
-This is the markup-loop cousin of `fun-tic-tac-toe` and `fun-chess`
+This is the markup-loop cousin of `tic-tac-toe.md` and `chess.md`
 (which use `panel_event`). Those games carry structured payloads;
-pictionary carries a *picture*. Pick this skill when the user wants
+pictionary carries a *picture*. Pick this game when the user wants
 to draw something freeform, not click cells.
 
 ## Setup (do this once at the start of a round)

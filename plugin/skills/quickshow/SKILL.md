@@ -69,7 +69,8 @@ Event log lines look like:
 
 For full design-iteration choreography, defer to
 `quickshow:frontend-design` (build a design, mark it up, refine).
-For a smaller worked example, see `quickshow:fun-tic-tac-toe`.
+For a smaller worked example, see `quickshow:fun` (the `tic-tac-toe.md`
+file in that skill).
 
 ## Common-trap reminders
 

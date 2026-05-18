@@ -110,10 +110,13 @@ mcp-quick-show/
 │   ├── bin/                     compiled sidecar binary (gitignored; built by tools/build-plugin.sh)
 │   ├── skills/quickshow/         foundational "how to use QuickShow" skill
 │   ├── skills/frontend-design/   bold-aesthetic design + markup loop
-│   ├── skills/fun-tic-tac-toe/   fun skill (panel_event channel — click → emit → re-render)
-│   ├── skills/fun-chess/         fun skill (panel_event channel — drag → emit → re-render; Claude plays its own moves, helper validates)
-│   ├── skills/fun-click-demo/    fun skill — minimal panel_event demo (one button)
-│   └── skills/fun-pictionary/    fun skill (markup-loop — user draws, Claude guesses)
+│   └── skills/fun/               router skill — one SKILL.md + sibling
+│       │                         instruction files (chess.md, tic-tac-toe.md,
+│       │                         click-demo.md, pictionary.md) so only the
+│       │                         parent description lands in context until
+│       │                         Claude reads the chosen game's file
+│       └── chess_helper.py       python-chess wrapper (board state, legal
+│                                 moves, HTML render) used by fun/chess.md
 ├── QuickShow/                   Swift app
 │   ├── Info.plist               LSUIElement
 │   ├── Resources/
@@ -285,8 +288,9 @@ PNG-with-arrows markup.
   when the user is *not* drawing. Same trade-off the markup loop
   has lived with.
 
-Canonical consumer: `plugin/skills/fun-click-demo` — minimal HTML page,
-one button, one emit, one re-render.
+Canonical consumer: `plugin/skills/fun/click-demo.md` (inside the
+`fun` router skill) — minimal HTML page, one button, one emit, one
+re-render.
 
 ## Logging convention
 

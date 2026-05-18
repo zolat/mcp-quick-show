@@ -25,7 +25,7 @@ function arg(args: string[], flag: string): string | undefined {
 
 function helper(...subArgs: string[]): string {
   const repoRoot = path.resolve(import.meta.dir, "../../..");
-  const script = path.join(repoRoot, "plugin/skills/chess/chess_helper.py");
+  const script = path.join(repoRoot, "plugin/skills/fun/chess_helper.py");
   const r = spawnSync(script, subArgs, { encoding: "utf8" });
   if (r.status !== 0) {
     throw new Error(`chess_helper ${subArgs.join(" ")} failed (${r.status}): ${r.stderr}`);

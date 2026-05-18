@@ -1,7 +1,4 @@
----
-name: fun-tic-tac-toe
-description: Play tic-tac-toe with the user in a floating QuickShow HUD panel. The board is rendered as a `show_html` page with clickable cells; clicking a cell calls `window.quickshow.emit({type:"move", cell: N})`, Claude reads the `panel_event` line off the session's events log, picks a reply, and re-renders the board. Use when the user asks to play tic-tac-toe, wants a click-driven demo of the QuickShow panel-event loop, or asks for a quick game.
----
+# Tic-tac-toe
 
 A click-driven demo of the QuickShow `panel_event` channel.
 The user plays X. Claude plays O. The board lives in a single HUD
