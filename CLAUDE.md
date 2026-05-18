@@ -54,7 +54,7 @@ Sidecar dev commands:
 cd sidecar
 bun install
 bun test                                                  # bun:test suite
-bun run typecheck                                         # tsc --noEmit
+bun run typecheck                                         # tsc --noEmit — partially red: ControlRequest type drift in handshake/event handlers, fix wants a worktree session
 QUICKSHOW_SOCKET_PATH=/tmp/qs.sock bun run src/cli/ping.ts
 ```
 
@@ -149,6 +149,17 @@ Direct push to `main`. No PRs, no feature branches — commit on
 `main`, `git push origin main`. Force-push is not allowed (use
 `git filter-repo` + a fresh push only for one-time history fixes
 agreed with the human).
+
+## Worktrees for substantial work
+
+All substantial work happens in a git worktree, not the main
+checkout. Use `/feature` to spin one up; it isolates the change,
+keeps `main` clean, and lets parallel agent sessions on this repo
+not stomp on each other. Trivial edits (typo, one-line tweak,
+docs-only) can go straight on `main`; anything that involves
+multi-file changes, new code, refactors, or that you'd want to
+verify end-to-end → worktree. Merge back to `main` after the work
+is verified and the user approves.
 
 ## Wire-protocol mirror discipline
 
@@ -292,6 +303,58 @@ Canonical consumer: `plugin/skills/fun/click-demo.md` (inside the
 `fun` router skill) — minimal HTML page, one button, one emit, one
 re-render.
 
+## HUD Space placement
+
+`Settings.hudSpacePolicy` (replaces v0.1's `pinHudsToCurrentSpace`
+bool) is a three-way enum that controls where new HUDs open across
+macOS Spaces. v0.2 default is `.claudeSpace` — panels open on the
+Space hosting the terminal that runs the Claude session, not the
+Space the user is currently looking at.
+
+The placement uses private CGS APIs (`CGSMoveWindowsToManagedSpace`
+et al.), wrapped in `QuickShow/Sources/Space/CGSPrivate.swift` via
+`dlopen` + `dlsym`. Notarization is fine; App Store distribution
+isn't (the project ships via DMG, so this is acceptable). Symbol
+missing on a future macOS → `CGSPrivate.isAvailable` flips false →
+`SpaceResolver` no-ops and the OS picks the Space.
+
+Resolution chain (per session, on **first HUD create only**):
+1. Walk up the process tree from `parent_pid` (sent on `hello`)
+   using `sysctl(KERN_PROC_PID)` to collect ancestor PIDs.
+2. Enumerate `CGWindowListCopyWindowInfo` and pick the first
+   ancestor-owned window with `kCGWindowLayer == 0` (a normal
+   terminal window — `Terminal.app`, iTerm2, Ghostty, WezTerm,
+   Alacritty, etc., no hardcoded names).
+3. `CGSCopySpacesForWindows` → Space id.
+4. Fallback chain: per-session `lastResolvedSpaceID` cache →
+   `CGSGetActiveSpace` → skip placement.
+
+The placement is called **three times** in `ensurePrimaryHud`:
+before `makeKeyAndOrderFront`, immediately after, and again from
+the next main-queue tick. The double-after-call is empirically
+required: AppKit's `makeKeyAndOrderFront` resets the window's
+Space to the active one after we've moved it. The second call
+catches that. Diagnostic NSLog data lives in the v0.2 ship commit
+if you ever need to re-verify the race.
+
+`HUDWindow.collectionBehavior` drops `.fullScreenAuxiliary` for
+`.claudeSpace` — that flag couples a window to whatever Space
+hosts the current fullscreen/Stage Manager presentation and
+fights `CGSMoveWindowsToManagedSpace`. `.userSpace` keeps the
+v0.1 `.fullScreenAuxiliary`; `.allSpaces` keeps the v0.1
+`[.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]`.
+
+Tear-out HUDs are NOT moved — they spawn under the cursor during
+a user-initiated drag, so they're already where the user wants
+them. The placement only applies to the primary HUD's birth.
+
+`registerSession(_:parentPid:)` retains the parent_pid on the
+`SessionState`; it used to be diagnostic-only. Sidecar reconnect
+refreshes it (a `claude --resume` may come from a new terminal).
+
+Test override: `QUICKSHOW_HUD_SPACE_POLICY_OVERRIDE` accepts the
+raw enum string (`userSpace`, `claudeSpace`, `allSpaces`).
+
 ## Logging convention
 
 - Swift: all NSLog lines start with `QuickShow: ` (parallel to
@@ -311,3 +374,18 @@ re-render.
 - The user runs multiple parallel agent sessions. Multi-sidecar
   coordination (`SessionManager`'s session_id → HUD mapping, per-session
   events dir) is the load-bearing piece — don't regress it.
+- SourceKit indexer in this Swift project produces persistent
+  false-positive "Cannot find type X in scope" diagnostics for
+  same-module symbols (especially right after a `project.yml` change
+  or new `.swift` file). Trust `xcodebuild` as the compile oracle;
+  treat in-IDE / SourceKit output as advisory. Re-run
+  `xcodegen generate` if the indexer is wildly stale.
+- For cryptic mid-session MCP errors like "protocol error: data
+  couldn't be read" or `paths[1] ... got undefined`, the running
+  app binary may be older than the source/binary mtime suggests
+  (XPC respawn lag, in-flight rebuild). Probe the live process via
+  `nc -U "$HOME/Library/Application Support/QuickShow/control.sock"`
+  and a hand-rolled `hello` frame to confirm the wire protocol
+  version *the running process* speaks, before assuming it's a
+  sidecar bug. Dump diagnostics to `/tmp/<thing>-hang-<date>/` before
+  `pkill` — live state is gone forever once the process dies.
