@@ -30,6 +30,8 @@ enum ControlHandlers {
                 return try await handleInspect(req: req, delegate: delegate)
             case "set_session_flag":
                 return try encode(try handleSetSessionFlag(req: req, delegate: delegate))
+            case "claim_share":
+                return try encode(try handleClaimShare(req: req, delegate: delegate))
             default:
                 return try encode(ControlProtocolError(
                     id: req.id,
@@ -133,6 +135,23 @@ enum ControlHandlers {
             value: payload.value
         )
         return ControlOk(id: req.id, result: EmptyOk())
+    }
+
+    // MARK: - claim_share
+
+    private static func handleClaimShare(req: ControlRequest, delegate: AppDelegate?) throws -> ControlOk {
+        let payload = try req.decodePayload(ClaimShareRequest.self)
+        guard let manager = delegate?.sessionManager else {
+            throw ControlError.protocolError("session manager unavailable")
+        }
+        let claimed = try manager.claimShare(
+            shareID: payload.shareId,
+            targetSessionID: payload.session
+        )
+        return ControlOk(id: req.id, result: ClaimShareResult(
+            panelName: claimed.panelName,
+            contentType: claimed.contentType
+        ))
     }
 
     // MARK: - inspect
