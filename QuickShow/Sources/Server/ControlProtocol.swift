@@ -252,6 +252,50 @@ struct SetSessionFlagRequest: Decodable {
     let value: SessionFlagValue
 }
 
+/// `kind: "claim_share"` — handed off from the sidecar's `get_share`
+/// MCP tool. The user opened a HUD from the menu bar, optionally
+/// marked it up, hit Send → the app wrote a flattened PNG + JSON
+/// sidecar to `MarkupPaths.sharesBaseDir` and put a
+/// `[quickshow-share:<share_id>]` token on the clipboard. The user
+/// pastes the token into Claude; Claude calls `get_share(<id>)`; the
+/// sidecar forwards here with `session = <claimer_session_id>`.
+///
+/// Side effects on the app:
+///   1. The HUDInstance backing the share migrates from the
+///      reserved "user-windows" session into the claimer session.
+///   2. The panel is renamed to `share-<share_id>` so Claude can
+///      address it with subsequent `show_*` calls.
+///   3. The share PNG is moved into the claimer session's artifacts
+///      directory at `<share_id>.png` so the sidecar's `get_share`
+///      can read it through the same path discipline as
+///      `get_markup` (and a second `get_share` of the same id from a
+///      different session gets a clean "already consumed" answer).
+struct ClaimShareRequest: Decodable {
+    let id: String?
+    let kind: String
+    /// Target session — the Claude session calling `get_share`.
+    let session: String
+    let shareId: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, session
+        case shareId = "share_id"
+    }
+}
+
+/// Returned in `ControlOk.result` on a successful claim. The panel
+/// name lets Claude continue to address the now-migrated HUD with
+/// `show_url` / `show_image` / `show_html` / `show_markdown`.
+struct ClaimShareResult: Encodable {
+    let panelName: String
+    let contentType: String
+
+    enum CodingKeys: String, CodingKey {
+        case contentType = "content_type"
+        case panelName = "panel_name"
+    }
+}
+
 /// Loose-typed value column for `set_session_flag`. Decoded into the
 /// app's `[String: AnyHashable]` flag dictionary.
 enum SessionFlagValue: Decodable, Hashable {

@@ -168,7 +168,7 @@ is verified and the user approves.
 commit.** Borrowed from PipAnything's CLAUDE.md.
 
 Current verbs (sidecar → app): `hello`, `ping`, `upsert`, `close`,
-`list`, `inspect`, `set_session_flag`. Responses: `ok`,
+`list`, `inspect`, `set_session_flag`, `claim_share`. Responses: `ok`,
 `render_error`, `protocol_error`.
 
 `set_session_flag` is generic over its `key`; adding a new flag name

@@ -98,6 +98,27 @@ export type SetSessionFlagRequest = {
   value: boolean | string | number | null;
 };
 
+/// `claim_share` — handoff from the sidecar's `get_share` tool. The
+/// user opened a HUD from the menu bar, optionally marked it up, hit
+/// Send → the app wrote a flattened PNG + JSON sidecar to
+/// `<sharesBaseDir>` and put `[quickshow-share:<share_id>]` on the
+/// clipboard. The user pastes that token into Claude; Claude calls
+/// `get_share(<id>)`; the sidecar forwards here with `session` set to
+/// the claimer's granted session id.
+///
+/// The app migrates the HUDInstance out of the reserved "user-windows"
+/// session into `session`, renames the panel to `share-<share_id>`,
+/// and moves the share PNG into `session`'s artifacts dir so the
+/// sidecar's `get_share` reads it through the same per-session
+/// discipline as `get_markup`. First claim wins — a second claim from
+/// a different session returns a protocol_error.
+export type ClaimShareRequest = {
+  id?: string;
+  kind: "claim_share";
+  session: string;
+  share_id: string;
+};
+
 export type ControlRequest =
   | HelloRequest
   | PingRequest
@@ -105,7 +126,8 @@ export type ControlRequest =
   | CloseRequest
   | ListRequest
   | InspectRequest
-  | SetSessionFlagRequest;
+  | SetSessionFlagRequest
+  | ClaimShareRequest;
 
 // ---------- Responses (app → sidecar) ----------
 
@@ -154,3 +176,12 @@ export type PanelInfo = {
   height: number;
 };
 export type ListResult = PanelInfo[];
+
+/// Result payload returned by a successful `claim_share`. Sidecar
+/// forwards `panel_name` back to the model so it can keep updating
+/// the migrated HUD with `show_url` / `show_image` / `show_html` /
+/// `show_markdown` etc.
+export type ClaimShareResult = {
+  panel_name: string;
+  content_type: string;
+};

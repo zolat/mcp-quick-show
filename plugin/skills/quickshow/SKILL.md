@@ -1,6 +1,6 @@
 ---
 name: quickshow
-description: Render visual output (markdown reports, diagrams, SVGs, images, full HTML designs, live URLs) into a floating QuickShow HUD panel the user can see — and get a screenshot back so you can verify your own work. Use whenever the conversation involves something the user should look at rather than read in the transcript — architecture diagrams, code walkthroughs, plans and roadmaps, comparisons of options, long-form reports, mockups, generated artwork, screenshots of existing files, **online docs you want them to read**, or **the running site you just changed** during end-to-end verification. Same `name` updates the panel in place so iteration is cheap.
+description: Render visual output (markdown reports, diagrams, SVGs, images, full HTML designs, live URLs) into a floating QuickShow HUD panel the user can see — and get a screenshot back so you can verify your own work. Use whenever the conversation involves something the user should look at rather than read in the transcript — architecture diagrams, code walkthroughs, plans and roadmaps, comparisons of options, long-form reports, mockups, generated artwork, screenshots of existing files, **online docs you want them to read**, or **the running site you just changed** during end-to-end verification. Same `name` updates the panel in place so iteration is cheap. **Also handles user-initiated shares**: when the user pastes `[quickshow-share:<id>]` they've opened a HUD themselves and want you to receive it — call `get_share(<id>)`.
 ---
 
 QuickShow turns visual artifacts from "described in chat" into "shown
@@ -139,6 +139,34 @@ For full design-iteration choreography, defer to
 `quickshow:frontend-design` (build a design, mark it up, refine).
 For a smaller worked example, see `quickshow:fun` (the `tic-tac-toe.md`
 file in that skill).
+
+## User-initiated shares (inverse of the markup loop)
+
+The user can open a HUD from the menu bar themselves — "Open URL…"
+or "Open File…" (image / markdown / SVG / HTML) — annotate it if
+they want, and hit Send. They get a `[quickshow-share:<id>]` token
+copied to their clipboard, paste it into your conversation, and
+expect you to fetch it.
+
+**When you see `[quickshow-share:<id>]` in a user message, call
+`get_share(<id>)`.** The returned image is user-supplied input —
+treat it the same way you would an image they pasted directly.
+
+Side effect worth knowing: the on-screen HUD migrates into *your*
+session. The `get_share` response text tells you the panel name
+the migrated HUD lives at (something like `user-url-...` or
+`user-file-...`). From that point you can:
+
+- Update its content with `show_url` / `show_image` / `show_html` /
+  `show_markdown` using `name=<panel-name>` — same in-place update
+  discipline as any other panel.
+- Arm `enable_markup_events()` and let the user keep annotating —
+  subsequent Send presses go through the normal `markup_sent`
+  channel, fetched with `get_markup(<artifact-id>)`.
+
+First-claim-wins: a second `get_share(<same-id>)` from a different
+session returns "not available." A re-fetch from the same session
+returns "already consumed in this session."
 
 ## Common-trap reminders
 

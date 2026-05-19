@@ -424,6 +424,15 @@ final class HUDWindow: NSWindow {
         titleBar.setArmed(armed)
     }
 
+    /// Forwarder for `TitleBarOverlay.setAlwaysShowSend(_:)`. Called
+    /// by SessionManager on user-initiated HUDs (created via
+    /// `userUpsert`) so the idle bar exposes a Send pill from birth.
+    /// Agent-panel HUDs leave this off — their Send remains gated on
+    /// `armed && drawing`.
+    func setAlwaysShowSend(_ on: Bool) {
+        titleBar.setAlwaysShowSend(on)
+    }
+
     /// Bind the title bar to its owning session id so its
     /// flag-change notification observer can filter to "our" session.
     func setOwningSessionId(_ id: String) {

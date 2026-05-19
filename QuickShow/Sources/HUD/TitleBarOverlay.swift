@@ -85,6 +85,12 @@ final class TitleBarOverlay: NSView {
         "delete.left", weight: .medium, ax: "Clear markup strokes")
     private let sendButton = TitleBarOverlay.symbolButton(
         "paperplane.fill", weight: .bold, ax: "Send markup to agent")
+    /// Sibling of `sendButton` parked in the idle bar's right cluster.
+    /// Hidden by default — revealed for user-initiated HUDs where
+    /// "share this with Claude" is the primary action and we don't want
+    /// to force the user through draw mode to access it.
+    private let idleSendButton = TitleBarOverlay.symbolButton(
+        "paperplane.fill", weight: .bold, ax: "Share with Claude")
     private let badgeView = NSTextField(labelWithString: "")
 
     /// Containers for the two bar layouts. Both are pinned to the bar's
@@ -144,6 +150,12 @@ final class TitleBarOverlay: NSView {
     /// send buttons appear when this is true; the clear button needs
     /// `armed && hasStrokes` (see `refreshClearButtonVisibility`).
     private var armed: Bool = false
+    /// User-initiated HUDs (born in `SessionManager.userWindowsSessionID`)
+    /// expose Send in the idle bar so the user doesn't have to enter
+    /// draw mode just to share. Agent-panel HUDs leave this at the
+    /// default `false` — their Send remains gated on
+    /// `armed && drawing` exactly as before.
+    private var alwaysShowSend: Bool = false
     /// Whether the active panel has any strokes drawn. Drives the
     /// clear button's visibility so it only shows when there's
     /// something to clear.
@@ -285,6 +297,30 @@ final class TitleBarOverlay: NSView {
         sendButton.target = self
         sendButton.action = #selector(handleSend)
 
+        // Idle-mode Send pill — same look + same handler as the draw-
+        // mode Send, but parked in the idle bar's right cluster so user-
+        // initiated HUDs can ship without forcing draw mode first.
+        idleSendButton.wantsLayer = true
+        idleSendButton.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        idleSendButton.layer?.cornerRadius = 11
+        idleSendButton.imagePosition = .imageLeading
+        idleSendButton.imageHugsTitle = true
+        idleSendButton.image = NSImage(
+            systemSymbolName: "paperplane.fill",
+            accessibilityDescription: "Share with Claude"
+        )?.withSymbolConfiguration(sendCfg)
+        idleSendButton.contentTintColor = .white
+        idleSendButton.attributedTitle = NSAttributedString(
+            string: "Send",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: NSColor.white,
+            ]
+        )
+        idleSendButton.target = self
+        idleSendButton.action = #selector(handleSend)
+        idleSendButton.toolTip = "Share with Claude (copies token to clipboard)"
+
         // --- Layout: two parallel stacks (idle + draw) pinned to the
         // same edges of the bar. `setMode(_:)` flips `isHidden` on each.
         //
@@ -294,11 +330,12 @@ final class TitleBarOverlay: NSView {
         // 10pt group gutter on the outer level, 2pt intra-group spacing
         // for clusters that read as one unit.
 
-        let idleRightGroup = NSStackView(views: [overflowButton, closeButton])
+        let idleRightGroup = NSStackView(views: [idleSendButton, overflowButton, closeButton])
         idleRightGroup.orientation = .horizontal
         idleRightGroup.alignment = .centerY
-        idleRightGroup.spacing = 2
+        idleRightGroup.spacing = 6
         idleRightGroup.detachesHiddenViews = false
+        idleRightGroup.setCustomSpacing(8, after: idleSendButton)
 
         // Flex spacer between the markup toggle and the right cluster.
         // NSStackView's default `.fill` distribution doesn't actually pin
@@ -330,6 +367,7 @@ final class TitleBarOverlay: NSView {
         markupButton.isHidden = true       // revealed by setArmed
         overflowButton.isHidden = true     // empty until a third item exists
         clearMarkupButton.isHidden = true  // revealed by setHasStrokes
+        idleSendButton.isHidden = true     // revealed by setAlwaysShowSend
 
         let drawToolsGroup = NSStackView(views: [
             colorPickerButton, weightPickerButton, eraserButton,
@@ -399,6 +437,8 @@ final class TitleBarOverlay: NSView {
             clearMarkupButton.heightAnchor.constraint(equalToConstant: buttonSize),
             sendButton.widthAnchor.constraint(equalToConstant: 58),
             sendButton.heightAnchor.constraint(equalToConstant: buttonSize),
+            idleSendButton.widthAnchor.constraint(equalToConstant: 58),
+            idleSendButton.heightAnchor.constraint(equalToConstant: buttonSize),
         ])
 
         // Pickers — content view controllers are reused across opens.
@@ -481,6 +521,16 @@ final class TitleBarOverlay: NSView {
     func setHasStrokes(_ has: Bool) {
         hasStrokes = has
         refreshStrokeDependentButtons()
+    }
+
+    /// Show or hide the idle-mode Send pill. User-initiated HUDs
+    /// (born under `SessionManager.userWindowsSessionID`) call this
+    /// with `true` so the user can ship without forcing draw mode;
+    /// agent-panel HUDs leave it `false`. Independent of `armed` and
+    /// `setMode` — those still gate the draw-bar Send + markup pencil.
+    func setAlwaysShowSend(_ on: Bool) {
+        alwaysShowSend = on
+        idleSendButton.isHidden = !on
     }
 
     /// Centralized gate for buttons whose meaning depends on
