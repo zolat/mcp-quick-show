@@ -33,7 +33,11 @@ final class UserOpenActions: NSObject {
         alert.addButton(withTitle: "Open")
         alert.addButton(withTitle: "Cancel")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 22))
-        field.placeholderString = "https://example.com"
+        // Generic shape hint rather than a concrete URL — a literal
+        // "https://example.com" placeholder reads as if it were
+        // entered text and confuses people about whether they need to
+        // clear it before typing their own URL.
+        field.placeholderString = "https:// or http:// URL"
         alert.accessoryView = field
         // Focus the field after the alert is on-screen so the user can
         // paste/type immediately.
