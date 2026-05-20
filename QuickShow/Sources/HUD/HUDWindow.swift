@@ -23,7 +23,7 @@ final class HUDWindow: NSWindow {
     /// so live HUDs aren't affected by mid-session pref changes.
     private let maxInitialSize: NSSize
 
-    private let contentHost = NSView()
+    private let contentHost = HoverTrackingView()
     private let titleBar = TitleBarOverlay()
     private let tabStrip = TabStripView()
     private let descriptionBanner = DescriptionBanner()
@@ -232,6 +232,16 @@ final class HUDWindow: NSWindow {
             alpha: 1.0
         ).cgColor
         contentHost.translatesAutoresizingMaskIntoConstraints = false
+        // Cursor-over-content drives the description banner's fade. Same
+        // idiom the tab strip uses; banner is fully visible when the
+        // user is looking at content, dimmed when their attention is
+        // elsewhere.
+        contentHost.onCursorEnter = { [weak self] in
+            self?.descriptionBanner.setRevealed(true)
+        }
+        contentHost.onCursorExit = { [weak self] in
+            self?.descriptionBanner.setRevealed(false)
+        }
         root.addSubview(contentHost)
         NSLayoutConstraint.activate([
             contentHost.topAnchor.constraint(equalTo: root.topAnchor, constant: TitleBarOverlay.height),
@@ -532,5 +542,42 @@ final class HUDWindow: NSWindow {
         let x = visible.maxX - defaultSize.width - 16 - offset
         let y = visible.maxY - defaultSize.height - 16 - offset
         return NSPoint(x: x, y: y)
+    }
+}
+
+/// NSView with a self-maintaining `NSTrackingArea` over its visible
+/// bounds, firing `onCursorEnter` / `onCursorExit` callbacks. Used as
+/// the HUD's `contentHost` so the description banner can auto-fade
+/// based on whether the user is looking at content. Cleaner than
+/// embedding the tracking-area lifecycle in `HUDWindow` directly,
+/// since AppKit routes mouse-tracking events to the view that owns
+/// them, not to the host window.
+final class HoverTrackingView: NSView {
+    var onCursorEnter: (() -> Void)?
+    var onCursorExit: (() -> Void)?
+
+    private var trackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea {
+            removeTrackingArea(existing)
+        }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onCursorEnter?()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onCursorExit?()
     }
 }

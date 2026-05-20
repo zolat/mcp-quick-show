@@ -167,32 +167,19 @@ final class TitleBarOverlay: NSView {
     /// with erase mode).
     private var erasing: Bool = false
 
-    /// Arthur "elevated" surface — sits one step above the contentHost
-    /// background (#1c1c1c). Hex matches the style guide's `elevated`
-    /// token; full opacity for now since the top-bar rework is roadmap.
-    private static let arthurElevated = NSColor(
-        red:  42/255.0, green: 38/255.0, blue: 32/255.0, alpha: 1.0
-    )
-    /// Arthur `text-muted` — soft sage-gray for icons + the panel name.
-    private static let arthurTextMuted = NSColor(
-        red: 168/255.0, green: 169/255.0, blue: 158/255.0, alpha: 1.0
-    )
-    /// Default stroke color shown by the color picker. Matches
-    /// `markup-canvas.js`'s `DEFAULT_COLOR`. Lives here as a starting
-    /// indicator until the picker selection becomes load-bearing.
-    private static let defaultStrokeRed = NSColor(
-        red: 216/255.0, green: 57/255.0, blue: 44/255.0, alpha: 1.0
-    )
+    // Arthur palette tokens (elevated surface + muted text + default
+    // stroke red) live in `ArthurPalette.swift` so the description
+    // banner and any future chrome views can share them.
 
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: 400, height: Self.height))
         wantsLayer = true
-        layer?.backgroundColor = Self.arthurElevated.cgColor
+        layer?.backgroundColor = ArthurPalette.elevated.cgColor
         layer?.cornerRadius = 6
 
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        titleLabel.textColor = Self.arthurTextMuted
+        titleLabel.textColor = ArthurPalette.textMuted
         titleLabel.alignment = .left
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -205,12 +192,12 @@ final class TitleBarOverlay: NSView {
 
         // --- Per-button config (target/action, tint, tooltip overrides).
 
-        snapshotButton.contentTintColor = Self.arthurTextMuted
+        snapshotButton.contentTintColor = ArthurPalette.textMuted
         snapshotButton.target = self
         snapshotButton.action = #selector(handleSnapshot)
         snapshotButton.toolTip = "Save snapshot to ~/Downloads"
 
-        markupButton.contentTintColor = Self.arthurTextMuted
+        markupButton.contentTintColor = ArthurPalette.textMuted
         markupButton.target = self
         markupButton.action = #selector(handleMarkup)
         markupButton.toolTip = "Toggle markup draw mode"
@@ -222,24 +209,24 @@ final class TitleBarOverlay: NSView {
         // back later. Setting `detachesHiddenViews = false` afterwards
         // doesn't re-attach. So we hide AFTER the flag is in place.
 
-        overflowButton.contentTintColor = Self.arthurTextMuted
+        overflowButton.contentTintColor = ArthurPalette.textMuted
         overflowButton.target = self
         overflowButton.action = #selector(handleOverflow)
         // Empty for now — once a third top-bar item earns its keep
         // (per-HUD opacity, pin-to-Space toggle), this hosts the menu.
 
-        closeButton.contentTintColor = Self.arthurTextMuted
+        closeButton.contentTintColor = ArthurPalette.textMuted
         closeButton.target = self
         closeButton.action = #selector(handleClose)
 
-        exitDrawButton.contentTintColor = Self.arthurTextMuted
+        exitDrawButton.contentTintColor = ArthurPalette.textMuted
         exitDrawButton.target = self
         exitDrawButton.action = #selector(handleMarkup)  // same toggle path
 
         // Default color = the existing stroke red `#d8392c`. Tint the
         // `circle.fill` symbol directly so the button reads as a colored
         // dot. Step 4 swaps this for a real `NSPopover` selection.
-        colorPickerButton.contentTintColor = Self.defaultStrokeRed
+        colorPickerButton.contentTintColor = ArthurPalette.defaultStrokeRed
         colorPickerButton.target = self
         colorPickerButton.action = #selector(handleColorPicker)
 
@@ -247,24 +234,24 @@ final class TitleBarOverlay: NSView {
         // SF Symbol. Bold weight gives a medium-thickness line — step 4
         // will pull a real popover and switch the symbol weight to track
         // the user's selection.
-        weightPickerButton.contentTintColor = Self.arthurTextMuted
+        weightPickerButton.contentTintColor = ArthurPalette.textMuted
         weightPickerButton.target = self
         weightPickerButton.action = #selector(handleWeightPicker)
 
         // Eraser button: layer-backed so we can paint a faint background
         // when active (the visual "you're in erase mode" hint). Toggles
         // `erasing` state and fires `onToggleEraser`.
-        eraserButton.contentTintColor = Self.arthurTextMuted
+        eraserButton.contentTintColor = ArthurPalette.textMuted
         eraserButton.target = self
         eraserButton.action = #selector(handleEraser)
         eraserButton.wantsLayer = true
         eraserButton.layer?.cornerRadius = 5
 
-        undoButton.contentTintColor = Self.arthurTextMuted
+        undoButton.contentTintColor = ArthurPalette.textMuted
         undoButton.target = self
         undoButton.action = #selector(handleUndo)
 
-        clearMarkupButton.contentTintColor = Self.arthurTextMuted
+        clearMarkupButton.contentTintColor = ArthurPalette.textMuted
         clearMarkupButton.target = self
         clearMarkupButton.action = #selector(handleClearMarkup)
         // `isHidden = true` deferred until after the stack is set up
@@ -542,8 +529,8 @@ final class TitleBarOverlay: NSView {
         clearMarkupButton.isHidden = !hasStrokes
         undoButton.isEnabled = hasStrokes
         undoButton.contentTintColor = hasStrokes
-            ? Self.arthurTextMuted
-            : Self.arthurTextMuted.withAlphaComponent(0.35)
+            ? ArthurPalette.textMuted
+            : ArthurPalette.textMuted.withAlphaComponent(0.35)
     }
 
     /// Reflect the host HUD's draw-mode state. The bar swaps its
@@ -676,7 +663,7 @@ final class TitleBarOverlay: NSView {
             : NSColor.clear.cgColor
         eraserButton.contentTintColor = on
             ? .controlAccentColor
-            : Self.arthurTextMuted
+            : ArthurPalette.textMuted
     }
 
     /// Toggle a popover anchored below its trigger button. Closing on
