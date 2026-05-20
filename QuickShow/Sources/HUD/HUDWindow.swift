@@ -563,9 +563,15 @@ final class HoverTrackingView: NSView {
         if let existing = trackingArea {
             removeTrackingArea(existing)
         }
+        // `.activeAlways`: the HUD is a `.floating` borderless window
+        // that often isn't key (the user's terminal usually is). With
+        // `.activeInKeyWindow` the enter/exit events wouldn't fire
+        // until the user clicked the HUD. Always-active matches how
+        // people actually use floating panels — hover-anywhere reveals,
+        // hover-away dims, regardless of which window has focus.
         let area = NSTrackingArea(
             rect: .zero,
-            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
