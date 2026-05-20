@@ -172,8 +172,19 @@ final class UserOpenActions: NSObject {
         // -U  show the ⌘⇧5-style floating toolbar
         // -x  silence the shutter sound
         proc.arguments = ["-i", "-U", "-x", tmpPath]
+
+        // Pipe stderr so a TCC denial or other failure surfaces in our
+        // logs instead of vanishing — silent screencapture failures are
+        // the worst kind to debug after the fact.
+        let errPipe = Pipe()
+        proc.standardError = errPipe
         proc.terminationHandler = { [weak self] terminated in
             let status = terminated.terminationStatus
+            let errBytes = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
+            let errText = String(data: errBytes, encoding: .utf8) ?? ""
+            if status != 0 || !errText.isEmpty {
+                NSLog("QuickShow: screencapture exited status=\(status) stderr=\(errText.isEmpty ? "<empty>" : errText)")
+            }
             DispatchQueue.main.async {
                 self?.handleCaptureResult(
                     status: status,
@@ -185,6 +196,7 @@ final class UserOpenActions: NSObject {
         do {
             try proc.run()
         } catch {
+            NSLog("QuickShow: captureScreen Process.run() threw: \(error)")
             presentError("Couldn't start screen capture",
                          String(describing: error))
         }
@@ -221,6 +233,7 @@ final class UserOpenActions: NSObject {
                     autoEnterDrawMode: true
                 )
             } catch {
+                NSLog("QuickShow: captureScreen userUpsert failed: \(error)")
                 self.presentError("Couldn't open capture",
                                   String(describing: error))
             }
