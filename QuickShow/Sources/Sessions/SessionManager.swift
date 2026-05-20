@@ -197,12 +197,20 @@ final class SessionManager: NSObject {
     /// title bar's idle layout exposes a Send button without forcing
     /// draw mode — URL/image panels stay interactive. Draw mode is
     /// still one click away via the markup pencil.
+    ///
+    /// `autoEnterDrawMode` flips the HUD into draw mode immediately
+    /// after the first render. Used by the Sketch Pad flow — the user
+    /// opened a blank surface explicitly to draw on, so making them
+    /// click the pencil first would be friction. URL / file callers
+    /// leave this at `false` so their content stays interactive
+    /// (scroll a page, click a link) by default.
     func userUpsert(name: String,
                     contentType: String,
                     form: String,
                     body: String,
                     width: Double? = nil,
-                    displayName: String? = nil) async throws -> (RenderResult, Data) {
+                    displayName: String? = nil,
+                    autoEnterDrawMode: Bool = false) async throws -> (RenderResult, Data) {
         let sessionId = Self.userWindowsSessionID
         setFlag(sessionId: sessionId, key: "markup_events_armed", value: .bool(true))
         let result = try await upsert(
@@ -217,6 +225,9 @@ final class SessionManager: NSObject {
         if let session = sessions[sessionId],
            let (hud, _) = locate(in: session, name: name) {
             hud.window.setAlwaysShowSend(true)
+            if autoEnterDrawMode && !hud.window.isInDrawMode {
+                hud.window.toggleDrawMode()
+            }
         }
         return result
     }

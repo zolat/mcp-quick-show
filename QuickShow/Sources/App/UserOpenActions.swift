@@ -2,7 +2,8 @@ import Cocoa
 import UniformTypeIdentifiers
 
 /// Menu-bar action handlers for user-initiated HUDs. Owns the
-/// "Open URL…" prompt and the "Open File…" picker; both feed into
+/// "Open URL…" prompt, the "Open File…" picker, and the
+/// "New Sketch Pad" submenu; all three feed into
 /// `SessionManager.userUpsert(...)`, which routes the content into
 /// the reserved `userWindowsSessionID` session.
 ///
@@ -21,6 +22,12 @@ final class UserOpenActions: NSObject {
     /// content size. Image files are passed by path and the renderer
     /// reads them through `SizeCap` directly.
     private static let inlineFileCapBytes = 10 * 1024 * 1024  // 10 MB
+
+    /// Sketch-pad dimension bounds — match the `show_html` `width`
+    /// cap (`sidecar/src/handlers/html.ts`) so a user-spawned canvas
+    /// can never demand more pixel real-estate than an agent could.
+    private static let sketchPadMinDim = 100
+    private static let sketchPadMaxDim = 4096
 
     /// Open a URL the user types into a modal prompt. Validates http(s);
     /// rejects javascript:, data:, file: at the same layer the sidecar's
@@ -245,6 +252,122 @@ final class UserOpenActions: NSObject {
             return nil
         }
         return url
+    }
+
+    // MARK: - Sketch Pad
+
+    @objc func openSketchPadSquare(_ sender: Any?) {
+        openSketchPad(width: 1024, height: 1024)
+    }
+
+    @objc func openSketchPadLandscape(_ sender: Any?) {
+        openSketchPad(width: 1280, height: 720)
+    }
+
+    @objc func openSketchPadPortrait(_ sender: Any?) {
+        openSketchPad(width: 768, height: 1024)
+    }
+
+    /// Custom-size sketch pad — modal with two number fields. Cmd+Return
+    /// (or the default "Create" button) submits; out-of-range inputs
+    /// trip an inline error and re-prompt.
+    @objc func openSketchPadCustom(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "New Sketch Pad — Custom size"
+        alert.informativeText = "Width and height in pixels (\(Self.sketchPadMinDim)–\(Self.sketchPadMaxDim))."
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .firstBaseline
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let widthLabel = NSTextField(labelWithString: "Width:")
+        let widthField = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 22))
+        widthField.stringValue = "1024"
+        let heightLabel = NSTextField(labelWithString: "Height:")
+        let heightField = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 22))
+        heightField.stringValue = "768"
+
+        row.addArrangedSubview(widthLabel)
+        row.addArrangedSubview(widthField)
+        row.addArrangedSubview(heightLabel)
+        row.addArrangedSubview(heightField)
+        row.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        alert.accessoryView = row
+
+        // Focus width so the user can immediately type / tab.
+        DispatchQueue.main.async {
+            alert.window.makeFirstResponder(widthField)
+        }
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard let w = Int(widthField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let h = Int(heightField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            presentError("Invalid size",
+                         "Enter whole numbers for width and height.")
+            return
+        }
+        guard (Self.sketchPadMinDim...Self.sketchPadMaxDim).contains(w),
+              (Self.sketchPadMinDim...Self.sketchPadMaxDim).contains(h) else {
+            presentError("Out of range",
+                         "Width and height must each be between \(Self.sketchPadMinDim) and \(Self.sketchPadMaxDim) pixels.")
+            return
+        }
+        openSketchPad(width: w, height: h)
+    }
+
+    /// Shared helper: build a minimal blank HTML doc sized to the
+    /// chosen dimensions and route it through `userUpsert` with
+    /// `autoEnterDrawMode: true`. The body's width/height in CSS px
+    /// plus the matching `width` hint on `userUpsert` gives the
+    /// HTMLRenderer a viewport that matches the canvas, so the
+    /// in-DOM markup canvas overlays cleanly at 1:1 resolution.
+    private func openSketchPad(width: Int, height: Int) {
+        guard let manager = sessionManager else { return }
+        let panelName = "user-sketch-\(ShareID.mint())"
+        let html = blankSketchHTML(width: width, height: height)
+        Task { @MainActor in
+            do {
+                _ = try await manager.userUpsert(
+                    name: panelName,
+                    contentType: "html",
+                    form: "inline",
+                    body: html,
+                    width: Double(width),
+                    displayName: nil,
+                    autoEnterDrawMode: true
+                )
+            } catch {
+                self.presentError("Couldn't open Sketch Pad",
+                                  String(describing: error))
+            }
+        }
+    }
+
+    /// Minimal full HTML document that paints a white rectangle at the
+    /// requested pixel dimensions. The body's explicit width + height
+    /// give the WebView a concrete document size; the markup canvas
+    /// injected at `documentEnd` overlays the same rect at 1:1.
+    private func blankSketchHTML(width: Int, height: Int) -> String {
+        """
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <style>
+            html, body { margin: 0; padding: 0; }
+            body {
+              width: \(width)px;
+              height: \(height)px;
+              background: #ffffff;
+            }
+          </style>
+        </head>
+        <body></body>
+        </html>
+        """
     }
 
     // MARK: - UI

@@ -963,6 +963,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openFile.target = userOpenActions
         menu.addItem(openFile)
 
+        let sketchPad = NSMenuItem(title: "New Sketch Pad", action: nil, keyEquivalent: "")
+        let sketchSubmenu = NSMenu(title: "New Sketch Pad")
+        let square = NSMenuItem(title: "Square (1024 × 1024)",
+                                action: #selector(UserOpenActions.openSketchPadSquare(_:)),
+                                keyEquivalent: "")
+        square.target = userOpenActions
+        sketchSubmenu.addItem(square)
+        let landscape = NSMenuItem(title: "Landscape (1280 × 720)",
+                                   action: #selector(UserOpenActions.openSketchPadLandscape(_:)),
+                                   keyEquivalent: "")
+        landscape.target = userOpenActions
+        sketchSubmenu.addItem(landscape)
+        let portrait = NSMenuItem(title: "Portrait (768 × 1024)",
+                                  action: #selector(UserOpenActions.openSketchPadPortrait(_:)),
+                                  keyEquivalent: "")
+        portrait.target = userOpenActions
+        sketchSubmenu.addItem(portrait)
+        sketchSubmenu.addItem(.separator())
+        let custom = NSMenuItem(title: "Custom…",
+                                action: #selector(UserOpenActions.openSketchPadCustom(_:)),
+                                keyEquivalent: "")
+        custom.target = userOpenActions
+        sketchSubmenu.addItem(custom)
+        sketchPad.submenu = sketchSubmenu
+        menu.addItem(sketchPad)
+
         menu.addItem(.separator())
         let prefs = NSMenuItem(title: "Preferences…", action: #selector(openPreferences), keyEquivalent: ",")
         prefs.target = self
