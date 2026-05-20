@@ -83,46 +83,101 @@ reaching the back rank, `chess_helper.py move` defaults to **queen**
 promotion. If the user has specified a different piece in chat
 ("promote to knight"), extend the UCI before calling: `e7e8n` etc.
 
-## Claude's turn — pick a move yourself
+## Claude's turn — delegate to a fast Sonnet subagent
 
-You play. The helper exists to validate, not to suggest.
+**Don't pick the move yourself.** The main session (often Opus with
+heavy thinking) is here to orchestrate the game — rendering, panel
+events, conversation. Picking a casual-chess move is a *cheap*
+reasoning step; push it onto a Sonnet subagent that decides in one
+pass. The user gets snappy moves; their main model stays on the
+overall conversation.
 
-1. **Think about the position.** You have the FEN, the user's last
-   move, and the rendered board. Apply normal chess judgment:
-   - Opening: develop pieces, control the centre, get the king
-     safe. Don't move the same piece twice in the opening unless
-     there's a reason. Connect the rooks.
-   - Middlegame: look for tactics (forks, pins, skewers, double
-     attacks, hanging pieces, weak king cover). Improve worst
-     piece. Trade when ahead, complicate when behind.
-   - Endgame: activate the king, push passed pawns, look for
-     opposition + simple mating patterns.
-   - **Don't shuffle.** If you can't find a strong move, play a
-     sensible developing or improving move — don't move a rook
-     out and back. Casual chess, not engine chess.
-2. **If you want to enumerate**, ask the helper for every legal
-   move (or just from one square):
+(Escape hatch: if the user explicitly asks you to think hard on a
+specific position — "really think about this one", "what's your
+best move here?", "look for a tactic" — skip the subagent for that
+turn and pick the move yourself. Then resume delegation on the
+next turn.)
+
+### Steps
+
+1. **Enumerate legal moves** on the orchestrator side:
 
    ```sh
    ${CLAUDE_PLUGIN_ROOT}/skills/fun/chess_helper.py legal <FEN>
-   ${CLAUDE_PLUGIN_ROOT}/skills/fun/chess_helper.py legal <FEN> --from e4
    ```
 
-   Useful when you want to scan for tactical targets or quickly
-   confirm whether a move is available.
-3. **Apply your move** via the helper. UCI notation:
+   You need the UCI list — extract every `uci` field from the
+   returned JSON moves array. Keep this list; you'll pass it to
+   the subagent and validate the reply against it.
+2. **Spawn the move-picker subagent.** Use the `Agent` tool with:
+   - `subagent_type: "general-purpose"`
+   - `model: "sonnet"`
+   - `description: "Pick chess move"`
+   - `prompt:` the template below, filled in with the current
+     position and the legal-moves list from step 1.
+
+   Prompt template (substitute the four `<…>` placeholders):
+
+   ```
+   You are picking a move in a casual chess game for the user.
+   Don't deliberate or look for the engine-perfect move — pick a
+   sensible move in one pass, the way a club-level human would in
+   10–20 seconds.
+
+   Position
+   - You play: <color>          (white or black)
+   - Current FEN: <fen>
+   - Opponent's last move: <san> (<uci>)
+     (or "first move of the game — you are opening as White")
+   - Legal moves (UCI): <comma-separated UCI list from step 1>
+
+   Apply normal chess judgment:
+   - Opening: develop pieces, control the centre, get the king
+     safe. Don't move the same piece twice without reason. Connect
+     the rooks.
+   - Middlegame: look for tactics (forks, pins, skewers, double
+     attacks, hanging pieces, weak king cover). Improve your worst
+     piece. Trade when ahead, complicate when behind.
+   - Endgame: activate the king, push passed pawns, look for
+     opposition + simple mating patterns.
+   - Don't shuffle. If no strong move stands out, play a sensible
+     developing or improving move — not a rook-out-and-back.
+
+   Casual chess, not engine chess. Pick a move from the legal list
+   above and move on.
+
+   Constraints
+   - Do not call any tools. Do not search the web. Do not spawn
+     sub-agents. Do not read files.
+   - Reply with EXACTLY two lines, nothing else:
+     Line 1: the chosen UCI move (must appear verbatim in the
+             legal-moves list above)
+     Line 2: a one-sentence reason (≤15 words)
+   ```
+3. **Parse the reply.** Strip the agent's response, split on
+   newlines. Line 1 is the UCI; line 2 is the reason.
+4. **Validate** the UCI appears verbatim in the legal-moves list
+   from step 1. If it does not:
+   - **Retry once** — call the same `Agent` again with the same
+     prompt, plus a final line: `(Retry: your previous reply was
+     "<bad-uci>" which is not in the legal-moves list. Pick
+     strictly from the UCI list above.)`
+   - If the retry also returns something not in the list, **play
+     the first move in the enumerated legal-moves list** and
+     continue. This is casual chess; don't loop.
+5. **Apply** via the helper. UCI notation:
 
    ```sh
    ${CLAUDE_PLUGIN_ROOT}/skills/fun/chess_helper.py move <FEN> <uci>
    ```
 
    - `ok: true` → update `FEN`, continue.
-   - `ok: false, error: "illegal move"` → you picked something
-     illegal. Re-think and resubmit. (Treat this as a sanity check
-     — illegal-move rate should be near zero.)
+   - `ok: false, error: "illegal move"` → should never happen
+     because you validated against `legal`'s output; if it does,
+     play the first move in the legal list and continue.
    - Promotion: omit suffix for queen, append `n`/`r`/`b` for
      other pieces.
-4. **Re-render** with the last-move highlight:
+6. **Re-render** with the last-move highlight:
 
    ```sh
    ${CLAUDE_PLUGIN_ROOT}/skills/fun/chess_helper.py render-html <new-FEN> --size 600 \
@@ -133,11 +188,12 @@ You play. The helper exists to validate, not to suggest.
    updates in place. The re-render embeds the user's new
    legal-moves map; the page's lock clears because the DOM is
    replaced.
-5. **Announce the move** in SAN (the `san` field from the `move`
+7. **Announce the move** in SAN (the `san` field from the `move`
    response) — one short line: "Nf3." / "Bxc4." / "O-O." /
-   "Check." Skip explanation unless the move is genuinely
-   interesting.
-6. Check `status` (terminal handling below).
+   "Check." If the subagent's reason (line 2) flags something
+   genuinely interesting (a tactic, a sacrifice, an unusual idea),
+   you can surface it as a brief follow-on; otherwise drop it.
+8. Check `status` (terminal handling below).
 
 ## Terminal handling
 
