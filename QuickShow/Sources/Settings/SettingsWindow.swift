@@ -20,6 +20,7 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate, NSTextFieldDel
     private let opacityValueLabel = NSTextField(labelWithString: "100 %")
     private let sizeWidthField = NSTextField()
     private let sizeHeightField = NSTextField()
+    private let fitContentCheckbox = NSButton(checkboxWithTitle: "Fit content to window on resize", target: nil, action: nil)
     private let connectButton = NSButton(title: "Connect to Claude Code", target: nil, action: nil)
     private let configTextView = NSTextView()
     private let statusLabel = NSTextField(labelWithString: "")
@@ -165,6 +166,22 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate, NSTextFieldDel
 
         stack.addArrangedSubview(separator())
 
+        // --- Fit content to window on resize ---
+        fitContentCheckbox.target = self
+        fitContentCheckbox.action = #selector(fitContentToWindowChanged(_:))
+        fitContentCheckbox.state = Settings.shared.fitContentToWindow ? .on : .off
+        stack.addArrangedSubview(fitContentCheckbox)
+
+        let fitContentNote = NSTextField(labelWithString: "Re-scales content to fit when you resize the panel. Layout doesn't change, so markup stays aligned. Manual zoom resets on next resize.")
+        fitContentNote.font = .systemFont(ofSize: 10)
+        fitContentNote.textColor = .secondaryLabelColor
+        fitContentNote.maximumNumberOfLines = 2
+        fitContentNote.lineBreakMode = .byWordWrapping
+        fitContentNote.preferredMaxLayoutWidth = 480
+        stack.addArrangedSubview(fitContentNote)
+
+        stack.addArrangedSubview(separator())
+
         // --- Connect to Claude Code ---
         let connectRow = NSStackView()
         connectRow.orientation = .horizontal
@@ -224,6 +241,13 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate, NSTextFieldDel
         Settings.shared.hudSpacePolicy = policy
         spacePolicyHelp.stringValue = policy.helpText
         NotificationCenter.default.post(name: Settings.hudSpacePolicyChanged, object: nil)
+    }
+
+    // MARK: - Fit content to window
+
+    @objc private func fitContentToWindowChanged(_ sender: NSButton) {
+        Settings.shared.fitContentToWindow = (sender.state == .on)
+        NotificationCenter.default.post(name: Settings.fitContentToWindowChanged, object: nil)
     }
 
     // MARK: - Size cap (NSTextFieldDelegate)
