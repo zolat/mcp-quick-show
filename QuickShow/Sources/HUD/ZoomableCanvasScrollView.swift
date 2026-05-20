@@ -30,14 +30,40 @@ final class ZoomableCanvasScrollView: NSScrollView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    /// When true, the scroll view auto-fits its content to its own
+    /// bounds on every frame change (window resize), using NSScrollView
+    /// magnification — the inner WebView's CSS viewport is never
+    /// touched, so the in-DOM markup canvas stays pixel-aligned with
+    /// the content beneath it. Initialised from
+    /// `Settings.fitContentToWindow`; kept in sync via
+    /// `Settings.fitContentToWindowChanged`. Note: manual scroll-wheel
+    /// zoom still works while this is on, but the next window resize
+    /// snaps back to fit.
+    var fitToWindow: Bool {
+        didSet {
+            guard oldValue != fitToWindow else { return }
+            if fitToWindow { refitIfReady() }
+        }
+    }
+
     override init(frame frameRect: NSRect) {
+        self.fitToWindow = Settings.shared.fitContentToWindow
         super.init(frame: frameRect)
         installCenteringClipView()
+        installFrameChangeObserver()
+        installSettingsObserver()
     }
 
     required init?(coder: NSCoder) {
+        self.fitToWindow = Settings.shared.fitContentToWindow
         super.init(coder: coder)
         installCenteringClipView()
+        installFrameChangeObserver()
+        installSettingsObserver()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     /// Swap the default clip view for one that centers the document
@@ -50,6 +76,52 @@ final class ZoomableCanvasScrollView: NSScrollView {
         let clip = CenteringClipView()
         clip.drawsBackground = false
         self.contentView = clip
+    }
+
+    /// Subscribe to our own frame-change notifications so we can
+    /// re-fit when the host HUD window resizes. NSView only posts
+    /// these when `postsFrameChangedNotifications` is true (default
+    /// is true, but set explicitly so we're not relying on AppKit
+    /// defaults).
+    private func installFrameChangeObserver() {
+        postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleFrameChanged(_:)),
+            name: NSView.frameDidChangeNotification,
+            object: self
+        )
+    }
+
+    /// Sync the `fitToWindow` ivar with `Settings.shared` whenever the
+    /// user toggles the checkbox in `SettingsWindow`. The didSet on
+    /// `fitToWindow` handles the snap-to-fit when flipping on.
+    private func installSettingsObserver() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleFitContentSettingChanged(_:)),
+            name: Settings.fitContentToWindowChanged,
+            object: nil
+        )
+    }
+
+    @objc private func handleFrameChanged(_ note: Notification) {
+        guard fitToWindow else { return }
+        refitIfReady()
+    }
+
+    @objc private func handleFitContentSettingChanged(_ note: Notification) {
+        fitToWindow = Settings.shared.fitContentToWindow
+    }
+
+    /// Call `smartFit()` only if a documentView is installed and has
+    /// a non-zero size. Skips the early-init window where the scroll
+    /// view has been sized but the renderer hasn't reported a canvas
+    /// size yet — fitting against a 0×0 document would be a no-op at
+    /// best and undefined at worst.
+    private func refitIfReady() {
+        guard let doc = documentView, doc.bounds.width > 0, doc.bounds.height > 0 else { return }
+        smartFit()
     }
 
     /// Fired any time the canvas → screen transform changes:
