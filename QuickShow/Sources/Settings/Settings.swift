@@ -19,6 +19,11 @@ final class Settings {
     /// re-apply their `collectionBehavior` on receipt.
     static let hudSpacePolicyChanged = Notification.Name("QuickShow.hudSpacePolicyChanged")
 
+    /// Posted when `fitContentToWindow` changes.
+    /// `ZoomableCanvasScrollView` observers re-read the flag and snap
+    /// to fit (or release the on-resize behaviour) on receipt.
+    static let fitContentToWindowChanged = Notification.Name("QuickShow.fitContentToWindowChanged")
+
     private enum Key {
         static let defaultOpacityPercent = "QuickShow.defaultOpacityPercent"
         static let initialSizeCapWidth = "QuickShow.initialSizeCapWidth"
@@ -30,6 +35,11 @@ final class Settings {
         /// false → .allSpaces. The new `.claudeSpace` mode is opt-in
         /// for migrated users (they get today's behaviour preserved).
         static let legacyPinHudsToCurrentSpace = "QuickShow.pinHudsToCurrentSpace"
+        /// When true, panels continuously re-fit their content to the
+        /// window's bounds on resize via NSScrollView magnification —
+        /// content layout doesn't change, so markup strokes stay
+        /// aligned. Off by default.
+        static let fitContentToWindow = "QuickShow.fitContentToWindow"
     }
 
     private let defaults = UserDefaults.standard
@@ -111,6 +121,32 @@ final class Settings {
         }
         set {
             defaults.set(newValue.rawValue, forKey: Key.hudSpacePolicy)
+        }
+    }
+
+    /// When true, every panel's `ZoomableCanvasScrollView` auto-fits
+    /// its content to the window on resize via NSScrollView
+    /// magnification — content layout doesn't change (no CSS reflow),
+    /// so the in-DOM markup canvas stays pixel-aligned with the
+    /// content beneath it. Off by default; user opts in via the
+    /// Settings checkbox. Manual scroll-wheel zoom still works but
+    /// gets overridden on the next window resize.
+    /// Test override: `QUICKSHOW_FIT_CONTENT_TO_WINDOW` ("1"/"true"
+    /// enables, "0"/"false" disables; anything else falls through to
+    /// the persisted value).
+    var fitContentToWindow: Bool {
+        get {
+            if let env = ProcessInfo.processInfo.environment["QUICKSHOW_FIT_CONTENT_TO_WINDOW"] {
+                switch env.lowercased() {
+                case "1", "true", "yes", "on":  return true
+                case "0", "false", "no", "off": return false
+                default: break
+                }
+            }
+            return defaults.bool(forKey: Key.fitContentToWindow)
+        }
+        set {
+            defaults.set(newValue, forKey: Key.fitContentToWindow)
         }
     }
 }
