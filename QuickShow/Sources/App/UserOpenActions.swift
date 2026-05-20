@@ -152,6 +152,81 @@ final class UserOpenActions: NSObject {
         }
     }
 
+    // MARK: - Screen capture
+
+    /// Invoke macOS's native interactive screenshot UI
+    /// (`/usr/sbin/screencapture -i -U -x <tmp>`) and route the
+    /// captured PNG into a markup-enabled HUD via the same
+    /// `userUpsert(contentType: "image", form: "path", …)` path
+    /// `openFile` uses for picked images. Cancellation (Esc / non-zero
+    /// exit / missing or empty output) is a silent no-op — same shape
+    /// as dismissing NSOpenPanel.
+    @objc func captureScreen(_ sender: Any?) {
+        guard let manager = sessionManager else { return }
+        let tmpPath = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("QuickShow-capture-\(ShareID.mint()).png")
+
+        let proc = Process()
+        proc.launchPath = "/usr/sbin/screencapture"
+        // -i  interactive selection (Esc cancels, spacebar → window mode)
+        // -U  show the ⌘⇧5-style floating toolbar
+        // -x  silence the shutter sound
+        proc.arguments = ["-i", "-U", "-x", tmpPath]
+        proc.terminationHandler = { [weak self] terminated in
+            let status = terminated.terminationStatus
+            DispatchQueue.main.async {
+                self?.handleCaptureResult(
+                    status: status,
+                    outputPath: tmpPath,
+                    manager: manager
+                )
+            }
+        }
+        do {
+            try proc.run()
+        } catch {
+            presentError("Couldn't start screen capture",
+                         String(describing: error))
+        }
+    }
+
+    /// Main-actor finaliser for `captureScreen`. Treats every failure
+    /// mode (cancel, missing file, zero bytes) as a silent no-op and
+    /// removes any zero-byte residue screencapture might have left.
+    @MainActor
+    private func handleCaptureResult(status: Int32,
+                                     outputPath: String,
+                                     manager: SessionManager) {
+        let fm = FileManager.default
+        let attrs = (try? fm.attributesOfItem(atPath: outputPath)) ?? [:]
+        let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+        guard status == 0,
+              fm.fileExists(atPath: outputPath),
+              size > 0 else {
+            if fm.fileExists(atPath: outputPath) {
+                try? fm.removeItem(atPath: outputPath)
+            }
+            return
+        }
+
+        let panelName = "user-capture-\(ShareID.mint())"
+        Task { @MainActor in
+            do {
+                _ = try await manager.userUpsert(
+                    name: panelName,
+                    contentType: "image",
+                    form: "path",
+                    body: outputPath,
+                    displayName: nil,
+                    autoEnterDrawMode: true
+                )
+            } catch {
+                self.presentError("Couldn't open capture",
+                                  String(describing: error))
+            }
+        }
+    }
+
     // MARK: - Routing
 
     private enum RoutedType: String {

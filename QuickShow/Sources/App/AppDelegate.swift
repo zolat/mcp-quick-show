@@ -963,6 +963,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openFile.target = userOpenActions
         menu.addItem(openFile)
 
+        let captureScreen = NSMenuItem(title: "Capture Screen…",
+                                       action: #selector(UserOpenActions.captureScreen(_:)),
+                                       keyEquivalent: "")
+        captureScreen.target = userOpenActions
+        menu.addItem(captureScreen)
+
         let sketchPad = NSMenuItem(title: "New Sketch Pad", action: nil, keyEquivalent: "")
         let sketchSubmenu = NSMenu(title: "New Sketch Pad")
         let square = NSMenuItem(title: "Square (1024 × 1024)",

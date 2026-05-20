@@ -30,5 +30,7 @@
 	<string>Copyright © 2026 Thomas Zola.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>QuickShow captures the screen region you select so you can mark it up and share it with your agent.</string>
 </dict>
 </plist>
