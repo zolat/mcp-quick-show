@@ -59,8 +59,19 @@ final class TitleBarOverlay: NSView {
     /// from the host HUD. `.idle` shows title + snapshot + markup
     /// toggle + overflow + close. `.draw` swaps that for the markup
     /// palette (exit + color/weight pickers + undo + clear + Send).
-    private enum Mode { case idle, draw }
+    /// `.shareConfirmation` is a transient post-Send overlay on user-
+    /// windows HUDs: ✓ icon + selectable token + Copy + ✕. Auto-fades
+    /// back to whatever mode was active before.
+    private enum Mode { case idle, draw, shareConfirmation }
     private var mode: Mode = .idle
+    /// Mode the bar was in when `showShareConfirmation` flipped it
+    /// into `.shareConfirmation`. Auto-dismiss + manual ✕ both
+    /// restore this. Defaults to `.idle` if unset.
+    private var priorMode: Mode?
+    /// In-flight auto-dismiss work item. Cancelled on manual dismiss
+    /// or on a follow-on `showShareConfirmation` call (second Send
+    /// before the first faded).
+    private var shareDismissWork: DispatchWorkItem?
 
     private let titleLabel = NSTextField(labelWithString: "")
     private let closeButton = TitleBarOverlay.symbolButton(
@@ -91,14 +102,29 @@ final class TitleBarOverlay: NSView {
     /// to force the user through draw mode to access it.
     private let idleSendButton = TitleBarOverlay.symbolButton(
         "paperplane.fill", weight: .bold, ax: "Share with Claude")
+
+    // --- Share-confirmation mode (third bar layout, transient).
+    /// `.seal.fill` is the success-tick treatment used in mac system
+    /// "Copied" affordances (e.g. Safari's share sheet).
+    private let shareCheckIcon = TitleBarOverlay.symbolButton(
+        "checkmark.seal.fill", weight: .bold, ax: "Share copied")
+    private let shareCopiedLabel = NSTextField(labelWithString: "Copied")
+    /// Token rendered as selectable text — the whole reason this mode
+    /// exists is so the user can drag-select / verify, which
+    /// `NSAlert.informativeText` doesn't permit.
+    private let shareTokenField = NSTextField(labelWithString: "")
+    private let shareCopyButton = NSButton(title: "Copy", target: nil, action: nil)
+    private let shareDismissButton = TitleBarOverlay.symbolButton(
+        "xmark", weight: .medium, ax: "Dismiss share confirmation")
     private let badgeView = NSTextField(labelWithString: "")
 
-    /// Containers for the two bar layouts. Both are pinned to the bar's
-    /// leading/trailing/centerY edges; we toggle `isHidden` on each
-    /// when `setMode(_:)` flips. Kept as properties so we don't have to
+    /// Containers for the three bar layouts. All three are pinned to
+    /// the bar's leading/trailing/centerY edges; `setMode(_:)` flips
+    /// `isHidden` on each. Kept as properties so we don't have to
     /// rebuild them or chase them through the view hierarchy.
     private var idleContents: NSStackView!
     private var drawContents: NSStackView!
+    private var shareConfirmContents: NSStackView!
 
     /// Current stroke color (drives the color picker indicator). The
     /// picker's selection writes here and fires `onPickMarkupColor`;
@@ -388,8 +414,70 @@ final class TitleBarOverlay: NSView {
         drawContents.translatesAutoresizingMaskIntoConstraints = false
         drawContents.isHidden = true   // idle is the default mode
 
+        // --- Share confirmation bar (transient post-Send overlay).
+        // Layout: [ ✓ icon | Copied | <token> (greedy)        [Copy] [✕] ]
+        shareCheckIcon.contentTintColor = .systemGreen
+        shareCheckIcon.isEnabled = false  // pure indicator — clicking does nothing
+        shareCheckIcon.toolTip = "Share link copied to clipboard"
+
+        shareCopiedLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+        shareCopiedLabel.textColor = ArthurPalette.textMuted
+        shareCopiedLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        // Selectable monospaced field — drag-select with the mouse,
+        // ⌘C, or just verify visually. Truncates from the tail when the
+        // bar is narrower than the token + chrome.
+        shareTokenField.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        shareTokenField.textColor = ArthurPalette.textMuted
+        shareTokenField.isSelectable = true
+        shareTokenField.isEditable = false
+        shareTokenField.isBordered = false
+        shareTokenField.drawsBackground = false
+        shareTokenField.lineBreakMode = .byTruncatingTail
+        shareTokenField.cell?.usesSingleLineMode = true
+        shareTokenField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        shareTokenField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        // Accent-fill pill — mirrors `sendButton` styling so the Copy
+        // CTA reads as "primary action" in this mode.
+        shareCopyButton.wantsLayer = true
+        shareCopyButton.isBordered = false
+        shareCopyButton.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        shareCopyButton.layer?.cornerRadius = 11
+        shareCopyButton.attributedTitle = NSAttributedString(
+            string: "Copy",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: NSColor.white,
+            ]
+        )
+        shareCopyButton.target = self
+        shareCopyButton.action = #selector(handleShareCopy)
+        shareCopyButton.toolTip = "Copy the share token to the clipboard"
+
+        shareDismissButton.contentTintColor = ArthurPalette.textMuted
+        shareDismissButton.target = self
+        shareDismissButton.action = #selector(handleShareDismiss)
+
+        shareConfirmContents = NSStackView(views: [
+            shareCheckIcon,
+            shareCopiedLabel,
+            shareTokenField,
+            shareCopyButton,
+            shareDismissButton,
+        ])
+        shareConfirmContents.orientation = .horizontal
+        shareConfirmContents.alignment = .centerY
+        shareConfirmContents.spacing = 8
+        shareConfirmContents.detachesHiddenViews = false
+        shareConfirmContents.translatesAutoresizingMaskIntoConstraints = false
+        shareConfirmContents.setCustomSpacing(6, after: shareCheckIcon)
+        shareConfirmContents.setCustomSpacing(10, after: shareTokenField)
+        shareConfirmContents.isHidden = true
+
         addSubview(idleContents)
         addSubview(drawContents)
+        addSubview(shareConfirmContents)
 
         let buttonSize: CGFloat = 22
         NSLayoutConstraint.activate([
@@ -400,6 +488,10 @@ final class TitleBarOverlay: NSView {
             drawContents.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             drawContents.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             drawContents.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            shareConfirmContents.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            shareConfirmContents.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            shareConfirmContents.centerYAnchor.constraint(equalTo: centerYAnchor),
 
             snapshotButton.widthAnchor.constraint(equalToConstant: buttonSize),
             snapshotButton.heightAnchor.constraint(equalToConstant: buttonSize),
@@ -426,6 +518,13 @@ final class TitleBarOverlay: NSView {
             sendButton.heightAnchor.constraint(equalToConstant: buttonSize),
             idleSendButton.widthAnchor.constraint(equalToConstant: 58),
             idleSendButton.heightAnchor.constraint(equalToConstant: buttonSize),
+
+            shareCheckIcon.widthAnchor.constraint(equalToConstant: buttonSize),
+            shareCheckIcon.heightAnchor.constraint(equalToConstant: buttonSize),
+            shareDismissButton.widthAnchor.constraint(equalToConstant: buttonSize),
+            shareDismissButton.heightAnchor.constraint(equalToConstant: buttonSize),
+            shareCopyButton.widthAnchor.constraint(equalToConstant: 60),
+            shareCopyButton.heightAnchor.constraint(equalToConstant: buttonSize),
         ])
 
         // Pickers — content view controllers are reused across opens.
@@ -542,17 +641,90 @@ final class TitleBarOverlay: NSView {
 
     /// Single chokepoint for the layout swap — flips `isHidden` on
     /// each container stack. Kept private; outside callers go through
-    /// `setDrawModeActive(_:)` so the public surface stays small.
-    /// Dismisses any open picker popover on transition so it doesn't
-    /// linger pointing at a now-hidden trigger button.
+    /// `setDrawModeActive(_:)` or `showShareConfirmation(_:)` so the
+    /// public surface stays small. Dismisses any open picker popover
+    /// on transition so it doesn't linger pointing at a now-hidden
+    /// trigger button.
     private func setMode(_ newMode: Mode) {
         mode = newMode
         idleContents.isHidden = (newMode != .idle)
         drawContents.isHidden = (newMode != .draw)
-        if newMode == .idle {
+        shareConfirmContents.isHidden = (newMode != .shareConfirmation)
+        if newMode != .draw {
             if colorPopover.isShown { colorPopover.performClose(nil) }
             if weightPopover.isShown { weightPopover.performClose(nil) }
         }
+    }
+
+    /// Swap into share-confirmation mode with the given token. Stores
+    /// the current mode in `priorMode` so auto-dismiss / ✕ can put
+    /// the bar back where it was. A 6-second auto-dismiss timer fires
+    /// unless the user dismisses manually first. A repeat call (rapid
+    /// second Send) replaces the in-flight timer + token.
+    func showShareConfirmation(token: String) {
+        shareDismissWork?.cancel()
+        if mode != .shareConfirmation {
+            priorMode = mode
+        }
+        shareTokenField.stringValue = token
+        // Reset the Copy button label in case a previous show left it
+        // flashed to "Copied ✓".
+        shareCopyButton.attributedTitle = NSAttributedString(
+            string: "Copy",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: NSColor.white,
+            ]
+        )
+        setMode(.shareConfirmation)
+        let work = DispatchWorkItem { [weak self] in
+            self?.dismissShareConfirmation()
+        }
+        shareDismissWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0, execute: work)
+    }
+
+    /// Cancel the auto-dismiss timer and return the bar to its prior
+    /// mode. Safe to call from either the ✕ button or the timer's
+    /// own fire path (cancel is a no-op once the work item has run).
+    private func dismissShareConfirmation() {
+        shareDismissWork?.cancel()
+        shareDismissWork = nil
+        setMode(priorMode ?? .idle)
+        priorMode = nil
+    }
+
+    @objc private func handleShareCopy() {
+        let token = shareTokenField.stringValue
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(token, forType: .string)
+        // Flash the label to "Copied ✓" for ~1 s, then restore.
+        shareCopyButton.attributedTitle = NSAttributedString(
+            string: "Copied ✓",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: NSColor.white,
+            ]
+        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self = self else { return }
+            // Don't clobber a later state — only reset if we're still
+            // in share mode and the label still says "Copied ✓".
+            if self.mode == .shareConfirmation,
+               self.shareCopyButton.attributedTitle.string == "Copied ✓" {
+                self.shareCopyButton.attributedTitle = NSAttributedString(
+                    string: "Copy",
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                        .foregroundColor: NSColor.white,
+                    ]
+                )
+            }
+        }
+    }
+
+    @objc private func handleShareDismiss() {
+        dismissShareConfirmation()
     }
 
     @objc private func handleSessionFlagChanged(_ note: Notification) {

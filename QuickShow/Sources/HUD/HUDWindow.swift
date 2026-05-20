@@ -443,6 +443,16 @@ final class HUDWindow: NSWindow {
         titleBar.setAlwaysShowSend(on)
     }
 
+    /// Swap the title bar into share-confirmation mode showing `token`.
+    /// Auto-dismisses after ~6 s, or manually via the strip's ✕.
+    /// Called by `SessionManager.recordShareSent` in place of popping
+    /// a modal alert — non-modal so the user can switch to Claude
+    /// immediately, with selectable token text and an explicit Copy
+    /// button.
+    func showShareConfirmation(token: String) {
+        titleBar.showShareConfirmation(token: token)
+    }
+
     /// Bind the title bar to its owning session id so its
     /// flag-change notification observer can filter to "our" session.
     func setOwningSessionId(_ id: String) {

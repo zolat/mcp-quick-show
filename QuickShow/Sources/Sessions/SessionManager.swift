@@ -617,7 +617,16 @@ final class SessionManager: NSObject {
                 // Strokes stay on screen as visible proof the Send
                 // took. The user can clear with ⌫ or keep iterating;
                 // they survive re-render now (see renderPanel).
-                if hud.window.isInDrawMode {
+                //
+                // User-share branch: skip the auto-toggle out of
+                // draw mode. The title bar is now in
+                // `.shareConfirmation` mode (set by recordShareSent
+                // → hud.window.showShareConfirmation); toggleDrawMode
+                // would clobber that. The strip itself restores the
+                // prior mode when it auto-dismisses or the user hits
+                // ✕, so draw mode resumes naturally for follow-on
+                // strokes.
+                if !isUserShare && hud.window.isInDrawMode {
                     hud.window.toggleDrawMode()
                 }
             } catch {
@@ -665,14 +674,11 @@ final class SessionManager: NSObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(token, forType: .string)
         NSLog("QuickShow: share \(shareId) → clipboard (\(token))")
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "Share link copied"
-        alert.informativeText =
-            "Paste this into Claude to deliver the panel:\n\n\(token)\n\n" +
-            "Claude will fetch the image and the window will move into its session."
-        alert.addButton(withTitle: "OK")
-        _ = alert.runModal()
+        // Non-modal in-bar confirmation: selectable token, Copy
+        // button, ✕ dismiss, 6 s auto-fade. Replaces the prior modal
+        // NSAlert so the user can switch to Claude without first
+        // dismissing a popup.
+        hud.window.showShareConfirmation(token: token)
     }
 
     // MARK: - Share claim (user-windows → Claude session migration)
