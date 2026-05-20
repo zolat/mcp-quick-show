@@ -38,6 +38,7 @@ targets:
         NSPrincipalClass: NSApplication
         NSHighResolutionCapable: true
         NSHumanReadableCopyright: "Copyright © 2026 Thomas Zola."
+        NSScreenCaptureUsageDescription: "QuickShow captures the screen region you select so you can mark it up and share it with your agent."
     settings:
       base:
         ENABLE_USER_SCRIPT_SANDBOXING: NO
