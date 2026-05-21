@@ -2,17 +2,24 @@ import Cocoa
 import Foundation
 import MCP
 
-// MCPToolHandlers — Phase 1 PoC tool registration. Exposes a single
-// tool, `show_html`, mirroring `sidecar/src/handlers/html.ts`'s
-// schema and validation rules so a Claude that previously drove the
-// stdio sidecar can drive the HTTP server with no behavior change.
+// MCPToolHandlers — Phase 1.5 tool registration. Exposes three tools
+// that together cover the QuickShow render+markup feedback loop:
 //
-// Reuses `SessionManager.upsert(...)` directly — no wire protocol,
-// no NDJSON, no socket. The MCP session id (assigned by the SDK)
-// maps 1:1 to the existing `sessionId` argument; the libproc-
-// resolved Claude PID (stashed by the router) flows in via
-// `registerSession(_:parentPid:)` so `.claudeSpace` placement
-// reuses unchanged from "have a PID" onward.
+//   - `show_html`           — render HTML into a HUD panel (mirror of
+//                             sidecar/src/handlers/html.ts)
+//   - `enable_markup_events` — arm the per-session markup push channel
+//                              + return the `Monitor` tail incantation
+//                              (mirror of sidecar/src/handlers/enableMarkupEvents.ts)
+//   - `get_markup`          — read a marked-up artifact PNG by id and
+//                             return it as an MCP image content block
+//                             (mirror of sidecar/src/handlers/getMarkup.ts)
+//
+// Reuses `SessionManager`, `MarkupPaths`, and the renderer/HUD pipeline
+// directly — no wire protocol, no NDJSON, no socket. The MCP session id
+// (assigned by the SDK) maps 1:1 to the existing `sessionId` argument;
+// the libproc-resolved Claude PID (stashed by the router) flows in via
+// `registerSession(_:parentPid:)` so `.claudeSpace` placement reuses
+// unchanged from "have a PID" onward.
 
 @MainActor
 enum MCPToolHandlers {
@@ -38,9 +45,12 @@ enum MCPToolHandlers {
         router: MCPSessionRouter
     ) async {
         let showHTML = showHTMLTool()
+        let enableMarkup = enableMarkupEventsTool()
+        let getMarkup = getMarkupTool()
+        let tools: [Tool] = [showHTML, enableMarkup, getMarkup]
 
         await server.withMethodHandler(ListTools.self) { _ in
-            ListTools.Result(tools: [showHTML])
+            ListTools.Result(tools: tools)
         }
 
         // CallTool handler — runs off the main actor by default,
@@ -51,62 +61,212 @@ enum MCPToolHandlers {
         let rt = router
         let sid = mcpSessionID
         await server.withMethodHandler(CallTool.self) { params in
-            guard params.name == showHTML.name else {
+            let args = params.arguments ?? [:]
+            switch params.name {
+            case showHTML.name:
+                return await Self.handleShowHTML(args: args, sm: sm, rt: rt, sid: sid)
+            case enableMarkup.name:
+                return await Self.handleEnableMarkupEvents(sm: sm, sid: sid)
+            case getMarkup.name:
+                return await Self.handleGetMarkup(args: args, sid: sid)
+            default:
                 return CallTool.Result(
                     content: [.text(text: "unknown tool: \(params.name)", annotations: nil, _meta: nil)],
                     isError: true
                 )
             }
-            let args = params.arguments ?? [:]
-            do {
-                let normalized = try ShowHTMLArgs.validate(args)
-                let claudePid = await rt.claudePidFor(sessionID: sid)
-                let (result, snapshot) = try await Self.dispatch(
-                    sm: sm,
-                    sessionID: sid,
-                    claudePid: claudePid,
-                    args: normalized
-                )
-
-                var content: [Tool.Content] = [
-                    .text(
-                        text: "Rendered '\(normalized.name)' (html) — \(result.width)×\(result.height).",
-                        annotations: nil,
-                        _meta: nil
-                    )
-                ]
-                if normalized.returnScreenshot {
-                    content.append(.image(
-                        data: snapshot.base64EncodedString(),
-                        mimeType: "image/png",
-                        annotations: nil,
-                        _meta: nil
-                    ))
-                }
-                // P3: 5s after a successful show_html, push a
-                // notifications/message to the session's SSE stream.
-                // Tests whether Claude Code surfaces server-initiated
-                // notifications. Detached so it doesn't block the
-                // tool response; captures `sid`, `rt`, panel name
-                // by value.
-                let panelName = normalized.name
-                Task.detached {
-                    try? await Task.sleep(for: .seconds(5))
-                    await Self.firePushTest(router: rt, sessionID: sid, panelName: panelName)
-                }
-                return CallTool.Result(content: content)
-            } catch let err as ShowHTMLArgs.ValidationError {
-                return CallTool.Result(
-                    content: [.text(text: "invalid arguments: \(err.message)", annotations: nil, _meta: nil)],
-                    isError: true
-                )
-            } catch {
-                return CallTool.Result(
-                    content: [.text(text: "render error: \(error.localizedDescription)", annotations: nil, _meta: nil)],
-                    isError: true
-                )
-            }
         }
+    }
+
+    // MARK: - show_html dispatch
+
+    private static func handleShowHTML(
+        args: [String: Value],
+        sm: SessionManager,
+        rt: MCPSessionRouter,
+        sid: String
+    ) async -> CallTool.Result {
+        do {
+            let normalized = try ShowHTMLArgs.validate(args)
+            let claudePid = await rt.claudePidFor(sessionID: sid)
+            let (result, snapshot) = try await Self.dispatch(
+                sm: sm,
+                sessionID: sid,
+                claudePid: claudePid,
+                args: normalized
+            )
+
+            var content: [Tool.Content] = [
+                .text(
+                    text: "Rendered '\(normalized.name)' (html) — \(result.width)×\(result.height).",
+                    annotations: nil,
+                    _meta: nil
+                )
+            ]
+            if normalized.returnScreenshot {
+                content.append(.image(
+                    data: snapshot.base64EncodedString(),
+                    mimeType: "image/png",
+                    annotations: nil,
+                    _meta: nil
+                ))
+            }
+            // P3: 5s after a successful show_html, push a
+            // notifications/message to the session's SSE stream.
+            // Tests whether Claude Code surfaces server-initiated
+            // notifications. Detached so it doesn't block the
+            // tool response; captures `sid`, `rt`, panel name
+            // by value.
+            let panelName = normalized.name
+            Task.detached {
+                try? await Task.sleep(for: .seconds(5))
+                await Self.firePushTest(router: rt, sessionID: sid, panelName: panelName)
+            }
+            return CallTool.Result(content: content)
+        } catch let err as ShowHTMLArgs.ValidationError {
+            return CallTool.Result(
+                content: [.text(text: "invalid arguments: \(err.message)", annotations: nil, _meta: nil)],
+                isError: true
+            )
+        } catch {
+            return CallTool.Result(
+                content: [.text(text: "render error: \(error.localizedDescription)", annotations: nil, _meta: nil)],
+                isError: true
+            )
+        }
+    }
+
+    // MARK: - enable_markup_events dispatch
+
+    private static func handleEnableMarkupEvents(
+        sm: SessionManager,
+        sid: String
+    ) async -> CallTool.Result {
+        let logPath: URL
+        do {
+            logPath = try MarkupPaths.ensureDirs(sid)
+        } catch {
+            return CallTool.Result(
+                content: [.text(
+                    text: "failed to prepare markup dirs: \(error.localizedDescription)",
+                    annotations: nil, _meta: nil
+                )],
+                isError: true
+            )
+        }
+        await MainActor.run {
+            sm.setFlag(sessionId: sid, key: "markup_events_armed", value: .bool(true))
+            // Idempotent — the existing flag-changed Notification fires
+            // whether or not the value actually changed; HUDs that
+            // already booted observe the change via that channel.
+        }
+        let text = [
+            "Markup events armed for this session.",
+            "",
+            "To receive notifications when the user presses Send (or closes without sending), start a Monitor:",
+            "",
+            "  command: `tail -n 0 -F \(logPath.path)`",
+            "  persistent: true",
+            "  description: \"QuickShow markup events\"",
+            "",
+            "Each notification will be one NDJSON line.",
+            "  - `{\"type\":\"markup_sent\",\"panel\":\"<name>\",\"artifact\":\"<id>\",...}` → call `get_markup(artifact_id: \"<id>\")` to fetch the PNG.",
+            "  - `{\"type\":\"markup_dismissed\",\"panel\":\"<name>\",...}` → the user closed the panel without sending. No artifact.",
+            "",
+            "This call is idempotent — calling again returns the same instructions and leaves the flag armed.",
+        ].joined(separator: "\n")
+        return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+    }
+
+    // MARK: - get_markup dispatch
+
+    private static let artifactIDPattern: NSRegularExpression = {
+        // 8-4-4-4-12 hex, case-insensitive — matches both sidecar (lowercase)
+        // and Swift (UUID().uuidString → uppercase) artifact ids.
+        try! NSRegularExpression(
+            pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            options: [.caseInsensitive]
+        )
+    }()
+
+    private static func handleGetMarkup(
+        args: [String: Value],
+        sid: String
+    ) async -> CallTool.Result {
+        guard let v = args["artifact_id"], let artifactID = v.stringValue else {
+            return CallTool.Result(
+                content: [.text(
+                    text: "invalid artifact_id (must be a UUID like '550e8400-e29b-41d4-a716-446655440000')",
+                    annotations: nil, _meta: nil
+                )],
+                isError: true
+            )
+        }
+        let range = NSRange(artifactID.startIndex..., in: artifactID)
+        if artifactIDPattern.firstMatch(in: artifactID, options: [], range: range) == nil {
+            return CallTool.Result(
+                content: [.text(
+                    text: "invalid artifact_id (must be a UUID like '550e8400-e29b-41d4-a716-446655440000')",
+                    annotations: nil, _meta: nil
+                )],
+                isError: true
+            )
+        }
+
+        let live = MarkupPaths.artifact(sid, id: artifactID)
+        let consumedDir = MarkupPaths.artifactsDir(sid).appendingPathComponent(".consumed", isDirectory: true)
+        let consumed = consumedDir.appendingPathComponent("\(artifactID).png", isDirectory: false)
+        let fm = FileManager.default
+
+        let source: URL
+        if fm.fileExists(atPath: live.path) {
+            source = live
+        } else if fm.fileExists(atPath: consumed.path) {
+            return CallTool.Result(
+                content: [.text(
+                    text: "artifact \(artifactID) was already consumed in this session",
+                    annotations: nil, _meta: nil
+                )],
+                isError: true
+            )
+        } else {
+            return CallTool.Result(
+                content: [.text(
+                    text: "no artifact named '\(artifactID)' for this session",
+                    annotations: nil, _meta: nil
+                )],
+                isError: true
+            )
+        }
+
+        let bytes: Data
+        do {
+            bytes = try Data(contentsOf: source)
+        } catch {
+            return CallTool.Result(
+                content: [.text(
+                    text: "failed to read artifact: \(error.localizedDescription)",
+                    annotations: nil, _meta: nil
+                )],
+                isError: true
+            )
+        }
+
+        // Best-effort: move to .consumed/ so a second get_markup for the
+        // same id returns "already consumed". Failure here is non-fatal
+        // — we still hand the bytes back.
+        do {
+            try fm.createDirectory(at: consumedDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try? fm.removeItem(at: consumed)
+            try fm.moveItem(at: source, to: consumed)
+        } catch {
+            NSLog("QuickShow: get_markup move-to-consumed failed for \(artifactID): \(error)")
+        }
+
+        return CallTool.Result(content: [
+            .text(text: "markup artifact \(artifactID) (\(bytes.count) bytes)", annotations: nil, _meta: nil),
+            .image(data: bytes.base64EncodedString(), mimeType: "image/png", annotations: nil, _meta: nil),
+        ])
     }
 
     // MARK: - P3 push test
@@ -243,6 +403,53 @@ enum MCPToolHandlers {
                 + "the same `name` updates the existing panel in place; a different `name` opens a new "
                 + "tab. REQUIREMENTS: provide a full <html>...</html> document. Inline ALL styles and "
                 + "scripts. Do NOT reference external CDNs.",
+            inputSchema: inputSchema
+        )
+    }
+
+    private static func enableMarkupEventsTool() -> Tool {
+        let inputSchema: Value = .object([
+            "type": .string("object"),
+            "properties": .object([:]),
+        ])
+        return Tool(
+            name: "enable_markup_events",
+            description:
+                "Arm the markup push channel for this session. After calling this, "
+                + "the HUD's Send button is enabled on markup-capable panels, and a "
+                + "user pressing Send (or closing without sending) emits a one-line "
+                + "NDJSON event to a per-session log file. Call this ONCE per session "
+                + "before rendering markup-capable panels. The tool response tells you "
+                + "the exact `Monitor` command to start watching the events log — when "
+                + "you see a `markup_sent` line, call `get_markup(artifact_id)` to "
+                + "fetch the image. When you see `markup_dismissed`, the user closed "
+                + "the panel without marking up. Idempotent.",
+            inputSchema: inputSchema
+        )
+    }
+
+    private static func getMarkupTool() -> Tool {
+        let inputSchema: Value = .object([
+            "type": .string("object"),
+            "required": .array([.string("artifact_id")]),
+            "properties": .object([
+                "artifact_id": .object([
+                    "type": .string("string"),
+                    "description": .string(
+                        "UUID of the artifact, copied verbatim from the `artifact` field of a `markup_sent` event line."
+                    ),
+                ]),
+            ]),
+        ])
+        return Tool(
+            name: "get_markup",
+            description:
+                "Fetch a marked-up panel artifact by id and return it as an image. "
+                + "Call this after the Monitor (armed via `enable_markup_events`) "
+                + "emits a `markup_sent` line — the `artifact` field on that line is "
+                + "the id to pass here. The artifact is moved to a `.consumed/` "
+                + "subfolder on success so it's clear which markups have been "
+                + "processed. Returns an MCP image (PNG) the model can inspect.",
             inputSchema: inputSchema
         )
     }
