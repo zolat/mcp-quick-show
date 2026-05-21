@@ -1,6 +1,6 @@
 ---
 name: quickshow
-description: Render visual output (markdown reports, diagrams, SVGs, images, full HTML designs, live URLs) into a floating QuickShow HUD panel the user can see — and get a screenshot back so you can verify your own work. Use whenever the conversation involves something the user should look at rather than read in the transcript — architecture diagrams, code walkthroughs, plans and roadmaps, comparisons of options, long-form reports, mockups, generated artwork, screenshots of existing files, **online docs you want them to read**, or **the running site you just changed** during end-to-end verification. Same `name` updates the panel in place so iteration is cheap. **Also handles user-initiated shares**: when the user pastes `[quickshow-share:<id>]` they've opened a HUD themselves and want you to receive it — call `get_share(<id>)`.
+description: Render visual output (markdown reports, diagrams, SVGs, images, full HTML designs, live URLs) into a floating QuickShow HUD panel the user can see — and get a screenshot back so you can verify your own work. Use whenever the conversation involves something the user should look at rather than read in the transcript — architecture diagrams, code walkthroughs, plans and roadmaps, comparisons of options, long-form reports, mockups, generated artwork, screenshots of existing files, **online docs you want them to read**, or **the running site you just changed** during end-to-end verification. Same `name` updates the panel in place so iteration is cheap. **Also handles user-initiated shares**: when the user pastes `[quickshow-share:<id>]` they've opened a HUD themselves and want you to receive it — call `get_share(<id>)`. **Also use during plan mode / "design mode"** — these tools are read-only-in-spirit and a faster substitute for `AskUserQuestion` whenever a choice ("which layout / which diagram / which copy variant") is easier to answer by *seeing* than by reading bullet points.
 ---
 
 QuickShow turns visual artifacts from "described in chat" into "shown
@@ -111,6 +111,45 @@ If a render fails (mermaid parse error, malformed SVG, missing
 image), the response is structured with the error text *and* a
 screenshot of the in-panel error UI. Read both and retry without
 asking the user.
+
+## Plan mode & "show, don't ask"
+
+Plan mode (a.k.a. "design mode") restricts you to read-only actions
+plus edits to the plan file. **QuickShow tools are safe in plan
+mode** — they don't modify the user's repo, config, or any system
+state. `show_*` panels are transient HUD renders; the only on-disk
+writes (`enable_markup_events` creating its events dir,
+`get_markup` moving consumed artifacts) are scoped to QuickShow's
+own cache under `~/Library/Caches/QuickShow/events/`.
+
+Use this to your advantage: **when you would otherwise reach for
+`AskUserQuestion`, ask whether the answer is faster to see than to
+read.** If yes, render the options instead.
+
+- "Which of these three layouts?" → `show_html` × 3 with a shared
+  `group:` and a `hud_description:` framing the comparison. Arm
+  `enable_markup_events()` and ask the user to circle the keeper.
+- "Which architecture should we use?" → `show_mermaid` × 2 with
+  `group: "arch-choice"`. The user sees the difference instead of
+  parsing two bulleted paragraphs.
+- "Does this copy work?" → `show_markdown` with the draft. Annotate
+  via markup or react in chat.
+- "How should this flow?" → `show_mermaid` of the proposed sequence.
+
+`AskUserQuestion` is still the right tool for non-visual decisions
+(library choice with semantic trade-offs, naming, scope cuts) — but
+default to the visual surface whenever the question is "which of
+these *looks* right."
+
+**Artifacts persist past plan mode.** Markup PNGs land at
+`~/Library/Caches/QuickShow/events/<sessionId>/artifacts/<id>.png`
+under the Claude conversation UUID — stable across plan-mode exit,
+sidecar respawn, and `claude --resume`. `get_markup(<artifact_id>)`
+works in any phase. So a sketch the user annotated during planning
+is still a referenceable design artifact during implementation —
+fetch it again later if you need to remember what the user marked
+up. Quote the artifact id in your plan if it's load-bearing for
+the implementation.
 
 ## When the user should react visually, not verbally
 
