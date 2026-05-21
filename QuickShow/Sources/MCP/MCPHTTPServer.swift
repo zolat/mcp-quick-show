@@ -142,10 +142,24 @@ final class MCPHTTPServer {
                 var headers = extraHeaders
                 // Surface the Mcp-Session-Id on SSE responses too —
                 // the SDK only sets it on initialize today.
-                if let sid = req.header(HTTPHeaderName.sessionID), headers[HTTPHeaderName.sessionID] == nil {
+                let sid = req.header(HTTPHeaderName.sessionID)
+                if let sid, headers[HTTPHeaderName.sessionID] == nil {
                     headers[HTTPHeaderName.sessionID] = sid
                 }
+                // Bracket the long-lived standalone GET SSE stream
+                // with router liveness hooks so `hasOpenSSEStream`
+                // reflects reality. POST-initiated SSE streams (per-
+                // request response streams) are typically short-lived
+                // and don't carry the standalone-listener semantics
+                // we care about, so we restrict the bracket to GETs.
+                let isStandaloneSSE = req.method.uppercased() == "GET"
+                if isStandaloneSSE, let sid {
+                    await router.markSSEOpen(sessionID: sid)
+                }
                 await MCPHTTPParser.writeStream(stream, extraHeaders: headers, to: fd)
+                if isStandaloneSSE, let sid {
+                    await router.markSSEClosed(sessionID: sid)
+                }
             default:
                 MCPHTTPParser.writeResponse(response, to: fd)
             }

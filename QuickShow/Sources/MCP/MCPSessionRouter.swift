@@ -29,9 +29,16 @@ final class MCPSessionRouter {
     }
 
     private var sessions: [String: SessionState] = [:]
+    /// Per-session counter of open standalone-SSE GET streams. A value
+    /// > 0 means at least one live MCP consumer is listening on this
+    /// session's SSE channel; pushed events will reach a client in
+    /// real time. Zero means events go to the SDK's event store, file
+    /// channel only.
+    private var openSSEStreams: [String: Int] = [:]
     private let serverInfo: Server.Info
     private let capabilities: Server.Capabilities
     private let toolRegistrar: @MainActor @Sendable (Server, String) async -> Void
+    private var markupObserver: NSObjectProtocol?
 
     /// - Parameter toolRegistrar: invoked exactly once per session, after
     ///   the Server is created and before `start(transport:)`. Receives
@@ -40,12 +47,48 @@ final class MCPSessionRouter {
     ///   placement, etc.) without the router knowing tool-level details.
     init(
         serverInfo: Server.Info = Server.Info(name: "QuickShow", version: "0.2.0-poc"),
-        capabilities: Server.Capabilities = Server.Capabilities(tools: .init(listChanged: false)),
+        capabilities: Server.Capabilities = Server.Capabilities(
+            logging: Server.Capabilities.Logging(),
+            tools: .init(listChanged: false)
+        ),
         toolRegistrar: @escaping @MainActor @Sendable (Server, String) async -> Void = { _, _ in }
     ) {
         self.serverInfo = serverInfo
         self.capabilities = capabilities
         self.toolRegistrar = toolRegistrar
+        // Subscribe to per-session markup events emitted by
+        // EventLogWriter alongside its NDJSON writes. Each one fans
+        // out to the matching session's MCP SSE stream as a
+        // `notifications/message` (logging) payload — same shape as
+        // the file line, so consumers parse one schema.
+        markupObserver = NotificationCenter.default.addObserver(
+            forName: .quickShowMarkupEvent,
+            object: nil,
+            queue: nil
+        ) { [weak self] note in
+            guard let info = note.userInfo,
+                  let sid = info["sessionId"] as? String,
+                  let type = info["type"] as? String,
+                  let panel = info["panel"] as? String
+            else { return }
+            let artifact = info["artifact"] as? String
+            let tsMs = (info["ts_ms"] as? Double) ?? 0
+            Task { @MainActor [weak self] in
+                await self?.fanOutMarkupEvent(
+                    sessionID: sid,
+                    type: type,
+                    panel: panel,
+                    artifact: artifact,
+                    tsMs: tsMs
+                )
+            }
+        }
+    }
+
+    deinit {
+        if let markupObserver {
+            NotificationCenter.default.removeObserver(markupObserver)
+        }
     }
 
     /// Look up the Server for a session, if any. Used by the show_html
@@ -57,6 +100,73 @@ final class MCPSessionRouter {
 
     func claudePidFor(sessionID: String) -> pid_t? {
         sessions[sessionID]?.claudePid
+    }
+
+    // MARK: - SSE liveness
+
+    /// Returns true iff at least one standalone-SSE GET stream is open
+    /// for this session right now. Consulted by `enable_markup_events`
+    /// so the tool response can warn Claude that markup events will
+    /// queue (file-only, no live MCP push) until a Monitor / SSE
+    /// consumer connects.
+    func hasOpenSSEStream(sessionID: String) -> Bool {
+        (openSSEStreams[sessionID] ?? 0) > 0
+    }
+
+    /// Called by MCPHTTPServer.serveConnection when a GET /mcp request
+    /// receives an `.stream` response and starts pumping bytes onto
+    /// the FD. The matching closed-hook fires when writeStream returns.
+    func markSSEOpen(sessionID: String) {
+        openSSEStreams[sessionID, default: 0] += 1
+        NSLog("QuickShow: mcp sse stream opened session=\(sessionID) count=\(openSSEStreams[sessionID] ?? 0)")
+    }
+
+    func markSSEClosed(sessionID: String) {
+        let current = openSSEStreams[sessionID] ?? 0
+        if current <= 1 {
+            openSSEStreams.removeValue(forKey: sessionID)
+        } else {
+            openSSEStreams[sessionID] = current - 1
+        }
+        NSLog("QuickShow: mcp sse stream closed session=\(sessionID) count=\(openSSEStreams[sessionID] ?? 0)")
+    }
+
+    // MARK: - Markup fan-out
+
+    /// Forward a NotificationCenter-delivered markup event to the
+    /// matching session's MCP SSE stream as a `notifications/message`.
+    /// No-op for sessions we don't own (Claudes driving the stdio
+    /// sidecar share the same EventLogWriter notification surface but
+    /// have no entry in our router map).
+    private func fanOutMarkupEvent(
+        sessionID: String,
+        type: String,
+        panel: String,
+        artifact: String?,
+        tsMs: Double
+    ) async {
+        guard let server = sessions[sessionID]?.server else { return }
+        var data: [String: Value] = [
+            "type": .string(type),
+            "panel": .string(panel),
+            "session": .string(sessionID),
+            "ts_ms": .double(tsMs),
+        ]
+        if let artifact { data["artifact"] = .string(artifact) }
+        let msg = Message<LogMessageNotification>(
+            method: LogMessageNotification.name,
+            params: LogMessageNotification.Parameters(
+                level: .info,
+                logger: "quickshow.markup",
+                data: .object(data)
+            )
+        )
+        do {
+            try await server.notify(msg)
+            NSLog("QuickShow: mcp markup_notify SENT session=\(sessionID) type=\(type) panel=\(panel)")
+        } catch {
+            NSLog("QuickShow: mcp markup_notify FAILED session=\(sessionID) error=\(error)")
+        }
     }
 
     /// Route a request. Returns the HTTPResponse to write back to the

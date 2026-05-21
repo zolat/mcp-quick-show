@@ -66,7 +66,7 @@ enum MCPToolHandlers {
             case showHTML.name:
                 return await Self.handleShowHTML(args: args, sm: sm, rt: rt, sid: sid)
             case enableMarkup.name:
-                return await Self.handleEnableMarkupEvents(sm: sm, sid: sid)
+                return await Self.handleEnableMarkupEvents(sm: sm, rt: rt, sid: sid)
             case getMarkup.name:
                 return await Self.handleGetMarkup(args: args, sid: sid)
             default:
@@ -140,6 +140,7 @@ enum MCPToolHandlers {
 
     private static func handleEnableMarkupEvents(
         sm: SessionManager,
+        rt: MCPSessionRouter,
         sid: String
     ) async -> CallTool.Result {
         let logPath: URL
@@ -154,28 +155,46 @@ enum MCPToolHandlers {
                 isError: true
             )
         }
+        let listenerOpen = await rt.hasOpenSSEStream(sessionID: sid)
         await MainActor.run {
             sm.setFlag(sessionId: sid, key: "markup_events_armed", value: .bool(true))
             // Idempotent — the existing flag-changed Notification fires
             // whether or not the value actually changed; HUDs that
             // already booted observe the change via that channel.
         }
-        let text = [
+        var lines: [String] = []
+        if !listenerOpen {
+            lines += [
+                "⚠️  No live SSE listener for this session.",
+                "",
+                "Markup events will still be appended to the file log, but no MCP notifications/message will reach you until a Monitor (or the SDK's standalone GET /mcp stream) is open. Start the Monitor BEFORE the user begins drawing.",
+                "",
+            ]
+        }
+        lines += [
             "Markup events armed for this session.",
             "",
-            "To receive notifications when the user presses Send (or closes without sending), start a Monitor:",
+            "Two consumer options — pick one:",
+            "",
+            "(a) File channel (works always, survives `--resume`):",
             "",
             "  command: `tail -n 0 -F \(logPath.path)`",
             "  persistent: true",
-            "  description: \"QuickShow markup events\"",
+            "  description: \"QuickShow markup events (file)\"",
             "",
-            "Each notification will be one NDJSON line.",
+            "(b) MCP-native SSE channel (live, app knows you're listening, warns you if disconnected):",
+            "",
+            "  command: `curl -sN -H \"Mcp-Session-Id: \(sid)\" -H \"Accept: text/event-stream\" -H \"MCP-Protocol-Version: 2025-11-25\" http://127.0.0.1:7891/mcp | awk '/^data: /{ sub(/^data: /,\"\"); print; fflush() }' | grep --line-buffered '\"logger\":\"quickshow.markup\"'`",
+            "  persistent: true",
+            "  description: \"QuickShow markup events (SSE)\"",
+            "",
+            "Each notification is one JSON line carrying:",
             "  - `{\"type\":\"markup_sent\",\"panel\":\"<name>\",\"artifact\":\"<id>\",...}` → call `get_markup(artifact_id: \"<id>\")` to fetch the PNG.",
-            "  - `{\"type\":\"markup_dismissed\",\"panel\":\"<name>\",...}` → the user closed the panel without sending. No artifact.",
+            "  - `{\"type\":\"markup_dismissed\",\"panel\":\"<name>\",...}` → user closed the panel without sending.",
             "",
             "This call is idempotent — calling again returns the same instructions and leaves the flag armed.",
-        ].joined(separator: "\n")
-        return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+        ]
+        return CallTool.Result(content: [.text(text: lines.joined(separator: "\n"), annotations: nil, _meta: nil)])
     }
 
     // MARK: - get_markup dispatch

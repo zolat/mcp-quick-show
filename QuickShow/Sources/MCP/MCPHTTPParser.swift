@@ -170,10 +170,20 @@ enum MCPHTTPParser {
     /// extras) then pump events from the SDK's AsyncThrowingStream
     /// onto the wire as `data: <json>\n\n` frames. Returns when the
     /// stream ends or the client closes the connection.
+    ///
+    /// Liveness: a `:heartbeat\n\n` SSE comment is written every
+    /// `heartbeatSeconds` seconds. Heartbeats are mandatory for the
+    /// app's "is anyone listening?" signal (`MCPSessionRouter.
+    /// hasOpenSSEStream`) — the kernel's TCP send buffer absorbs
+    /// 1–2 writes to a peer-closed connection without failing, so
+    /// without a recurring write attempt a dead client looks alive
+    /// until a real event tries to land. Comment lines are no-ops
+    /// per the SSE spec (clients ignore lines starting with `:`).
     static func writeStream(
         _ stream: AsyncThrowingStream<Data, Swift.Error>,
         extraHeaders: [String: String],
-        to fd: Int32
+        to fd: Int32,
+        heartbeatSeconds: UInt64 = 10
     ) async {
         var head = "HTTP/1.1 200 OK\r\n"
         var headers = extraHeaders
@@ -192,14 +202,49 @@ enum MCPHTTPParser {
         head.append("\r\n")
         writeAll(head.data(using: .utf8) ?? Data(), to: fd)
 
-        // The SDK ships each event already SSE-formatted (`id: <n>\n
-        // event: message\ndata: <json>\n\n`), so we just relay bytes.
-        do {
-            for try await chunk in stream {
-                if !writeAll(chunk, to: fd) { return }
+        let heartbeat = Data(": heartbeat\n\n".utf8)
+
+        // Tee the SDK's AsyncThrowingStream into a Sendable AsyncStream
+        // we can race against a heartbeat tick.
+        enum Item: Sendable { case chunk(Data); case end; case error(any Error) }
+        let (events, cont) = AsyncStream<Item>.makeStream()
+        let pumpTask = Task {
+            do {
+                for try await chunk in stream {
+                    cont.yield(.chunk(chunk))
+                }
+                cont.yield(.end)
+            } catch {
+                cont.yield(.error(error))
             }
-        } catch {
-            NSLog("QuickShow: MCPHTTPParser stream error: \(error)")
+            cont.finish()
+        }
+        defer { pumpTask.cancel() }
+
+        // Loop: take whichever fires first — next event from the SDK,
+        // or the heartbeat tick. A failed write returns; a stream end
+        // returns; a stream error logs + returns.
+        var iter = events.makeAsyncIterator()
+        while true {
+            let next: Item = await withTaskGroup(of: Item?.self) { group in
+                group.addTask { await iter.next() }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: heartbeatSeconds * 1_000_000_000)
+                    return .chunk(heartbeat)
+                }
+                let first = await group.next() ?? Optional<Item>.none
+                group.cancelAll()
+                return first ?? .end
+            }
+            switch next {
+            case .chunk(let data):
+                if !writeAll(data, to: fd) { return }
+            case .end:
+                return
+            case .error(let err):
+                NSLog("QuickShow: MCPHTTPParser stream error: \(err)")
+                return
+            }
         }
     }
 

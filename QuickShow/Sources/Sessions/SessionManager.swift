@@ -1407,4 +1407,19 @@ extension Notification.Name {
     /// and `key`. HUD UI (Send button gating) subscribes to refresh
     /// when relevant flags flip.
     static let quickShowSessionFlagChanged = Notification.Name("QuickShowSessionFlagChanged")
+
+    /// Posted whenever a markup-related NDJSON event lands in a
+    /// session's events.ndjson. userInfo:
+    ///   - "sessionId":  String
+    ///   - "type":       "markup_sent" | "markup_dismissed"
+    ///   - "panel":      String
+    ///   - "artifact":   String? (only present for markup_sent)
+    ///   - "ts_ms":      Double (milliseconds since epoch)
+    ///
+    /// The HTTP MCP layer's MCPSessionRouter listens to this and fans
+    /// the event out via SDK `server.notify(LogMessageNotification)`
+    /// so the MCP SSE channel carries the same payload that lands in
+    /// the file. The file channel remains the source of truth for
+    /// resume + forensic semantics; SSE is the live-consumer channel.
+    static let quickShowMarkupEvent = Notification.Name("QuickShowMarkupEvent")
 }

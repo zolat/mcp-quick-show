@@ -37,22 +37,47 @@ final class EventLogWriter: @unchecked Sendable {
     /// Emit a `markup_sent` line. `artifact` is the UUID of the PNG
     /// already written into the session's artifacts dir.
     func emitMarkupSent(panel: String, artifact: String) {
+        let tsMs = Date().timeIntervalSince1970 * 1000
         emit([
             "type": .string("markup_sent"),
             "panel": .string(panel),
             "artifact": .string(artifact),
-            "ts": .number(Date().timeIntervalSince1970 * 1000),
+            "ts": .number(tsMs),
         ])
+        postMarkupNotification(type: "markup_sent", panel: panel, artifact: artifact, tsMs: tsMs)
     }
 
     /// Emit a `markup_dismissed` line. No artifact — user closed the
     /// panel before sending.
     func emitMarkupDismissed(panel: String) {
+        let tsMs = Date().timeIntervalSince1970 * 1000
         emit([
             "type": .string("markup_dismissed"),
             "panel": .string(panel),
-            "ts": .number(Date().timeIntervalSince1970 * 1000),
+            "ts": .number(tsMs),
         ])
+        postMarkupNotification(type: "markup_dismissed", panel: panel, artifact: nil, tsMs: tsMs)
+    }
+
+    /// Post a `quickShowMarkupEvent` NotificationCenter event alongside
+    /// each NDJSON write. The HTTP MCP layer's MCPSessionRouter listens
+    /// and fans the event out via `server.notify(LogMessageNotification)`
+    /// so MCP SSE consumers receive the same payload. The file channel
+    /// remains the source of truth for resume + forensic semantics; SSE
+    /// is the live-consumer channel.
+    private func postMarkupNotification(type: String, panel: String, artifact: String?, tsMs: Double) {
+        var info: [String: Any] = [
+            "sessionId": sessionId,
+            "type": type,
+            "panel": panel,
+            "ts_ms": tsMs,
+        ]
+        if let artifact { info["artifact"] = artifact }
+        NotificationCenter.default.post(
+            name: .quickShowMarkupEvent,
+            object: nil,
+            userInfo: info
+        )
     }
 
     /// Emit a `panel_event` line. `payload` is the agent-defined value
