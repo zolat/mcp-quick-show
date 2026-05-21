@@ -97,6 +97,17 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
     private enum LoadState { case loading, ready, failed(Error) }
     private var loadState: LoadState = .loading
 
+    /// `window.__qsMarkup` is installed by the `markup-canvas.js` user
+    /// script at `.atDocumentEnd`. That can race ahead of (or fall
+    /// behind) the template's DOMContentLoaded `ready` post under load,
+    /// which means a markup call right after a fresh upsert could hit
+    /// `window.__qsMarkup === undefined` and silently no-op. The user
+    /// script now posts `{markupReady: true}` after installing the
+    /// shim; this flag + waiter pair makes all `__qsMarkup.*` callers
+    /// suspend until that signal arrives instead of dropping calls.
+    private var markupReady: Bool = false
+    private var markupReadyWaiters: [CheckedContinuation<Void, Never>] = []
+
     func makeView() -> NSView {
         let config = WKWebViewConfiguration()
         // Note: WKProcessPool is deprecated in macOS 12+ (process-pool
@@ -368,32 +379,37 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
         // drawing so the JS canvas's crosshair cursor (set by
         // markup-canvas.js on enterDrawMode) is what the user sees.
         scrollView.isInDrawMode = true
-        await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.enterDrawMode();")
+        await awaitMarkupReady()
+        await evalIgnoringError("window.__qsMarkup.enterDrawMode();")
     }
 
     func exitDrawMode() async {
         scrollView.isInDrawMode = false
-        await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.exitDrawMode();")
+        await awaitMarkupReady()
+        await evalIgnoringError("window.__qsMarkup.exitDrawMode();")
     }
 
     func clearMarkup() async {
-        await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.clear();")
+        await awaitMarkupReady()
+        await evalIgnoringError("window.__qsMarkup.clear();")
     }
 
     func setStrokes(_ strokes: [MarkupStroke]) async {
+        await awaitMarkupReady()
         guard let data = try? JSONEncoder().encode(strokes),
               let json = String(data: data, encoding: .utf8) else {
-            await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.setStrokes([]);")
+            await evalIgnoringError("window.__qsMarkup.setStrokes([]);")
             return
         }
-        await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.setStrokes(\(json));")
+        await evalIgnoringError("window.__qsMarkup.setStrokes(\(json));")
     }
 
     func getStrokes() async -> [MarkupStroke] {
+        await awaitMarkupReady()
         let raw: Any?
         do {
             raw = try await webView.evaluateJavaScript(
-                "(window.__qsMarkup && window.__qsMarkup.getStrokes()) || []"
+                "window.__qsMarkup.getStrokes()"
             )
         } catch {
             return []
@@ -405,7 +421,8 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
     }
 
     func popLastStroke() async {
-        await evalIgnoringError("window.__qsMarkup && window.__qsMarkup.popLastStroke();")
+        await awaitMarkupReady()
+        await evalIgnoringError("window.__qsMarkup.popLastStroke();")
     }
 
     /// Seed subsequent strokes' color. Driven by the title bar's color
@@ -413,16 +430,18 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
     /// here. Only affects strokes drawn AFTER the call; committed
     /// strokes preserve their captured color.
     func setMarkupColor(_ hex: String) async {
+        await awaitMarkupReady()
         await evalIgnoringError(
-            "window.__qsMarkup && window.__qsMarkup.setColor(\"\(hex)\");"
+            "window.__qsMarkup.setColor(\"\(hex)\");"
         )
     }
 
     /// Symmetric counterpart for stroke width. Fires from the title
     /// bar's weight picker.
     func setMarkupWidth(_ pts: CGFloat) async {
+        await awaitMarkupReady()
         await evalIgnoringError(
-            "window.__qsMarkup && window.__qsMarkup.setWidth(\(pts));"
+            "window.__qsMarkup.setWidth(\(pts));"
         )
     }
 
@@ -430,8 +449,9 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
     /// Draw is the default — pointer events extend a new stroke.
     /// Erase splices any stroke within ~12pt of the pointer.
     func setMarkupTool(_ tool: String) async {
+        await awaitMarkupReady()
         await evalIgnoringError(
-            "window.__qsMarkup && window.__qsMarkup.setTool(\"\(tool)\");"
+            "window.__qsMarkup.setTool(\"\(tool)\");"
         )
     }
 
@@ -439,11 +459,34 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
     /// if the user had drawn it. Used by `QUICKSHOW_TEST_MARKUP_UI` to
     /// drive a deterministic stroke without dispatching pointer events.
     func appendStrokeForTest(_ stroke: MarkupStroke) async {
+        await awaitMarkupReady()
         guard let data = try? JSONEncoder().encode(stroke),
               let json = String(data: data, encoding: .utf8) else { return }
         await evalIgnoringError(
-            "window.__qsMarkup && window.__qsMarkup.appendStrokeForTest(\(json));"
+            "window.__qsMarkup.appendStrokeForTest(\(json));"
         )
+    }
+
+    /// Suspend until `window.__qsMarkup` is fully installed and has
+    /// posted `{markupReady: true}` through the renderComplete bridge.
+    /// Returns immediately if the signal already arrived. Never throws
+    /// — callers prefer queueing over an error path here.
+    private func awaitMarkupReady() async {
+        if markupReady { return }
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            markupReadyWaiters.append(c)
+        }
+    }
+
+    /// Subclass hook for renderers that re-load the document on every
+    /// update (HTMLRenderer's `loadHTMLString`). Each fresh load tears
+    /// down `window.__qsMarkup`; flipping the flag back to `false`
+    /// makes the next markup call suspend until the user-script
+    /// re-installs the shim on the new document and posts a fresh
+    /// `markupReady` message. Template-based renderers swap content
+    /// via `innerHTML` without re-loading, so they don't need this.
+    func resetMarkupReady() {
+        markupReady = false
     }
 
     private func evalIgnoringError(_ js: String) async {
@@ -464,6 +507,16 @@ class WebViewPanelRenderer: NSObject, PanelRenderer, WKNavigationDelegate {
         if let copyText = dict["copy"] as? String {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(copyText, forType: .string)
+            return
+        }
+        // markup-canvas.js posts this at the tail of its IIFE, once
+        // `window.__qsMarkup` is fully installed. Resume any callers
+        // that suspended waiting for the shim.
+        if dict["markupReady"] as? Bool == true {
+            markupReady = true
+            let waiters = markupReadyWaiters
+            markupReadyWaiters.removeAll()
+            for w in waiters { w.resume() }
             return
         }
         let isReady = dict["ready"] as? Bool ?? false

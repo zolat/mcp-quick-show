@@ -58,6 +58,11 @@ final class HTMLRenderer: WebViewPanelRenderer {
             canvasHost.frame = target
             canvasHost.layoutSubtreeIfNeeded()
         }
+        // Each fresh `loadHTMLString` tears down the document — and
+        // with it `window.__qsMarkup`. Reset the readiness flag so any
+        // markup call queued after this point waits for the user
+        // script to re-install the shim on the new doc.
+        resetMarkupReady()
         return try await withCheckedThrowingContinuation { cont in
             self.pendingLoad = cont
             self.webView.loadHTMLString(payload.body, baseURL: nil)
