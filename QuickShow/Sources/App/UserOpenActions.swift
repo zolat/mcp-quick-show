@@ -168,10 +168,13 @@ final class UserOpenActions: NSObject {
 
         let proc = Process()
         proc.launchPath = "/usr/sbin/screencapture"
-        // -i  interactive selection (Esc cancels, spacebar → window mode)
-        // -U  show the ⌘⇧5-style floating toolbar
-        // -x  silence the shutter sound
-        proc.arguments = ["-i", "-U", "-x", tmpPath]
+        // -i  interactive selection — drag-release commits (⌘⇧4 muscle
+        //     memory); Esc cancels; spacebar toggles to window-pick.
+        //     Avoid -U here: the ⌘⇧5-style floating toolbar requires
+        //     an explicit Capture-button click and silently never
+        //     finalises if the user just drag-releases.
+        // -x  silence the shutter sound.
+        proc.arguments = ["-i", "-x", tmpPath]
 
         // Pipe stderr so a TCC denial or other failure surfaces in our
         // logs instead of vanishing — silent screencapture failures are
