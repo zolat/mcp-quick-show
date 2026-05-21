@@ -27,6 +27,7 @@ final class HUDWindow: NSWindow {
     private let titleBar = TitleBarOverlay()
     private let tabStrip = TabStripView()
     private let descriptionBanner = DescriptionBanner()
+    private let shareBanner = ShareConfirmationBanner()
     let resizeHandle = ResizeHandle()
 
     /// Currently-installed renderer views, keyed by panel name.
@@ -271,14 +272,31 @@ final class HUDWindow: NSWindow {
             titleBar.heightAnchor.constraint(equalToConstant: TitleBarOverlay.height),
         ])
 
-        // Tab strip sits below the title bar, above the content.
+        // Share-confirmation banner sits directly under the title bar so
+        // the user sees the "Copied" feedback adjacent to the Send pill
+        // they just clicked. Hidden by default (intrinsicContentSize 0)
+        // so the chrome stack below collapses tight against the title
+        // bar; when shown it adds a 28pt strip and the tab strip + the
+        // rest of the chrome simply slide down by that height for ~6 s.
+        // The title bar itself never reflows — that was the whole point
+        // of moving share-confirmation out of `TitleBarOverlay`.
+        shareBanner.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(shareBanner)
+        NSLayoutConstraint.activate([
+            shareBanner.topAnchor.constraint(equalTo: titleBar.bottomAnchor),
+            shareBanner.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            shareBanner.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+        ])
+
+        // Tab strip sits below the share banner (which is 0pt tall
+        // unless a share was just sent), above the content.
         tabStrip.translatesAutoresizingMaskIntoConstraints = false
         tabStrip.onSelect = { [weak self] name in self?.onSelectTab?(name) }
         tabStrip.onClose = { [weak self] name in self?.onCloseTab?(name) }
         tabStrip.onTearOut = { [weak self] name, event in self?.onTearOutTab?(name, event) }
         root.addSubview(tabStrip)
         NSLayoutConstraint.activate([
-            tabStrip.topAnchor.constraint(equalTo: titleBar.bottomAnchor),
+            tabStrip.topAnchor.constraint(equalTo: shareBanner.bottomAnchor),
             tabStrip.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 4),
             tabStrip.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -4),
             tabStrip.heightAnchor.constraint(equalToConstant: TabStripView.height),
@@ -443,14 +461,14 @@ final class HUDWindow: NSWindow {
         titleBar.setAlwaysShowSend(on)
     }
 
-    /// Swap the title bar into share-confirmation mode showing `token`.
-    /// Auto-dismisses after ~6 s, or manually via the strip's ✕.
-    /// Called by `SessionManager.recordShareSent` in place of popping
-    /// a modal alert — non-modal so the user can switch to Claude
-    /// immediately, with selectable token text and an explicit Copy
-    /// button.
+    /// Show a transient confirmation banner under the title bar with
+    /// the supplied share token. Auto-dismisses after ~6 s, or manually
+    /// via the banner's ✕. Called by `SessionManager.recordShareSent`
+    /// in place of popping a modal alert — non-modal so the user can
+    /// switch to Claude immediately, with selectable token text and an
+    /// explicit Copy button.
     func showShareConfirmation(token: String) {
-        titleBar.showShareConfirmation(token: token)
+        shareBanner.show(token: token)
     }
 
     /// Bind the title bar to its owning session id so its
