@@ -1,6 +1,6 @@
 ---
 name: frontend-design
-description: Create distinctive, production-grade frontend interfaces — rendered live in a floating QuickShow HUD panel and refined through a tight markup feedback loop. Use when the user asks for a landing page, hero, dashboard, web component, marketing site, brand portal, identity sketch, or any visual design they want to see and react to rather than describe. Generates creative, polished code that avoids generic AI aesthetics.
+description: Create distinctive, production-grade frontend interfaces — rendered live in a floating QuickShow HUD panel and refined through a tight markup feedback loop. Use when the user asks for a landing page, hero, dashboard, web component, marketing site, brand portal, identity sketch, or any visual design they want to see and react to rather than describe. Generates creative, polished code that avoids generic AI aesthetics. Works inside Claude Code's plan mode — the render → markup → re-render loop is the natural way to converge on a design *before* writing any implementation code.
 ---
 
 This skill turns Claude into a designer with a tight feedback loop:
@@ -45,6 +45,17 @@ addition.
    same `name`. Write **one sentence** describing what you changed.
 7. **On `markup_dismissed`:** ask what direction the user wants
    next.
+
+## Plan-mode usage
+
+This loop is plan-mode-safe and the artifacts persist post-plan —
+see the **"Plan mode & 'show, don't ask'"** section in
+`quickshow/SKILL.md` for the rationale, the substitution patterns
+versus `AskUserQuestion`, and the on-disk artifact path. Specific
+to the design loop: if a particular `markup_sent` annotation is
+load-bearing for the implementation, quote its `artifact_id` in
+your plan so future-you can refetch it with `get_markup(<id>)`
+after plan mode ends.
 
 ## Design thinking
 
