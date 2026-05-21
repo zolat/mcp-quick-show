@@ -6,6 +6,7 @@ import Cocoa
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controlServer: ControlServer?
+    private var mcpHTTPServer: MCPHTTPServer?
     private var statusItem: NSStatusItem?
     private(set) var sessionManager: SessionManager!
     private(set) var rendererRegistry: RendererRegistry!
@@ -22,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         userOpenActions.sessionManager = sessionManager
         installMenuBarItem()
         startControlServer()
+        startMCPHTTPServerIfEnabled()
         if ProcessInfo.processInfo.environment["QUICKSHOW_AUTO_PANEL"] == "1" {
             runAutoPanelSmoke()
         }
@@ -988,6 +990,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         controlServer?.stop()
+        mcpHTTPServer?.stop()
     }
 
     /// Headless smoke hook: open a fixture markdown panel at launch.
@@ -1105,6 +1108,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controlServer = server
         } catch {
             NSLog("QuickShow: control server failed to start: \(error)")
+        }
+    }
+
+    /// Phase-1 HTTP MCP server boot. Gated on QUICKSHOW_MCP_HTTP=1
+    /// so end users running the stdio sidecar aren't affected. Port
+    /// defaults to MCPHTTPServer.defaultPort; override via
+    /// QUICKSHOW_MCP_PORT for parallel test instances.
+    private func startMCPHTTPServerIfEnabled() {
+        guard ProcessInfo.processInfo.environment["QUICKSHOW_MCP_HTTP"] == "1" else { return }
+        let env = ProcessInfo.processInfo.environment["QUICKSHOW_MCP_PORT"]
+        let port = env.flatMap(UInt16.init) ?? MCPHTTPServer.defaultPort
+        let server = MCPHTTPServer(port: port)
+        do {
+            try server.start()
+            mcpHTTPServer = server
+        } catch {
+            NSLog("QuickShow: mcp http server failed to start: \(error)")
         }
     }
 
