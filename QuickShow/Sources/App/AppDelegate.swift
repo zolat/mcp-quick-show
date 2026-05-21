@@ -1119,7 +1119,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard ProcessInfo.processInfo.environment["QUICKSHOW_MCP_HTTP"] == "1" else { return }
         let env = ProcessInfo.processInfo.environment["QUICKSHOW_MCP_PORT"]
         let port = env.flatMap(UInt16.init) ?? MCPHTTPServer.defaultPort
-        let router = MCPSessionRouter()
+
+        // Two-phase wiring: build the router first with a registrar
+        // closure that captures the (about-to-exist) router by `var`,
+        // then assign the router into the closure's captured slot.
+        // This is the only way to give the registrar a back-reference
+        // to its own router (so the show_html handler can look up the
+        // session's claudePid at call time).
+        let sm = sessionManager!
+        var routerHolder: MCPSessionRouter? = nil
+        let router = MCPSessionRouter(
+            toolRegistrar: { @MainActor @Sendable server, mcpSessionID in
+                guard let r = routerHolder else { return }
+                await MCPToolHandlers.register(
+                    on: server,
+                    mcpSessionID: mcpSessionID,
+                    sessionManager: sm,
+                    router: r
+                )
+            }
+        )
+        routerHolder = router
+
         let server = MCPHTTPServer(port: port, router: router)
         do {
             try server.start()
