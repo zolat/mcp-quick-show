@@ -106,6 +106,13 @@ final class MCPHTTPServer {
     private nonisolated static func acceptOne(listenFD: Int32, router: MCPSessionRouter) {
         let connFD = Darwin.accept(listenFD, nil, nil)
         guard connFD >= 0 else { return }
+        // SO_NOSIGPIPE: writes to a closed socket return EPIPE (which we
+        // already handle in writeAll) without raising SIGPIPE on the
+        // whole process. Without this the delayed P3 push reliably
+        // crashes the app when the client has already disconnected,
+        // because the SDK's SSE pump writes into a dead FD.
+        var one: Int32 = 1
+        _ = setsockopt(connFD, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
         // Resolve the connecting client's PID via libproc while the
         // socket is still alive on both ends — accept→getpeername→walk.
         let claudePid = PeerPidResolver.resolve(fd: connFD, tag: "mcp-http-accept")

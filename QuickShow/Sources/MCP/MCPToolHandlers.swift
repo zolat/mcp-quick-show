@@ -83,6 +83,17 @@ enum MCPToolHandlers {
                         _meta: nil
                     ))
                 }
+                // P3: 5s after a successful show_html, push a
+                // notifications/message to the session's SSE stream.
+                // Tests whether Claude Code surfaces server-initiated
+                // notifications. Detached so it doesn't block the
+                // tool response; captures `sid`, `rt`, panel name
+                // by value.
+                let panelName = normalized.name
+                Task.detached {
+                    try? await Task.sleep(for: .seconds(5))
+                    await Self.firePushTest(router: rt, sessionID: sid, panelName: panelName)
+                }
                 return CallTool.Result(content: content)
             } catch let err as ShowHTMLArgs.ValidationError {
                 return CallTool.Result(
@@ -94,6 +105,50 @@ enum MCPToolHandlers {
                     content: [.text(text: "render error: \(error.localizedDescription)", annotations: nil, _meta: nil)],
                     isError: true
                 )
+            }
+        }
+    }
+
+    // MARK: - P3 push test
+
+    /// Send a `notifications/message` to the given session, ~5s
+    /// after `show_html`. The SDK's transport routes server-initiated
+    /// notifications onto the session's standalone GET SSE stream
+    /// (or its event-store backlog if no GET is open). NSLogs both
+    /// outcomes so the proof-point test rig can grep for them.
+    @Sendable
+    private static func firePushTest(
+        router: MCPSessionRouter,
+        sessionID: String,
+        panelName: String
+    ) async {
+        guard let server = await router.serverFor(sessionID: sessionID) else {
+            await MainActor.run {
+                NSLog("QuickShow: P3 push session_gone session=\(sessionID)")
+            }
+            return
+        }
+        let msg = Message<LogMessageNotification>(
+            method: LogMessageNotification.name,
+            params: LogMessageNotification.Parameters(
+                level: .info,
+                logger: "quickshow.poc",
+                data: .object([
+                    "event": .string("delayed_push_p3"),
+                    "panel": .string(panelName),
+                    "session": .string(sessionID),
+                    "ts_ms": .int(Int(Date().timeIntervalSince1970 * 1000)),
+                ])
+            )
+        )
+        do {
+            try await server.notify(msg)
+            await MainActor.run {
+                NSLog("QuickShow: P3 push SENT session=\(sessionID) panel=\(panelName)")
+            }
+        } catch {
+            await MainActor.run {
+                NSLog("QuickShow: P3 push FAILED session=\(sessionID) error=\(error)")
             }
         }
     }
