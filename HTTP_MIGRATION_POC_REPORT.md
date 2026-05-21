@@ -94,7 +94,12 @@ PoC code is additive-only (new files + `AppDelegate` env-gated hooks + one `pack
 
 ## Scope of P2 evidence
 
-P2 was proven against `claude --print` (non-interactive `--print` mode, model=haiku, custom `--mcp-config`). **Interactive `claude`** — what end users actually run, and what Phase 2 step 4 ("Switch plugin distribution") will ship — was **not** exercised. The MCP HTTP client implementation in Claude Code is the same wire-level code regardless of mode, so this is very likely a no-op gap, but the empirical evidence is `--print`-mode only. Worth a single interactive smoke run early in Phase 2 (before flipping `plugin/.mcp.json`).
+Initial P2 evidence was `claude --print` (non-interactive, model=haiku, custom `--mcp-config`). **Interactive `claude` smoke followed** — user-driven, free-text prompt → `show_html` tool call → HUD render observed:
+
+- 1 session created (`ED44C05F-…`), 1 standalone GET `/mcp` SSE stream, 1 `tools/call show_html` POST (429-byte body), 1 SpaceResolver placement via libproc-resolved Claude PID 53931, 1 P3 push delivered cleanly ~5.4 s later, 0 push failures.
+- User confirmed visually that the HUD opened with the expected HTML. Wire shape identical to `--print`, just with longer inter-request gaps (interactive thinking time).
+
+So the interactive vs `--print` gap noted earlier is closed empirically. Phase 2 step 4 (`plugin/.mcp.json` flip) can proceed without further client-side validation.
 
 ## Other findings worth flagging for Phase 2
 
@@ -110,13 +115,13 @@ P2 was proven against `claude --print` (non-interactive `--print` mode, model=ha
 
 ## Phase 2 readiness checklist (from spec §"Phase 2 — Full migration")
 
-- [x] HTTP transport works in Claude Code's MCP client (verified `--print` mode only)
+- [x] HTTP transport works in Claude Code's MCP client (verified both `--print` and interactive modes)
 - [x] SDK + BSD-socket adapter pattern proven
 - [x] libproc placement-PID derivation proven and fast
 - [x] Parallel-Claude isolation proven (per-session Server + transport, distinct PIDs)
 - [x] `SessionManager.upsert(...)` reuse proven — Phase 2 doesn't need to rewrite the renderer/HUD/Space pipeline, only re-key it from `sessionId` to `group`
 - [x] **SIGPIPE-on-closed-SSE production bug found and fixed** (`SO_NOSIGPIPE` in `MCPHTTPServer.acceptOne`) — Phase 2 inherits the fix
-- [ ] One interactive-`claude` smoke (vs `--print`) before flipping `plugin/.mcp.json`
+- [x] Interactive `claude` smoke confirmed identical wire shape to `--print`
 - [ ] Session timeout/cleanup loop (Phase 2 task; SDK conformance test has the pattern)
 - [ ] Migration of remaining tools (markdown, svg, mermaid, image, url, enable_markup_events, get_markup, enable_panel_events) — same pattern as `show_html`
 - [ ] `group`-as-canonical-namespace refactor across `MarkupPaths`, `events.ndjson`, `set_session_flag` → `set_group_flag`
