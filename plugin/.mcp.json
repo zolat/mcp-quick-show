@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "quickshow": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/mcp-quick-show"
+      "command": "${CLAUDE_PLUGIN_ROOT}/launcher/mcp-quick-show"
     }
   }
 }

@@ -73,6 +73,15 @@ Headless verification env vars:
 - `QUICKSHOW_EVENTS_DIR=/tmp/qs-events` — override the markup events
   + artifacts base dir (default `~/Library/Caches/QuickShow/events/`).
   Used by tests so they don't clobber a real session's log.
+- `QUICKSHOW_DEV_SIDECAR=1` — *plugin only*. Tells
+  `plugin/launcher/mcp-quick-show` to exec `bun sidecar/src/index.ts`
+  from the source repo instead of the compiled `plugin/bin/mcp-quick-show`.
+  Avoids the `tools/build-plugin.sh` cycle when iterating on sidecar TS
+  source. Still requires `/restart` in Claude Code to respawn the
+  MCP server; only kills the *rebuild* step, not the respawn. Export
+  in the shell that launches `claude` so the env propagates to the
+  spawned MCP process. No-op for end users running the compiled
+  release plugin.
 
 ## Repo topology
 
@@ -106,7 +115,8 @@ mcp-quick-show/
 │   └── marketplace.json         declares this repo as a single-plugin marketplace
 ├── plugin/                      Claude Code plugin tree (distribution)
 │   ├── .claude-plugin/plugin.json
-│   ├── .mcp.json                quickshow → ${CLAUDE_PLUGIN_ROOT}/bin/mcp-quick-show
+│   ├── .mcp.json                quickshow → ${CLAUDE_PLUGIN_ROOT}/launcher/mcp-quick-show
+│   ├── launcher/mcp-quick-show  committed bash shim; release: exec bin/mcp-quick-show, dev: exec `bun sidecar/src/index.ts` when QUICKSHOW_DEV_SIDECAR=1
 │   ├── bin/                     compiled sidecar binary (gitignored; built by tools/build-plugin.sh)
 │   ├── skills/quickshow/         foundational "how to use QuickShow" skill
 │   ├── skills/frontend-design/   bold-aesthetic design + markup loop
