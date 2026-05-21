@@ -12,8 +12,14 @@ settings:
     PRODUCT_BUNDLE_IDENTIFIER: com.zolat.QuickShow
     MARKETING_VERSION: "0.1.1"
     CURRENT_PROJECT_VERSION: "1"
-    CODE_SIGN_STYLE: Automatic
-    CODE_SIGN_IDENTITY: "-"
+    # Sign with the local Apple Development cert so the cdhash stays
+    # stable across rebuilds — TCC keys on the cert identity, not the
+    # bare cdhash, so a granted Screen Recording permission survives.
+    # Manual + SHA1 avoids Xcode's macOS-automatic mode insisting on
+    # the legacy "Mac Development" name.
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "D71097FF3A5CE6C04169B56B44890AFD3707523D"
+    DEVELOPMENT_TEAM: 7W38DP55GB
     ENABLE_HARDENED_RUNTIME: YES
     SWIFT_STRICT_CONCURRENCY: complete
 
