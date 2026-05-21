@@ -85,6 +85,17 @@ Spec mapping: **case (b)** — "Notification arrives but isn't surfaced to Claud
 
 Writing to a closed SSE FD raised SIGPIPE and reliably crashed the app whenever Claude exited inside the 5s push window. Fixed by setting `SO_NOSIGPIPE` on each accepted socket (`MCPHTTPServer.acceptOne`). Writes to closed peers now return EPIPE only; our `writeAll` already handles that. This would have been a Phase 2 production bug — surfacing it during the PoC is exactly the point.
 
+## Non-regression check on the existing stdio path
+
+PoC code is additive-only (new files + `AppDelegate` env-gated hooks + one `packages:` block in `project.yml`). Verified:
+
+- `cd sidecar && bun test` → **94 pass, 0 fail, 216 expect() calls, 156 ms.**
+- `QUICKSHOW_TEST_HTML=1` smoke (drives `SessionManager.upsert(...)` via the stdio code path) → **`TEST_HTML render width=400 height=300 snapshot=20166 bytes`, `script_status="script-ran"`, `TEST_HTML done`.** No regression.
+
+## Scope of P2 evidence
+
+P2 was proven against `claude --print` (non-interactive `--print` mode, model=haiku, custom `--mcp-config`). **Interactive `claude`** — what end users actually run, and what Phase 2 step 4 ("Switch plugin distribution") will ship — was **not** exercised. The MCP HTTP client implementation in Claude Code is the same wire-level code regardless of mode, so this is very likely a no-op gap, but the empirical evidence is `--print`-mode only. Worth a single interactive smoke run early in Phase 2 (before flipping `plugin/.mcp.json`).
+
 ## Other findings worth flagging for Phase 2
 
 - **SDK fits the BSD-socket adapter cleanly.** The `StatefulHTTPServerTransport` is framework-agnostic (takes `HTTPRequest` values, returns `HTTPResponse` enum cases). Our adapter is ~140 lines for the listener + ~200 lines for the HTTP/1.1 parser + SSE pump. The conformance test's NIO-based `HTTPApp.swift` was a useful reference but is not a dependency; we link only the `MCP` library product. Transitive footprint: swift-system, swift-log, eventsource (NIO is resolved but not linked into our binary).
@@ -94,18 +105,22 @@ Writing to a closed SSE FD raised SIGPIPE and reliably crashed the app whenever 
 - **`tools/list` requires explicit registration.** The SDK does not auto-handle `tools/list`; we register it alongside `tools/call` in `MCPToolHandlers.register`. Easy, just a gotcha worth knowing for Phase 2 when more tools land.
 - **JSON-RPC initialize peek.** The SDK's `JSONRPCMessageKind` is `package`-scoped, so our router does a 4-line JSON peek to decide "is this an initialize?" before creating a session. Trivial; reproduced verbatim from the conformance test's pattern.
 - **`group` semantics unchanged in Phase 1.** Phase 1 keeps `group` as today's optional tab-grouping field, since promoting it to the canonical content namespace is destructive to the existing sidecar's wire shape. Phase 2 step 2 still owns that promotion + the `MarkupPaths` reroot.
+- **Minor validation divergence to fix during Phase 2's group-canonical refactor.** `ShowHTMLArgs.parseBytesCapped` treats a JSON `null` value as "absent" (returns nil silently), while the TS handler's `parseString` treats a non-string `null` as a validation error ("must be a string when present"). A Claude that sends `{"group": null}` would get "leave-alone" semantics in Swift vs an error in TS. Not blocking — `null`-on-optional-string is a rare client behavior — but worth keying together with the other parity edits when the group field gets promoted.
 - **End-user impact: zero.** `plugin/.mcp.json` still points at the stdio sidecar. `QUICKSHOW_MCP_HTTP=1` opt-in gate keeps the HTTP server off by default. The DMG build path is unchanged.
 
 ## Phase 2 readiness checklist (from spec §"Phase 2 — Full migration")
 
-- [x] HTTP transport works in Claude Code's MCP client
+- [x] HTTP transport works in Claude Code's MCP client (verified `--print` mode only)
 - [x] SDK + BSD-socket adapter pattern proven
 - [x] libproc placement-PID derivation proven and fast
 - [x] Parallel-Claude isolation proven (per-session Server + transport, distinct PIDs)
 - [x] `SessionManager.upsert(...)` reuse proven — Phase 2 doesn't need to rewrite the renderer/HUD/Space pipeline, only re-key it from `sessionId` to `group`
+- [x] **SIGPIPE-on-closed-SSE production bug found and fixed** (`SO_NOSIGPIPE` in `MCPHTTPServer.acceptOne`) — Phase 2 inherits the fix
+- [ ] One interactive-`claude` smoke (vs `--print`) before flipping `plugin/.mcp.json`
 - [ ] Session timeout/cleanup loop (Phase 2 task; SDK conformance test has the pattern)
 - [ ] Migration of remaining tools (markdown, svg, mermaid, image, url, enable_markup_events, get_markup, enable_panel_events) — same pattern as `show_html`
 - [ ] `group`-as-canonical-namespace refactor across `MarkupPaths`, `events.ndjson`, `set_session_flag` → `set_group_flag`
+- [ ] Tighten `null`-on-optional-string parity in `ShowHTMLArgs.parseBytesCapped` during the group-canonical refactor
 - [ ] Switch `plugin/.mcp.json` to HTTP endpoint + login-item UX
 
 ## Reproduction recipe
