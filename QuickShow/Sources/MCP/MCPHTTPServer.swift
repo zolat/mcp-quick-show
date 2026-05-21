@@ -25,6 +25,7 @@ final class MCPHTTPServer {
     nonisolated static let defaultPort: UInt16 = 7890
 
     private let port: UInt16
+    private let router: MCPSessionRouter
     private let queue = DispatchQueue(
         label: "com.zolat.QuickShow.mcphttp",
         qos: .userInitiated
@@ -33,8 +34,9 @@ final class MCPHTTPServer {
     private var listenSource: DispatchSourceRead?
     private(set) var actualPort: UInt16 = 0
 
-    init(port: UInt16 = MCPHTTPServer.defaultPort) {
+    init(port: UInt16 = MCPHTTPServer.defaultPort, router: MCPSessionRouter) {
         self.port = port
+        self.router = router
     }
 
     func start() throws {
@@ -78,9 +80,10 @@ final class MCPHTTPServer {
         }
 
         listenFD = fd
+        let routerRef = router
         let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         src.setEventHandler {
-            MCPHTTPServer.acceptOne(listenFD: fd)
+            MCPHTTPServer.acceptOne(listenFD: fd, router: routerRef)
         }
         src.resume()
         listenSource = src
@@ -100,32 +103,46 @@ final class MCPHTTPServer {
 
     // MARK: - Connection handling (off the main actor)
 
-    private nonisolated static func acceptOne(listenFD: Int32) {
+    private nonisolated static func acceptOne(listenFD: Int32, router: MCPSessionRouter) {
         let connFD = Darwin.accept(listenFD, nil, nil)
         guard connFD >= 0 else { return }
         // Resolve the connecting client's PID via libproc while the
         // socket is still alive on both ends — accept→getpeername→walk.
         let claudePid = PeerPidResolver.resolve(fd: connFD, tag: "mcp-http-accept")
         Task.detached {
-            await MCPHTTPServer.serveConnection(fd: connFD, claudePid: claudePid)
+            await MCPHTTPServer.serveConnection(fd: connFD, claudePid: claudePid, router: router)
         }
     }
 
-    private nonisolated static func serveConnection(fd: Int32, claudePid: pid_t?) async {
+    private nonisolated static func serveConnection(
+        fd: Int32,
+        claudePid: pid_t?,
+        router: MCPSessionRouter
+    ) async {
         defer { Darwin.close(fd) }
         do {
             let req = try MCPHTTPParser.readRequest(fd: fd)
             let bodyLen = req.body?.count ?? 0
-            NSLog("QuickShow: mcp http \(req.method) \(req.path ?? "?") claude_pid=\(claudePid.map(String.init) ?? "nil") body_bytes=\(bodyLen) sess=\(req.header("Mcp-Session-Id") ?? "-")")
-            // Scaffold response — next commit replaces with SDK dispatch.
-            let placeholder = "ok — mcp http scaffold; claude_pid=\(claudePid.map(String.init) ?? "nil"); request=\(req.method) \(req.path ?? "?")\n"
-            let body = Data(placeholder.utf8)
-            MCPHTTPParser.writeResponse(
-                .data(body, headers: ["Content-Type": "text/plain"]),
-                to: fd
-            )
+            NSLog("QuickShow: mcp http \(req.method) \(req.path ?? "?") claude_pid=\(claudePid.map(String.init) ?? "nil") body_bytes=\(bodyLen) sess=\(req.header(HTTPHeaderName.sessionID) ?? "-")")
+
+            let response = await router.handle(req, claudePid: claudePid)
+
+            switch response {
+            case .stream(let stream, let extraHeaders):
+                // Server-Sent-Events stream — SDK already framed each
+                // event; we just pump bytes onto the wire until the
+                // stream ends or the client drops.
+                var headers = extraHeaders
+                // Surface the Mcp-Session-Id on SSE responses too —
+                // the SDK only sets it on initialize today.
+                if let sid = req.header(HTTPHeaderName.sessionID), headers[HTTPHeaderName.sessionID] == nil {
+                    headers[HTTPHeaderName.sessionID] = sid
+                }
+                await MCPHTTPParser.writeStream(stream, extraHeaders: headers, to: fd)
+            default:
+                MCPHTTPParser.writeResponse(response, to: fd)
+            }
         } catch MCPHTTPParser.ReadError.clientClosed {
-            // Normal connection close before any data — silent.
             return
         } catch {
             NSLog("QuickShow: mcp http read error: \(error)")

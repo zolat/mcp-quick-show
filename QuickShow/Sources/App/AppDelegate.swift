@@ -1119,7 +1119,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard ProcessInfo.processInfo.environment["QUICKSHOW_MCP_HTTP"] == "1" else { return }
         let env = ProcessInfo.processInfo.environment["QUICKSHOW_MCP_PORT"]
         let port = env.flatMap(UInt16.init) ?? MCPHTTPServer.defaultPort
-        let server = MCPHTTPServer(port: port)
+        let router = MCPSessionRouter()
+        let server = MCPHTTPServer(port: port, router: router)
         do {
             try server.start()
             mcpHTTPServer = server
