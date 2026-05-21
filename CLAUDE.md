@@ -176,6 +176,14 @@ Current verbs (sidecar → app): `hello`, `ping`, `upsert`, `close`,
 wire-protocol change. Only new verbs / response kinds require the
 paired-file edit.
 
+`sidecar/src/handlers/_groupingFields.ts` is the shared validator
+chokepoint for the optional `group` / `description` / `hud_description`
+fields that ride on every `show_*` call. It's not on the wire itself,
+but it lives inside the mirror's blast radius — adding or changing
+how a grouping field is parsed or normalised must stay in lockstep
+with how `ControlProtocol.swift` reads it on the Swift side. Treat
+it as a third paired file for grouping/description work.
+
 ### session_id is anchored to the Claude conversation UUID
 
 The sidecar's `hello.session_id` claim is the **conversation UUID**
