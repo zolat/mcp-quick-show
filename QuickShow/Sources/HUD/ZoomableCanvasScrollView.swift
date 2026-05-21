@@ -150,6 +150,16 @@ final class ZoomableCanvasScrollView: NSScrollView {
             smartFit()
             return
         }
+        // Belt-and-braces — in draw mode the in-DOM canvas captures
+        // mouseDown via pointer-events:auto, so this branch normally
+        // doesn't fire. But if the WebView's hit-test ever misses
+        // (e.g. mouse in the letterbox area around a smaller-than-
+        // bounds canvas), we'd otherwise enter pan + closed-hand
+        // cursor and visually compete with the canvas's crosshair.
+        guard !isInDrawMode else {
+            super.mouseDown(with: event)
+            return
+        }
         guard magnification > minMagnification + 0.01 else {
             super.mouseDown(with: event)
             return
@@ -189,7 +199,17 @@ final class ZoomableCanvasScrollView: NSScrollView {
     }
 
     override func resetCursorRects() {
-        if isInDrawMode { return }
+        if isInDrawMode {
+            // Cover the whole scroll view in a crosshair rect so the
+            // cursor stays consistent even in the letterbox area
+            // around the WebView's CSS-styled canvas. Without this,
+            // areas of the scroll view outside the canvas fall back
+            // to whatever cursor was last set (closedHand from a
+            // prior pan, openHand from before draw mode armed) and
+            // visibly compete with the canvas's crosshair.
+            addCursorRect(bounds, cursor: .crosshair)
+            return
+        }
         if magnification > minMagnification + 0.01 {
             addCursorRect(bounds, cursor: .openHand)
         }

@@ -357,4 +357,21 @@
     } else {
         init();
     }
+
+    // Signal Swift that `window.__qsMarkup` is fully installed and
+    // ready to receive enterDrawMode / setTool / etc. Without this,
+    // an autoEnterDrawMode call right after a fresh upsert can race
+    // ahead of the user-script's installation (atDocumentEnd does not
+    // strictly precede DOMContentLoaded under load), the
+    // `window.__qsMarkup && ...` short-circuit drops the call, and
+    // the title bar appears in draw mode while the canvas's
+    // pointer-events stay `none` until the user manually toggles.
+    try {
+        if (window.webkit && window.webkit.messageHandlers
+            && window.webkit.messageHandlers.renderComplete) {
+            window.webkit.messageHandlers.renderComplete.postMessage({
+                markupReady: true
+            });
+        }
+    } catch (_) { /* bridge missing in non-WKWebView contexts */ }
 })();
