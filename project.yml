@@ -5,6 +5,11 @@ options:
     macOS: "13.0"
   createIntermediateGroups: true
 
+packages:
+  MCP:
+    url: https://github.com/modelcontextprotocol/swift-sdk
+    exactVersion: "0.12.1"
+
 settings:
   base:
     SWIFT_VERSION: "5.9"
@@ -29,6 +34,9 @@ targets:
     platform: macOS
     sources:
       - path: QuickShow/Sources
+    dependencies:
+      - package: MCP
+        product: MCP
     info:
       path: QuickShow/Info.plist
       properties:
