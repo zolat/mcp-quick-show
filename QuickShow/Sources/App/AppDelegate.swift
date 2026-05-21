@@ -52,6 +52,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_HTML"] == "1" {
             runHTMLSmoke()
         }
+        if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_PEER_PID"] == "1" {
+            runPeerPidSmoke()
+        }
+    }
+
+    /// Headless P1 proof: stands up a tiny AF_INET listener on
+    /// 127.0.0.1, accepts a single connection, hands the FD to
+    /// `PeerPidResolver`, and logs the resolved PID. Designed to be
+    /// driven by `curl http://127.0.0.1:<port>/` from a shell where
+    /// `$$` is known, then asserting the resolved PID matches curl's.
+    ///
+    /// Logs lines:
+    ///   QuickShow: TEST_PEER_PID listening port=<port>
+    ///   QuickShow: PeerPidResolver accepted-conn fd=<n> peer_port=<p> resolved_pid=<pid>
+    ///   QuickShow: TEST_PEER_PID resolved_pid=<pid>
+    ///   QuickShow: TEST_PEER_PID done
+    private func runPeerPidSmoke() {
+        Task.detached {
+            let fd = socket(AF_INET, SOCK_STREAM, 0)
+            guard fd >= 0 else {
+                NSLog("QuickShow: TEST_PEER_PID failed: socket() errno=\(errno)")
+                return
+            }
+            defer { Darwin.close(fd) }
+
+            var one: Int32 = 1
+            _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+
+            var addr = sockaddr_in()
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = 0  // ephemeral
+            addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+            let addrSize = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let bindRC = withUnsafePointer(to: &addr) { ptr -> Int32 in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                    Darwin.bind(fd, sa, addrSize)
+                }
+            }
+            guard bindRC == 0 else {
+                NSLog("QuickShow: TEST_PEER_PID failed: bind() errno=\(errno)")
+                return
+            }
+            // Read back the actual port.
+            var actual = sockaddr_in()
+            var actualLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let getRC = withUnsafeMutablePointer(to: &actual) { ptr -> Int32 in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                    getsockname(fd, sa, &actualLen)
+                }
+            }
+            guard getRC == 0 else {
+                NSLog("QuickShow: TEST_PEER_PID failed: getsockname() errno=\(errno)")
+                return
+            }
+            let port = UInt16(bigEndian: actual.sin_port)
+            guard Darwin.listen(fd, 8) == 0 else {
+                NSLog("QuickShow: TEST_PEER_PID failed: listen() errno=\(errno)")
+                return
+            }
+            NSLog("QuickShow: TEST_PEER_PID listening port=\(port)")
+
+            // Accept one connection, resolve, write a tiny HTTP response,
+            // then loop again so the test rig can drive multiple curls
+            // (direct + fork-worker variants).
+            while true {
+                let connFd = Darwin.accept(fd, nil, nil)
+                if connFd < 0 {
+                    NSLog("QuickShow: TEST_PEER_PID accept errno=\(errno)")
+                    continue
+                }
+                let pid = PeerPidResolver.resolve(fd: connFd, tag: "accepted-conn")
+                NSLog("QuickShow: TEST_PEER_PID resolved_pid=\(pid.map(String.init) ?? "nil")")
+                let body = "pid=\(pid.map(String.init) ?? "nil")\n"
+                let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+                _ = resp.withCString { p -> Int in
+                    Darwin.write(connFd, p, strlen(p))
+                }
+                Darwin.close(connFd)
+            }
+        }
     }
 
     /// Headless `show_html` test. Renders an HTML doc with an inline
