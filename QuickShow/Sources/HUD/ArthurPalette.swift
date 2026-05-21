@@ -25,4 +25,12 @@ enum ArthurPalette {
     static let defaultStrokeRed = NSColor(
         red: 216/255.0, green: 57/255.0, blue: 44/255.0, alpha: 1.0
     )
+
+    /// Primary-action accent — sage olive (#88904a). Replaces the
+    /// system `controlAccentColor` (Apple blue) on the Send / Copy
+    /// pills so chrome reads as one warm palette instead of borrowing
+    /// the user's system tint.
+    static let accent = NSColor(
+        red: 136/255.0, green: 144/255.0, blue: 74/255.0, alpha: 1.0
+    )
 }
