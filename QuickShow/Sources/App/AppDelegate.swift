@@ -23,7 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         userOpenActions.sessionManager = sessionManager
         installMenuBarItem()
         startControlServer()
-        startMCPHTTPServerIfEnabled()
+        startMCPHTTPServer()
         if ProcessInfo.processInfo.environment["QUICKSHOW_AUTO_PANEL"] == "1" {
             runAutoPanelSmoke()
         }
@@ -1115,8 +1115,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// so end users running the stdio sidecar aren't affected. Port
     /// defaults to MCPHTTPServer.defaultPort; override via
     /// QUICKSHOW_MCP_PORT for parallel test instances.
-    private func startMCPHTTPServerIfEnabled() {
-        guard ProcessInfo.processInfo.environment["QUICKSHOW_MCP_HTTP"] == "1" else { return }
+    private func startMCPHTTPServer() {
+        // Phase 2: the embedded HTTP MCP server is the canonical
+        // sidecar — plugin/.mcp.json points at http://127.0.0.1:7890/mcp.
+        // Always start it. Set QUICKSHOW_MCP_HTTP=0 to opt out for
+        // headless integration tests that don't touch the wire.
+        if ProcessInfo.processInfo.environment["QUICKSHOW_MCP_HTTP"] == "0" { return }
         let env = ProcessInfo.processInfo.environment["QUICKSHOW_MCP_PORT"]
         let port = env.flatMap(UInt16.init) ?? MCPHTTPServer.defaultPort
 

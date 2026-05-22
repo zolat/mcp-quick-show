@@ -23,7 +23,7 @@ APP=$(xcodebuild -showBuildSettings -scheme QuickShow 2>/dev/null \
 pkill -f "QuickShow.app/Contents/MacOS/QuickShow" 2>/dev/null || true
 sleep 1
 
-QUICKSHOW_MCP_HTTP=1 "$APP/QuickShow.app/Contents/MacOS/QuickShow" \
+"$APP/QuickShow.app/Contents/MacOS/QuickShow" \
   > /tmp/quickshow-smoke.log 2>&1 &
 APP_PID=$!
 sleep 3

@@ -76,7 +76,7 @@ final class MCPSessionRouter {
     /// - Parameter onSessionRemoved: invoked after a session has been
     ///   dropped (DELETE or idle sweep). Drives orphan-grace.
     init(
-        serverInfo: Server.Info = Server.Info(name: "QuickShow", version: "0.2.0-poc"),
+        serverInfo: Server.Info = Server.Info(name: "QuickShow", version: "0.2.0"),
         capabilities: Server.Capabilities = Server.Capabilities(
             tools: .init(listChanged: false)
         ),
