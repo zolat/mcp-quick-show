@@ -192,11 +192,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 let session = "markup-smoke"
                 sessionManager.setFlag(
-                    sessionId: session,
+                    group: session,
                     key: "markup_events_armed",
                     value: .bool(true)
                 )
-                NSLog("QuickShow: TEST_MARKUP step=armed flag=\(sessionManager.flag(sessionId: session, key: "markup_events_armed").map(String.init(describing:)) ?? "nil")")
+                NSLog("QuickShow: TEST_MARKUP step=armed flag=\(sessionManager.flag(group: session, key: "markup_events_armed").map(String.init(describing:)) ?? "nil")")
 
                 _ = try await sessionManager.upsert(
                     sessionId: session,
@@ -286,7 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // synchronously when it's born.
                 let s1 = "markup-ui-initial"
                 sessionManager.setFlag(
-                    sessionId: s1,
+                    group: s1,
                     key: "markup_events_armed",
                     value: .bool(true)
                 )
@@ -320,7 +320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 let beforeArm = hud2.isSendButtonVisibleForTest
                 sessionManager.setFlag(
-                    sessionId: s2,
+                    group: s2,
                     key: "markup_events_armed",
                     value: .bool(true)
                 )
@@ -336,7 +336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // artifact land in the session's events dir.
                 let s3 = "markup-ui-send"
                 sessionManager.setFlag(
-                    sessionId: s3,
+                    group: s3,
                     key: "markup_events_armed",
                     value: .bool(true)
                 )
@@ -369,7 +369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // the composite into the artifact bytes.
                 let s4 = "markup-ui-draw"
                 sessionManager.setFlag(
-                    sessionId: s4,
+                    group: s4,
                     key: "markup_events_armed",
                     value: .bool(true)
                 )
@@ -449,7 +449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // flag — see SessionManager.renderPanel).
                 let s6 = "markup-ui-rerender"
                 sessionManager.setFlag(
-                    sessionId: s6,
+                    group: s6,
                     key: "markup_events_armed",
                     value: .bool(true)
                 )
@@ -490,7 +490,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // back to b) reports the same count.
                 let s7 = "markup-ui-survives-rerender"
                 sessionManager.setFlag(
-                    sessionId: s7,
+                    group: s7,
                     key: "markup_events_armed",
                     value: .bool(true)
                 )

@@ -561,8 +561,8 @@ final class TitleBarOverlay: NSView {
 
     @objc private func handleSessionFlagChanged(_ note: Notification) {
         guard let info = note.userInfo as? [String: Any],
-              let session = info["sessionId"] as? String,
-              session == owningSessionId,
+              let group = info["group"] as? String,
+              group == owningSessionId,
               let key = info["key"] as? String,
               key == "markup_events_armed" else { return }
         // Re-pull via the host so the source of truth stays one place.

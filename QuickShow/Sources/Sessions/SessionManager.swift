@@ -217,7 +217,7 @@ final class SessionManager: NSObject {
                     displayName: String? = nil,
                     autoEnterDrawMode: Bool = false) async throws -> (RenderResult, Data) {
         let sessionId = Self.userWindowsSessionID
-        setFlag(sessionId: sessionId, key: "markup_events_armed", value: .bool(true))
+        setFlag(group: sessionId, key: "markup_events_armed", value: .bool(true))
         let result = try await upsert(
             sessionId: sessionId,
             name: name,
@@ -525,23 +525,23 @@ final class SessionManager: NSObject {
 
     // MARK: - Flags
 
-    /// Set a generic per-session flag. The session is auto-created if
-    /// not yet known; this matches `upsert`'s behaviour so the sidecar
-    /// can arm flags before its first render call lands.
-    func setFlag(sessionId: String, key: String, value: SessionFlagValue) {
-        let session = ensureGroup(sessionId)
-        session.flags[key] = value
-        NSLog("QuickShow: session \(sessionId) flag \(key) = \(value)")
+    /// Set a generic per-group flag. The group is auto-created if not
+    /// yet known; this matches `upsert`'s behaviour so callers can arm
+    /// flags before the first render call lands.
+    func setFlag(group: String, key: String, value: SessionFlagValue) {
+        let groupState = ensureGroup(group)
+        groupState.flags[key] = value
+        NSLog("QuickShow: group \(group) flag \(key) = \(value)")
         NotificationCenter.default.post(
             name: .quickShowSessionFlagChanged,
             object: nil,
-            userInfo: ["sessionId": sessionId, "key": key]
+            userInfo: ["group": group, "key": key]
         )
     }
 
-    /// Read a per-session flag. Returns `nil` if unset or session unknown.
-    func flag(sessionId: String, key: String) -> SessionFlagValue? {
-        groups[sessionId]?.flags[key]
+    /// Read a per-group flag. Returns `nil` if unset or group unknown.
+    func flag(group: String, key: String) -> SessionFlagValue? {
+        groups[group]?.flags[key]
     }
 
     // MARK: - Markup events
@@ -1030,7 +1030,7 @@ final class SessionManager: NSObject {
             return panel.strokes.isEmpty
         }
         window.onResolveArmedFlag = { [weak self] in
-            return self?.flag(sessionId: sessionId, key: "markup_events_armed")?.asBool == true
+            return self?.flag(group: sessionId, key: "markup_events_armed")?.asBool == true
         }
         // Bind the title bar to its owning session and pull the
         // current armed-flag state SYNCHRONOUSLY. This covers the
@@ -1039,7 +1039,7 @@ final class SessionManager: NSObject {
         // already true by the time this HUD is born — the
         // notification observer alone would miss it.
         window.setOwningSessionId(sessionId)
-        let armed = flag(sessionId: sessionId, key: "markup_events_armed")?.asBool == true
+        let armed = flag(group: sessionId, key: "markup_events_armed")?.asBool == true
         window.setArmed(armed)
     }
 

@@ -130,7 +130,7 @@ enum ControlHandlers {
     private static func handleSetSessionFlag(req: ControlRequest, delegate: AppDelegate?) throws -> ControlOk {
         let payload = try req.decodePayload(SetSessionFlagRequest.self)
         delegate?.sessionManager.setFlag(
-            sessionId: payload.session,
+            group: payload.session,
             key: payload.key,
             value: payload.value
         )

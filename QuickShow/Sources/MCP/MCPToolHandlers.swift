@@ -453,7 +453,7 @@ enum MCPToolHandlers {
         }
         let listenerConnected = await markupEvents.hasSubscriber(group: groupKey)
         await MainActor.run {
-            sm.setFlag(sessionId: groupKey, key: "markup_events_armed", value: .bool(true))
+            sm.setFlag(group: groupKey, key: "markup_events_armed", value: .bool(true))
         }
         let monitorCommand = "curl -sN -H \"Mcp-Session-Id: \(groupKey)\" http://127.0.0.1:\(port)/markup-events | grep --line-buffered -v '\"type\":\"heartbeat\"'"
 
@@ -510,7 +510,7 @@ enum MCPToolHandlers {
             return errorResult("failed to prepare events dir: \(error.localizedDescription)")
         }
         await MainActor.run {
-            sm.setFlag(sessionId: groupKey, key: "panel_events_armed", value: .bool(true))
+            sm.setFlag(group: groupKey, key: "panel_events_armed", value: .bool(true))
         }
         let text = [
             "Panel events armed for this session.",
