@@ -40,6 +40,7 @@ enum MCPToolHandlers {
             showImageTool(),
             showURLTool(),
             enableMarkupEventsTool(),
+            enablePanelEventsTool(),
             getMarkupTool(),
         ]
 
@@ -69,6 +70,8 @@ enum MCPToolHandlers {
                 return await Self.handleShowURL(args: args, sm: sm, rt: rt, sid: sid)
             case "enable_markup_events":
                 return await Self.handleEnableMarkupEvents(sm: sm, markupEvents: me, sid: sid, port: port)
+            case "enable_panel_events":
+                return await Self.handleEnablePanelEvents(sm: sm, sid: sid)
             case "get_markup":
                 return await Self.handleGetMarkup(args: args, sid: sid)
             default:
@@ -463,6 +466,44 @@ enum MCPToolHandlers {
         return CallTool.Result(content: [.text(text: lines.joined(separator: "\n"), annotations: nil, _meta: nil)])
     }
 
+    // MARK: - enable_panel_events dispatch
+
+    private static func handleEnablePanelEvents(
+        sm: SessionManager,
+        sid: String
+    ) async -> CallTool.Result {
+        let logPath: URL
+        do {
+            logPath = try MarkupPaths.ensureDirs(sid)
+        } catch {
+            return errorResult("failed to prepare events dir: \(error.localizedDescription)")
+        }
+        await MainActor.run {
+            sm.setFlag(sessionId: sid, key: "panel_events_armed", value: .bool(true))
+        }
+        let text = [
+            "Panel events armed for this session.",
+            "",
+            "To receive notifications when a `show_html` (or other WebView) panel calls `window.quickshow.emit(...)`, start a Monitor:",
+            "",
+            "  command: `tail -n 0 -F \(logPath.path)`",
+            "  persistent: true",
+            "  description: \"QuickShow panel events\"",
+            "",
+            "Each notification will be one NDJSON line.",
+            "  - `{\"type\":\"panel_event\",\"panel\":\"<name>\",\"payload\":<json>,\"ts\":<ms>}` → the agent-defined payload your HTML emitted.",
+            "  - `{\"type\":\"panel_event_dropped\",\"panel\":\"<name>\",\"dropped\":<n>,\"ts\":<ms>}` → the throttle (20 events/sec/panel) discarded `n` emits in the last second. Throttle the page if you see this.",
+            "",
+            "JS surface inside your panel HTML:",
+            "  `window.quickshow.emit(payload)`  — payload is any JSON-serializable value (typically `{type, ...}`).",
+            "",
+            "If you also want markup feedback (user drawing on the panel + Send), call `enable_markup_events` too — the channels are independent and share this same log.",
+            "",
+            "This call is idempotent — calling again returns the same instructions and leaves the flag armed.",
+        ].joined(separator: "\n")
+        return CallTool.Result(content: [.text(text: text, annotations: nil, _meta: nil)])
+    }
+
     // MARK: - get_markup dispatch
 
     private static let artifactIDPattern: NSRegularExpression = {
@@ -783,6 +824,27 @@ enum MCPToolHandlers {
                 + "you see a `markup_sent` line, call `get_markup(artifact_id)` to "
                 + "fetch the image. When you see `markup_dismissed`, the user closed "
                 + "the panel without marking up. Idempotent.",
+            inputSchema: .object([
+                "type": .string("object"),
+                "properties": .object([:]),
+            ])
+        )
+    }
+
+    private static func enablePanelEventsTool() -> Tool {
+        return Tool(
+            name: "enable_panel_events",
+            description:
+                "Arm the panel-event push channel for this session. After calling "
+                + "this, agent HTML rendered via `show_html` (or any WebView panel) "
+                + "can call `window.quickshow.emit(payload)` and the payload lands as "
+                + "a one-line NDJSON event in a per-session log file. Call this ONCE "
+                + "per session before rendering interactive panels. The tool response "
+                + "tells you the exact `Monitor` command to start watching the events "
+                + "log — react to `panel_event` lines (your free-form payload, "
+                + "agent-defined semantics) and `panel_event_dropped` lines (throttle "
+                + "warning, ≥1 event/sec was discarded). Independent of "
+                + "`enable_markup_events`; arm either, both, or neither. Idempotent.",
             inputSchema: .object([
                 "type": .string("object"),
                 "properties": .object([:]),
