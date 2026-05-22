@@ -37,6 +37,7 @@ enum MCPToolHandlers {
             showMarkdownTool(),
             showSVGTool(),
             showMermaidTool(),
+            showImageTool(),
             enableMarkupEventsTool(),
             getMarkupTool(),
         ]
@@ -61,6 +62,8 @@ enum MCPToolHandlers {
                 return await Self.handleShowSVG(args: args, sm: sm, rt: rt, sid: sid)
             case "show_mermaid":
                 return await Self.handleShowMermaid(args: args, sm: sm, rt: rt, sid: sid)
+            case "show_image":
+                return await Self.handleShowImage(args: args, sm: sm, rt: rt, sid: sid)
             case "enable_markup_events":
                 return await Self.handleEnableMarkupEvents(sm: sm, markupEvents: me, sid: sid, port: port)
             case "get_markup":
@@ -309,6 +312,56 @@ enum MCPToolHandlers {
             )
             let (result, snapshot) = try await dispatch(sm: sm, rt: rt, sid: sid, payload: payload)
             return CallTool.Result(content: renderResultContent(payload: payload, result: result, snapshot: snapshot))
+        } catch let err as ToolValidation.Error {
+            return errorResult("invalid arguments: \(err.message)")
+        } catch {
+            return errorResult("render error: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - show_image
+
+    private static func handleShowImage(
+        args: [String: Value],
+        sm: SessionManager,
+        rt: MCPSessionRouter,
+        sid: String
+    ) async -> CallTool.Result {
+        do {
+            let name = try ToolValidation.parseName(args)
+            guard let pv = args["path"], let pathArg = pv.stringValue,
+                  !pathArg.trimmingCharacters(in: .whitespaces).isEmpty
+            else {
+                throw ToolValidation.Error(message: "`path` must be a non-empty string")
+            }
+            let resolved: MCPPathResolver.Resolved
+            do {
+                resolved = try MCPPathResolver.resolve(
+                    pathArg,
+                    maxBytes: pathImageMaxBytes,
+                    allowedMimes: ["image/png", "image/jpeg", "image/gif", "image/webp"]
+                )
+            } catch let err as MCPPathResolver.Error {
+                throw ToolValidation.Error(message: err.message)
+            }
+            let payload = UpsertPayload(
+                name: name,
+                contentType: "image",
+                form: "path",
+                body: resolved.absolutePath,
+                width: nil,
+                returnScreenshot: ToolValidation.parseReturnScreenshot(args),
+                grouping: try ToolValidation.parseGroupingFields(args)
+            )
+            let (result, snapshot) = try await dispatch(sm: sm, rt: rt, sid: sid, payload: payload)
+            // PRD: show_image returns the image bytes themselves
+            // (ImageRenderer.snapshot() caches and returns
+            // lastImageData), not a screenshot of the panel.
+            // MIME hardcoded to image/png for response parity with the
+            // sidecar — the UI agent sniffs in practice.
+            return CallTool.Result(content: renderResultContent(
+                payload: payload, result: result, snapshot: snapshot
+            ))
         } catch let err as ToolValidation.Error {
             return errorResult("invalid arguments: \(err.message)")
         } catch {
@@ -581,6 +634,42 @@ enum MCPToolHandlers {
             inputSchema: .object([
                 "type": .string("object"),
                 "required": .array([.string("name"), .string("definition")]),
+                "properties": .object(properties),
+            ])
+        )
+    }
+
+    private static func showImageTool() -> Tool {
+        var properties: [String: Value] = [
+            "name": .object([
+                "type": .string("string"),
+                "description": .string("Stable slot name. Same name updates in place."),
+            ]),
+            "path": .object([
+                "type": .string("string"),
+                "description": .string(
+                    "Filesystem path to an image file (PNG/JPEG/GIF/WebP). Supports ~ and relative paths."
+                ),
+            ]),
+            "return_screenshot": .object([
+                "type": .string("boolean"),
+                "description": .string(
+                    "If true (default), include the image bytes in the response. Set to false to save tokens when the agent doesn't need to inspect."
+                ),
+                "default": .bool(true),
+            ]),
+        ]
+        for (k, v) in ToolValidation.groupingSchemaProps { properties[k] = v }
+        return Tool(
+            name: "show_image",
+            description:
+                "Display an existing image file (PNG, JPEG, GIF, WebP) in a floating HUD panel on "
+                + "the user's screen. Path can be absolute, relative to cwd, or use `~`. The response "
+                + "includes the image bytes (not a screenshot of the panel). Same `name` updates the "
+                + "existing panel in place.",
+            inputSchema: .object([
+                "type": .string("object"),
+                "required": .array([.string("name"), .string("path")]),
                 "properties": .object(properties),
             ])
         )
