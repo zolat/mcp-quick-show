@@ -24,23 +24,31 @@ to draw something freeform, not click cells.
      iterates.
    Don't push for a structure they didn't ask for. If they just
    say "let's play pictionary", default rules are fine.
-2. **Render the blank canvas:**
+2. **Pick a `group` and save it to memory.** Example:
+   ```
+   group = "pictionary-" + <6-hex-slug>     # e.g. "pictionary-a3f"
+   memory.save("pictionary_game_group", group)
+   ```
+   Read it back on every subsequent turn (including after
+   `claude --resume`).
+
+3. **Render the blank canvas:**
 
    ```
-   show_html(name: "pictionary-canvas", content: <HTML below>, width: 800)
+   show_html(name="pictionary-canvas", group=group, content=<HTML below>, width=800)
    ```
 
-3. **Arm the markup channel:**
+4. **Arm the markup channel for this group:**
 
    ```
-   enable_markup_events()
+   enable_markup_events(group=group)
    ```
 
    The response includes a `Monitor` command pointed at the
-   session's `events.ndjson`. **Start that Monitor as
+   group's `events.ndjson`. **Start that Monitor as
    `persistent: true`** so each Send fires a notification.
 
-4. **Tell the user to draw.** One short line: "Draw it and hit
+5. **Tell the user to draw.** One short line: "Draw it and hit
    Send — I'll guess." Then wait. They'll click the ✏︎ in the
    title bar to enter draw mode, sketch their word, and click
    Send.
@@ -53,7 +61,7 @@ On every `markup_sent` line whose `panel === "pictionary-canvas"`:
    `artifact_id`) field — pass it straight to:
 
    ```
-   get_markup(artifact_id: "<id>")
+   get_markup(artifact_id="<id>", group=group)
    ```
 
    The response is an image content block. Look at it.

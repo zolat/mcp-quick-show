@@ -5,7 +5,7 @@ import Cocoa
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var controlServer: ControlServer?
+    private var mcpHTTPServer: MCPHTTPServer?
     private var statusItem: NSStatusItem?
     private(set) var sessionManager: SessionManager!
     private(set) var rendererRegistry: RendererRegistry!
@@ -21,7 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         userOpenActions = UserOpenActions()
         userOpenActions.sessionManager = sessionManager
         installMenuBarItem()
-        startControlServer()
+        startMCPHTTPServer()
         if ProcessInfo.processInfo.environment["QUICKSHOW_AUTO_PANEL"] == "1" {
             runAutoPanelSmoke()
         }
@@ -51,6 +51,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_HTML"] == "1" {
             runHTMLSmoke()
+        }
+        if ProcessInfo.processInfo.environment["QUICKSHOW_TEST_PEER_PID"] == "1" {
+            runPeerPidSmoke()
+        }
+    }
+
+    /// Headless P1 proof: stands up a tiny AF_INET listener on
+    /// 127.0.0.1, accepts a single connection, hands the FD to
+    /// `PeerPidResolver`, and logs the resolved PID. Designed to be
+    /// driven by `curl http://127.0.0.1:<port>/` from a shell where
+    /// `$$` is known, then asserting the resolved PID matches curl's.
+    ///
+    /// Logs lines:
+    ///   QuickShow: TEST_PEER_PID listening port=<port>
+    ///   QuickShow: PeerPidResolver accepted-conn fd=<n> peer_port=<p> resolved_pid=<pid>
+    ///   QuickShow: TEST_PEER_PID resolved_pid=<pid>
+    ///   QuickShow: TEST_PEER_PID done
+    private func runPeerPidSmoke() {
+        Task.detached {
+            let fd = socket(AF_INET, SOCK_STREAM, 0)
+            guard fd >= 0 else {
+                NSLog("QuickShow: TEST_PEER_PID failed: socket() errno=\(errno)")
+                return
+            }
+            defer { Darwin.close(fd) }
+
+            var one: Int32 = 1
+            _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+
+            var addr = sockaddr_in()
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = 0  // ephemeral
+            addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+            let addrSize = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let bindRC = withUnsafePointer(to: &addr) { ptr -> Int32 in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                    Darwin.bind(fd, sa, addrSize)
+                }
+            }
+            guard bindRC == 0 else {
+                NSLog("QuickShow: TEST_PEER_PID failed: bind() errno=\(errno)")
+                return
+            }
+            // Read back the actual port.
+            var actual = sockaddr_in()
+            var actualLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let getRC = withUnsafeMutablePointer(to: &actual) { ptr -> Int32 in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                    getsockname(fd, sa, &actualLen)
+                }
+            }
+            guard getRC == 0 else {
+                NSLog("QuickShow: TEST_PEER_PID failed: getsockname() errno=\(errno)")
+                return
+            }
+            let port = UInt16(bigEndian: actual.sin_port)
+            guard Darwin.listen(fd, 8) == 0 else {
+                NSLog("QuickShow: TEST_PEER_PID failed: listen() errno=\(errno)")
+                return
+            }
+            NSLog("QuickShow: TEST_PEER_PID listening port=\(port)")
+
+            // Accept one connection, resolve, write a tiny HTTP response,
+            // then loop again so the test rig can drive multiple curls
+            // (direct + fork-worker variants).
+            while true {
+                let connFd = Darwin.accept(fd, nil, nil)
+                if connFd < 0 {
+                    NSLog("QuickShow: TEST_PEER_PID accept errno=\(errno)")
+                    continue
+                }
+                let pid = PeerPidResolver.resolve(fd: connFd, tag: "accepted-conn")
+                NSLog("QuickShow: TEST_PEER_PID resolved_pid=\(pid.map(String.init) ?? "nil")")
+                let body = "pid=\(pid.map(String.init) ?? "nil")\n"
+                let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+                _ = resp.withCString { p -> Int in
+                    Darwin.write(connFd, p, strlen(p))
+                }
+                Darwin.close(connFd)
+            }
         }
     }
 
@@ -82,7 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSLog("QuickShow: TEST_HTML render width=\(result.width) height=\(result.height) snapshot_bytes=\(snapshot.count)")
 
                 // Drive the WebView to read the post-script DOM state.
-                guard let panel = sessionManager.sessions[session]?.huds.first?.panels.first,
+                guard let panel = sessionManager.groups[session]?.huds.first?.panels.first,
                       let web = panel.renderer as? WebViewPanelRenderer else {
                     NSLog("QuickShow: TEST_HTML failed: renderer missing")
                     return
@@ -110,11 +190,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 let session = "markup-smoke"
                 sessionManager.setFlag(
-                    sessionId: session,
+                    group: session,
                     key: "markup_events_armed",
                     value: .bool(true)
                 )
-                NSLog("QuickShow: TEST_MARKUP step=armed flag=\(sessionManager.flag(sessionId: session, key: "markup_events_armed").map(String.init(describing:)) ?? "nil")")
+                NSLog("QuickShow: TEST_MARKUP step=armed flag=\(sessionManager.flag(group: session, key: "markup_events_armed").map(String.init(describing:)) ?? "nil")")
 
                 _ = try await sessionManager.upsert(
                     sessionId: session,
@@ -124,7 +204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     body: "# circle the bug\n\n- thing\n- other thing\n"
                 )
 
-                guard let s = sessionManager.sessions[session],
+                guard let s = sessionManager.groups[session],
                       let hud = s.huds.first,
                       let panel = hud.panels.first,
                       let web = panel.renderer as? WebViewPanelRenderer else {
@@ -204,7 +284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // synchronously when it's born.
                 let s1 = "markup-ui-initial"
                 sessionManager.setFlag(
-                    sessionId: s1,
+                    group: s1,
                     key: "markup_events_armed",
                     value: .bool(true)
                 )
@@ -214,7 +294,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     form: "inline",
                     body: "# initial pull race\n"
                 )
-                guard let hud1 = sessionManager.sessions[s1]?.huds.first?.window else {
+                guard let hud1 = sessionManager.groups[s1]?.huds.first?.window else {
                     NSLog("QuickShow: TEST_MARKUP_UI failed step=1 kind=no-hud")
                     return
                 }
@@ -232,13 +312,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     form: "inline",
                     body: "# notification path\n"
                 )
-                guard let hud2 = sessionManager.sessions[s2]?.huds.first?.window else {
+                guard let hud2 = sessionManager.groups[s2]?.huds.first?.window else {
                     NSLog("QuickShow: TEST_MARKUP_UI failed step=2 kind=no-hud")
                     return
                 }
                 let beforeArm = hud2.isSendButtonVisibleForTest
                 sessionManager.setFlag(
-                    sessionId: s2,
+                    group: s2,
                     key: "markup_events_armed",
                     value: .bool(true)
                 )
@@ -254,7 +334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // artifact land in the session's events dir.
                 let s3 = "markup-ui-send"
                 sessionManager.setFlag(
-                    sessionId: s3,
+                    group: s3,
                     key: "markup_events_armed",
                     value: .bool(true)
                 )
@@ -264,7 +344,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     form: "inline",
                     body: "# send flow\n\nclick send.\n"
                 )
-                guard let hud3 = sessionManager.sessions[s3]?.huds.first?.window else {
+                guard let hud3 = sessionManager.groups[s3]?.huds.first?.window else {
                     NSLog("QuickShow: TEST_MARKUP_UI failed step=3 kind=no-hud")
                     return
                 }
@@ -287,7 +367,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // the composite into the artifact bytes.
                 let s4 = "markup-ui-draw"
                 sessionManager.setFlag(
-                    sessionId: s4,
+                    group: s4,
                     key: "markup_events_armed",
                     value: .bool(true)
                 )
@@ -297,8 +377,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     form: "inline",
                     body: "# draw + composite\n"
                 )
-                guard let hud4 = sessionManager.sessions[s4]?.huds.first?.window,
-                      let hud4Instance = sessionManager.sessions[s4]?.huds.first,
+                guard let hud4 = sessionManager.groups[s4]?.huds.first?.window,
+                      let hud4Instance = sessionManager.groups[s4]?.huds.first,
                       let panel4 = hud4Instance.panels.first(where: { $0.name == "design" }),
                       let web4 = panel4.renderer as? WebViewPanelRenderer else {
                     NSLog("QuickShow: TEST_MARKUP_UI failed step=4 kind=no-hud")
@@ -367,7 +447,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // flag — see SessionManager.renderPanel).
                 let s6 = "markup-ui-rerender"
                 sessionManager.setFlag(
-                    sessionId: s6,
+                    group: s6,
                     key: "markup_events_armed",
                     value: .bool(true)
                 )
@@ -377,7 +457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     form: "inline",
                     body: "# rerender baseline\n"
                 )
-                guard let hud6 = sessionManager.sessions[s6]?.huds.first?.window else {
+                guard let hud6 = sessionManager.groups[s6]?.huds.first?.window else {
                     NSLog("QuickShow: TEST_MARKUP_UI failed step=6 kind=no-hud")
                     return
                 }
@@ -408,7 +488,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // back to b) reports the same count.
                 let s7 = "markup-ui-survives-rerender"
                 sessionManager.setFlag(
-                    sessionId: s7,
+                    group: s7,
                     key: "markup_events_armed",
                     value: .bool(true)
                 )
@@ -424,7 +504,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     form: "inline",
                     body: "# panel b\n"
                 )
-                guard let session7 = sessionManager.sessions[s7],
+                guard let session7 = sessionManager.groups[s7],
                       let bPanel = session7.huds.first?.panels.first(where: { $0.name == "b" }),
                       let bWeb = bPanel.renderer as? WebViewPanelRenderer else {
                     NSLog("QuickShow: TEST_MARKUP_UI failed step=7 kind=no-panel")
@@ -515,7 +595,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     body: "flowchart LR\nA-->B-->C-->D"
                 )
                 try await Task.sleep(nanoseconds: 500_000_000)
-                guard let session = sessionManager.sessions["panzoom-smoke"],
+                guard let session = sessionManager.groups["panzoom-smoke"],
                       let mermaidPanel = session.huds.first?.panels.first(where: { $0.name == "diagram" }),
                       let mermaidScroll = mermaidPanel.view as? ZoomableCanvasScrollView else {
                     NSLog("QuickShow: TEST_PANZOOM failed: no mermaid scroll view")
@@ -583,7 +663,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         body: body
                     )
                 }
-                guard let session = sessionManager.sessions["fused-smoke"] else { return }
+                guard let session = sessionManager.groups["fused-smoke"] else { return }
                 let primary = session.huds[0]
                 let primaryId = primary.id
                 let dragEvent = NSEvent.mouseEvent(
@@ -638,7 +718,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         body: body
                     )
                 }
-                guard let session = sessionManager.sessions["reattach-smoke"] else {
+                guard let session = sessionManager.groups["reattach-smoke"] else {
                     NSLog("QuickShow: TEST_REATTACH failed: session missing")
                     return
                 }
@@ -720,7 +800,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         body: body
                     )
                 }
-                guard let session = sessionManager.sessions["tearout-smoke"] else {
+                guard let session = sessionManager.groups["tearout-smoke"] else {
                     NSLog("QuickShow: TEST_TEAROUT failed: session missing")
                     return
                 }
@@ -762,7 +842,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let waitNs = UInt64((Double(originalGrace) ?? 60) * 1_000_000_000) + 200_000_000
                 try await Task.sleep(nanoseconds: waitNs)
                 NSLog("QuickShow: TEST_TEAROUT step=orphan orphaned=\(session.orphaned) huds=\(session.huds.count)")
-                sessionManager.registerSession("tearout-smoke")
+                sessionManager.registerGroup("tearout-smoke")
                 try await Task.sleep(nanoseconds: 100_000_000)
                 NSLog("QuickShow: TEST_TEAROUT step=reattach orphaned=\(session.orphaned)")
 
@@ -816,7 +896,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     laborum.
                     """
                 )
-                if let session = sessionManager.sessions["prefs-smoke"],
+                if let session = sessionManager.groups["prefs-smoke"],
                    let hud = session.huds.first?.window {
                     NSLog("QuickShow: TEST_PREFS opacity alphaValue=\(hud.alphaValue)")
                     NSLog("QuickShow: TEST_PREFS sizeCap frame=\(hud.frame.size.width)x\(hud.frame.size.height)")
@@ -839,7 +919,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 // Exercise the copy bridge: pull the renderer for the
                 // panel and invoke its bridge with a {copy: ...} payload.
-                if let session = sessionManager.sessions["prefs-smoke"],
+                if let session = sessionManager.groups["prefs-smoke"],
                    let panel = session.huds.first?.panels.first,
                    let webRenderer = panel.renderer as? WebViewPanelRenderer {
                     // The bridge handler is private; route through the
@@ -907,7 +987,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        controlServer?.stop()
+        mcpHTTPServer?.stop()
     }
 
     /// Headless smoke hook: open a fixture markdown panel at launch.
@@ -1015,16 +1095,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func startControlServer() {
-        // Allow tests / parallel instances to override the socket path.
-        let override = ProcessInfo.processInfo.environment["QUICKSHOW_SOCKET_PATH"]
-        let server = ControlServer(socketPath: override ?? ControlServer.defaultSocketPath)
-        server.appDelegate = self
+    /// Embedded HTTP MCP server boot. Always-on as of 0.2.0 —
+    /// plugin/.mcp.json points at http://127.0.0.1:7890/mcp.
+    /// Set QUICKSHOW_MCP_HTTP=0 to opt out for headless integration
+    /// tests that don't touch the wire. Port defaults to
+    /// MCPHTTPServer.defaultPort; override via QUICKSHOW_MCP_PORT
+    /// for parallel test instances.
+    private func startMCPHTTPServer() {
+        if ProcessInfo.processInfo.environment["QUICKSHOW_MCP_HTTP"] == "0" { return }
+        let env = ProcessInfo.processInfo.environment["QUICKSHOW_MCP_PORT"]
+        let port = env.flatMap(UInt16.init) ?? MCPHTTPServer.defaultPort
+
+        // MarkupEventsStream owns the off-MCP /markup-events NDJSON
+        // channel — outside the SDK's /mcp routing so it can coexist
+        // with Claude Code's MCP client (which claims the SDK's single
+        // standalone-SSE slot).
+        let markupEvents = MarkupEventsStream()
+
+        // Two-phase wiring: build the router first with a registrar
+        // closure that captures the (about-to-exist) router by `var`,
+        // then assign the router into the closure's captured slot.
+        // This is the only way to give the registrar a back-reference
+        // to its own router (so the show_html handler can look up the
+        // session's claudePid at call time).
+        let sm = sessionManager!
+        var routerHolder: MCPSessionRouter? = nil
+        let router = MCPSessionRouter(
+            toolRegistrar: { @MainActor @Sendable server, mcpSessionID in
+                guard let r = routerHolder else { return }
+                await MCPToolHandlers.register(
+                    on: server,
+                    mcpSessionID: mcpSessionID,
+                    sessionManager: sm,
+                    router: r,
+                    markupEvents: markupEvents,
+                    endpointPort: port
+                )
+            },
+            onSessionRemoved: { @MainActor @Sendable mcpSessionID in
+                sm.mcpSessionDisconnected(mcpSessionId: mcpSessionID)
+            }
+        )
+        routerHolder = router
+
+        let server = MCPHTTPServer(port: port, router: router, markupEvents: markupEvents)
         do {
             try server.start()
-            controlServer = server
+            mcpHTTPServer = server
         } catch {
-            NSLog("QuickShow: control server failed to start: \(error)")
+            NSLog("QuickShow: mcp http server failed to start: \(error)")
         }
     }
 

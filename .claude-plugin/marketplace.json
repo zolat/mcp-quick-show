@@ -8,9 +8,9 @@
   "plugins": [
     {
       "name": "quickshow",
-      "description": "Floating HUD panels for Claude. MCP tools (show_markdown / show_svg / show_mermaid / show_image / show_html / enable_markup_events / get_markup) plus foundational + demo skills. Pairs with QuickShow.app.",
+      "description": "Floating HUD panels for Claude. MCP tools (show_markdown / show_svg / show_mermaid / show_image / show_html / show_url / enable_markup_events / enable_panel_events / get_markup / get_share) plus foundational + demo skills. Pairs with QuickShow.app — the MCP server is embedded in the app and reached via HTTP on 127.0.0.1:7890.",
       "source": "./plugin",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "category": "productivity",
       "tags": ["mcp", "rendering", "hud", "visual", "design", "feedback-loop"]
     }

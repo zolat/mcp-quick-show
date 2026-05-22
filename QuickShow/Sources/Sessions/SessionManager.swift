@@ -23,14 +23,15 @@ final class SessionManager: NSObject {
         return 60
     }
 
-    /// Reserved session id for user-initiated HUDs (menu-bar "Open
-    /// URL…" / "Open File…" → AppDelegate → `userUpsert`). Deliberately
-    /// non-UUID so it can never collide with a real Claude conversation
-    /// id minted by `resolveSessionId()` on the sidecar. HUDs born here
-    /// migrate into a Claude session via `claimShare(...)` once the
-    /// user pastes the share token into Claude and Claude calls
-    /// `get_share(<id>)`.
-    static let userWindowsSessionID = "user-windows"
+    /// Reserved prefix for groups that hold user-initiated HUDs
+    /// (menu-bar "Open URL…" / "Open File…" → AppDelegate →
+    /// `userUpsert`). Each user share gets its own group named
+    /// `user-share-<random>` so the separate-HUD-per-share UX is
+    /// preserved (each share is its own HUD with its own Space
+    /// placement). HUDs born here migrate into a Claude-specified
+    /// group via `claimShare(...)` once the user pastes the share
+    /// token into Claude and Claude calls `get_share(<id>, group: ...)`.
+    static let userSharesGroupPrefix = "user-share-"
 
     private let renderers: RendererRegistry
     weak var promoteController: PromoteToWindowController?
@@ -38,7 +39,7 @@ final class SessionManager: NSObject {
     /// One MCP-session's worth of state. After tear-out a session can
     /// host multiple HUDs; `huds[0]` is the "primary" — the one new
     /// `upsert(name)`-with-novel-name calls append to.
-    final class SessionState {
+    final class GroupState {
         let id: String
         let cascadeIndex: Int
         var huds: [HUDInstance] = []
@@ -58,12 +59,20 @@ final class SessionManager: NSObject {
         /// rather than dumping the panel on whichever Space the user
         /// happens to be on.
         var lastResolvedSpaceID: UInt64?
-        /// Generic per-session flags driven by the `set_session_flag`
-        /// control verb. First consumer: `markup_events_armed`.
+        /// Generic per-group flags. First consumer: `markup_events_armed`.
         var flags: [String: SessionFlagValue] = [:]
+        /// The MCP session that most recently wrote into this group.
+        /// Used for orphan-grace: when that MCP session disconnects
+        /// (DELETE or idle-timeout sweep), groups whose lastWriter
+        /// matches trigger the existing orphan timer. Multiple MCP
+        /// sessions can write to the same group; only the last writer
+        /// is recorded, but the orphan signal is best-effort anyway —
+        /// the worst case is a stale badge that clears on the next
+        /// write.
+        var lastWriterMcpSession: String?
         /// Lazy NDJSON writer for markup events. Created on first
-        /// emit; the file lives at `MarkupPaths.eventsLog(sessionId)`.
-        lazy var eventWriter: EventLogWriter = EventLogWriter(sessionId: id)
+        /// emit; the file lives at `MarkupPaths.eventsLog(group)`.
+        lazy var eventWriter: EventLogWriter = EventLogWriter(group: id)
 
         init(id: String, cascadeIndex: Int) {
             self.id = id
@@ -71,23 +80,25 @@ final class SessionManager: NSObject {
         }
     }
 
-    /// One HUD window inside a session, with its own ordered panels.
+    /// One HUD window inside a group, with its own ordered panels.
+    /// Phase 2: every HUD belongs to exactly one group (= the
+    /// GroupState in `groups[hud.group]`). Tear-out spawns a sibling
+    /// HUD in the same group; claim_share migrates a HUD across
+    /// groups (and flips this field).
     final class HUDInstance {
         let id: UUID
         let window: HUDWindow
         var panels: [Panel]
-        /// The agent-supplied grouping key this HUD was opened with.
-        /// `nil` for the session's default (unnamed) HUD and for HUDs
-        /// spawned by tear-out. Sticky once set: re-routing on
-        /// `upsert(group:)` is by lookup (group equality), so changing
-        /// this field at runtime isn't necessary.
-        var group: String?
+        /// The group this HUD belongs to. Non-optional in Phase 2:
+        /// the map keys onto this. Mutable so `claim_share` can
+        /// re-target a HUD across groups.
+        var group: String
         /// The HUD-level description paragraph (last-writer-wins
         /// among upserts that route here). `nil` means unset; the
         /// banner's "group line" shows `""` in that case (collapsed).
         var hudDescription: String?
 
-        init(window: HUDWindow, panels: [Panel] = [], group: String? = nil) {
+        init(window: HUDWindow, panels: [Panel] = [], group: String) {
             self.id = window.hudInstanceId
             self.window = window
             self.panels = panels
@@ -126,8 +137,13 @@ final class SessionManager: NSObject {
         }
     }
 
-    private(set) var sessions: [String: SessionState] = [:]
-    private var sessionsRegisteredOrder = 0
+    /// All known groups, keyed by group identifier. Each GroupState
+    /// owns the HUDs + flags + events writer for a content namespace.
+    /// MCP sessions don't have their own state here — `group` is the
+    /// canonical key (defaulting to `mcpSessionId` when callers omit
+    /// the wire-level `group` arg).
+    private(set) var groups: [String: GroupState] = [:]
+    private var groupsRegisteredOrder = 0
 
     /// Held during an active tear-out drag so events keep flowing to
     /// the follow-the-cursor frame translator instead of the source
@@ -145,8 +161,8 @@ final class SessionManager: NSObject {
 
     // MARK: - Session lifecycle
 
-    func registerSession(_ sessionId: String, parentPid: pid_t? = nil) {
-        if let existing = sessions[sessionId] {
+    func registerGroup(_ sessionId: String, parentPid: pid_t? = nil) {
+        if let existing = groups[sessionId] {
             existing.orphanTimerTask?.cancel()
             existing.orphanTimerTask = nil
             if existing.orphaned {
@@ -162,27 +178,54 @@ final class SessionManager: NSObject {
             if let pid = parentPid { existing.parentPid = pid }
             return
         }
-        let idx = sessionsRegisteredOrder
-        sessionsRegisteredOrder += 1
-        let state = SessionState(id: sessionId, cascadeIndex: idx)
+        let idx = groupsRegisteredOrder
+        groupsRegisteredOrder += 1
+        let state = GroupState(id: sessionId, cascadeIndex: idx)
         state.parentPid = parentPid
-        sessions[sessionId] = state
+        groups[sessionId] = state
     }
 
+    /// Test-only entry: trigger an orphan-grace timer directly on a
+    /// named group. The QUICKSHOW_TEST_TEAROUT smoke uses this to
+    /// exercise the orphaned-badge path without an MCP session round
+    /// trip. Production callers should go through
+    /// `mcpSessionDisconnected(mcpSessionId:)`.
     func sidecarDisconnected(sessionId: String) {
-        guard let session = sessions[sessionId] else { return }
-        guard !session.huds.isEmpty else { return }
-        session.orphanTimerTask?.cancel()
+        startOrphanTimer(for: sessionId)
+    }
+
+    /// Called by the HTTP router when an MCP session is removed —
+    /// either via an explicit DELETE or via the cleanup loop's
+    /// idle-timeout sweep. Walks groups for any whose
+    /// `lastWriterMcpSession` matches and starts the orphan-grace
+    /// timer on each. A subsequent write into the group (by a fresh
+    /// MCP session, possibly post-`claude --resume`) cancels the
+    /// timer via `ensureGroup`'s reattach path.
+    func mcpSessionDisconnected(mcpSessionId: String) {
+        for (groupKey, state) in groups where state.lastWriterMcpSession == mcpSessionId {
+            NSLog("QuickShow: MCP session \(mcpSessionId) dropped — starting orphan grace for group \(groupKey)")
+            startOrphanTimer(for: groupKey)
+        }
+    }
+
+    /// Common orphan-grace timer body. Cancels any prior timer for
+    /// the group, schedules a new one to flip the badge after the
+    /// grace window. `ensureGroup` clears both the timer and the
+    /// flag when a fresh write lands.
+    private func startOrphanTimer(for groupKey: String) {
+        guard let state = groups[groupKey] else { return }
+        guard !state.huds.isEmpty else { return }
+        state.orphanTimerTask?.cancel()
         let grace = Self.reconnectGraceSeconds
-        session.orphanTimerTask = Task { [weak self, weak session] in
+        state.orphanTimerTask = Task { [weak self, weak state] in
             try? await Task.sleep(nanoseconds: UInt64(grace * 1_000_000_000))
             if Task.isCancelled { return }
             await MainActor.run {
-                guard let self = self, let session = session,
-                      self.sessions[session.id] === session else { return }
-                session.orphaned = true
-                for hud in session.huds { hud.window.setSessionEnded(true) }
-                NSLog("QuickShow: session \(session.id) orphan grace expired — badge on \(session.huds.count) HUD(s)")
+                guard let self = self, let state = state,
+                      self.groups[state.id] === state else { return }
+                state.orphaned = true
+                for hud in state.huds { hud.window.setSessionEnded(true) }
+                NSLog("QuickShow: group \(state.id) orphan grace expired — badge on \(state.huds.count) HUD(s)")
             }
         }
     }
@@ -211,19 +254,23 @@ final class SessionManager: NSObject {
                     width: Double? = nil,
                     displayName: String? = nil,
                     autoEnterDrawMode: Bool = false) async throws -> (RenderResult, Data) {
-        let sessionId = Self.userWindowsSessionID
-        setFlag(sessionId: sessionId, key: "markup_events_armed", value: .bool(true))
+        // Each user-initiated HUD lives in its own group so the
+        // separate-HUD-per-share UX is preserved. The shareId carries
+        // through claim_share — see recordShareSent + claimShare.
+        let group = "\(Self.userSharesGroupPrefix)\(ShareID.mint())"
+        setFlag(group: group, key: "markup_events_armed", value: .bool(true))
         let result = try await upsert(
-            sessionId: sessionId,
+            sessionId: group,
             name: name,
             contentType: contentType,
             form: form,
             body: body,
             width: width,
+            group: group,
             description: displayName
         )
-        if let session = sessions[sessionId],
-           let (hud, _) = locate(in: session, name: name) {
+        if let groupState = groups[group],
+           let (hud, _) = locate(in: groupState, name: name) {
             hud.window.setAlwaysShowSend(true)
             if autoEnterDrawMode && !hud.window.isInDrawMode {
                 hud.window.toggleDrawMode()
@@ -241,7 +288,18 @@ final class SessionManager: NSObject {
                 group: String? = nil,
                 description: String? = nil,
                 hudDescription: String? = nil) async throws -> (RenderResult, Data) {
-        let session = ensureSession(sessionId)
+        // `group` is the canonical key (Phase 2). When callers omit it
+        // (legacy AppDelegate test smokes; pre-flip MCP handlers),
+        // default to the sessionId so behaviour matches the per-MCP-
+        // session storage that existed before the group flip.
+        let groupKey = group ?? sessionId
+        let session = ensureGroup(groupKey)
+        // Record this MCP session as the lastWriter — used by
+        // orphan-grace when the router signals the MCP session has
+        // dropped (DELETE or idle-timeout). Multiple MCP sessions
+        // writing to the same group rotate this; the live one always
+        // wins.
+        session.lastWriterMcpSession = sessionId
 
         // Locate the panel across all HUDs first (in-place update path).
         if let (hud, panel) = locate(in: session, name: name) {
@@ -268,8 +326,8 @@ final class SessionManager: NSObject {
             let view = renderer.makeView()
             let newPanel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
             newPanel.description = panel.description
-            wireStrokePersistence(renderer: renderer, sessionId: sessionId, panelName: name)
-            wirePanelEvents(renderer: renderer, sessionId: sessionId, panelName: name)
+            wireStrokePersistence(renderer: renderer, sessionId: groupKey, panelName: name)
+            wirePanelEvents(renderer: renderer, sessionId: groupKey, panelName: name)
             let idx = hud.panels.firstIndex(where: { $0.name == name })!
             hud.panels[idx] = newPanel
             hud.window.installPanel(name: name, view: view, description: newPanel.description ?? "")
@@ -278,10 +336,12 @@ final class SessionManager: NSObject {
                                          form: form, body: body, width: width)
         }
 
-        // Novel name → resolve the target HUD by `group`. `nil` group
-        // routes to the session's default (unnamed) HUD; a present
-        // `group` finds or spawns the HUD with that key.
-        let hud = ensureHud(in: session, group: group)
+        // Novel name → the group's primary HUD. Phase 2: HUD discovery
+        // within a group is now trivial (one HUD per group, born on
+        // first upsert; tear-out spawns sibling HUDs that route to the
+        // same group). Subsequent `group` distinctions happen via the
+        // groups map key, not within a session's HUD list.
+        let hud = ensureHud(in: session, group: groupKey)
         guard let renderer = renderers.make(forContentType: contentType) else {
             throw RenderFailure(
                 message: "no renderer registered for content_type '\(contentType)'",
@@ -291,8 +351,8 @@ final class SessionManager: NSObject {
         let view = renderer.makeView()
         let panel = Panel(name: name, contentType: contentType, renderer: renderer, view: view)
         if let d = description { panel.description = d }
-        wireStrokePersistence(renderer: renderer, sessionId: sessionId, panelName: name)
-        wirePanelEvents(renderer: renderer, sessionId: sessionId, panelName: name)
+        wireStrokePersistence(renderer: renderer, sessionId: groupKey, panelName: name)
+        wirePanelEvents(renderer: renderer, sessionId: groupKey, panelName: name)
         hud.panels.append(panel)
         hud.window.installPanel(name: name, view: view, description: panel.description ?? "")
         if let h = hudDescription {
@@ -339,7 +399,7 @@ final class SessionManager: NSObject {
         guard let web = renderer as? WebViewPanelRenderer else { return }
         web.onStrokesChanged = { [weak self] strokes in
             guard let self = self,
-                  let session = self.sessions[sessionId],
+                  let session = self.groups[sessionId],
                   let (hud, p) = self.locate(in: session, name: panelName) else { return }
             p.strokes = strokes
             // Only refresh title-bar UI if THIS panel is the active
@@ -352,7 +412,7 @@ final class SessionManager: NSObject {
         }
         web.onMarkupEscape = { [weak self] in
             guard let self = self,
-                  let session = self.sessions[sessionId],
+                  let session = self.groups[sessionId],
                   let (hud, _) = self.locate(in: session, name: panelName) else { return }
             if hud.window.isInDrawMode {
                 hud.window.toggleDrawMode()
@@ -377,7 +437,7 @@ final class SessionManager: NSObject {
         let throttle = PanelEventThrottle(panel: panelName)
         web.onPanelEvent = { [weak self] payload in
             guard let self = self,
-                  let session = self.sessions[sessionId] else { return }
+                  let session = self.groups[sessionId] else { return }
             guard session.flags["panel_events_armed"]?.asBool == true else { return }
             throttle.admit(payload: payload, writer: session.eventWriter)
         }
@@ -437,7 +497,7 @@ final class SessionManager: NSObject {
     }
 
     func close(sessionId: String, name: String) {
-        guard let session = sessions[sessionId] else { return }
+        guard let session = groups[sessionId] else { return }
         guard let (hud, _) = locate(in: session, name: name) else { return }
         let wasActive = hud.window.activePanelName == name
         let panelIdx = hud.panels.firstIndex(where: { $0.name == name })!
@@ -466,7 +526,7 @@ final class SessionManager: NSObject {
     }
 
     func switchTab(in sessionId: String, to name: String) {
-        guard let session = sessions[sessionId],
+        guard let session = groups[sessionId],
               let (hud, _) = locate(in: session, name: name) else { return }
         hud.window.setActivePanel(name)
         hud.window.updateTabs(hud.panels.map(\.name))
@@ -474,7 +534,7 @@ final class SessionManager: NSObject {
 
     /// Close every HUD belonging to the session.
     func closeAllPanels(in sessionId: String) {
-        guard let session = sessions[sessionId] else { return }
+        guard let session = groups[sessionId] else { return }
         for hud in session.huds {
             hud.window.close()
         }
@@ -487,7 +547,7 @@ final class SessionManager: NSObject {
     /// Close just one HUD's worth of panels — leaves siblings (if any)
     /// intact. Called from a HUD's title-bar × button.
     func closeHud(sessionId: String, hudId: UUID) {
-        guard let session = sessions[sessionId],
+        guard let session = groups[sessionId],
               let hud = session.huds.first(where: { $0.id == hudId }) else { return }
         // Emit a markup_dismissed for each panel in the HUD when the
         // session is armed — title-bar × counts as "user closed
@@ -502,7 +562,7 @@ final class SessionManager: NSObject {
     }
 
     func inspect(sessionId: String, name: String) async throws -> (RenderResult, Data)? {
-        guard let session = sessions[sessionId],
+        guard let session = groups[sessionId],
               let (hud, panel) = locate(in: session, name: name) else {
             return nil
         }
@@ -513,23 +573,23 @@ final class SessionManager: NSObject {
 
     // MARK: - Flags
 
-    /// Set a generic per-session flag. The session is auto-created if
-    /// not yet known; this matches `upsert`'s behaviour so the sidecar
-    /// can arm flags before its first render call lands.
-    func setFlag(sessionId: String, key: String, value: SessionFlagValue) {
-        let session = ensureSession(sessionId)
-        session.flags[key] = value
-        NSLog("QuickShow: session \(sessionId) flag \(key) = \(value)")
+    /// Set a generic per-group flag. The group is auto-created if not
+    /// yet known; this matches `upsert`'s behaviour so callers can arm
+    /// flags before the first render call lands.
+    func setFlag(group: String, key: String, value: SessionFlagValue) {
+        let groupState = ensureGroup(group)
+        groupState.flags[key] = value
+        NSLog("QuickShow: group \(group) flag \(key) = \(value)")
         NotificationCenter.default.post(
             name: .quickShowSessionFlagChanged,
             object: nil,
-            userInfo: ["sessionId": sessionId, "key": key]
+            userInfo: ["group": group, "key": key]
         )
     }
 
-    /// Read a per-session flag. Returns `nil` if unset or session unknown.
-    func flag(sessionId: String, key: String) -> SessionFlagValue? {
-        sessions[sessionId]?.flags[key]
+    /// Read a per-group flag. Returns `nil` if unset or group unknown.
+    func flag(group: String, key: String) -> SessionFlagValue? {
+        groups[group]?.flags[key]
     }
 
     // MARK: - Markup events
@@ -546,7 +606,7 @@ final class SessionManager: NSObject {
     /// for the same render.
     @discardableResult
     func recordMarkupSent(sessionId: String, panel: String, pngBytes: Data) -> String? {
-        let session = ensureSession(sessionId)
+        let session = ensureGroup(sessionId)
         let artifactId = UUID().uuidString.lowercased()
         do {
             try MarkupPaths.ensureDirs(sessionId)
@@ -575,14 +635,14 @@ final class SessionManager: NSObject {
     ///   - Agent-panel session: writes `<artifact-id>.png` into the
     ///     session's artifacts dir + appends a `markup_sent` line to
     ///     `events.ndjson` so the agent's tail picks it up.
-    ///   - User-windows session (`userWindowsSessionID`): no agent is
+    ///   - User-share group (`user-share-<random>`): no agent is
     ///     listening, so we instead write a share PNG + JSON to
     ///     `MarkupPaths.sharesBaseDir`, put `[quickshow-share:<id>]`
-    ///     on the clipboard, and pop an NSAlert telling the user
-    ///     where the token is. The HUD lives on; a future
-    ///     `get_share(<id>)` migrates it into a Claude session.
+    ///     on the clipboard, and pop an in-bar confirmation. The HUD
+    ///     lives on; a future `get_share(<id>, group: …)` migrates it
+    ///     into a Claude-specified group.
     func sendActivePanelMarkup(sessionId: String, hudId: UUID) {
-        guard let session = sessions[sessionId],
+        guard let session = groups[sessionId],
               let hud = session.huds.first(where: { $0.id == hudId }),
               let activeName = hud.window.activePanelName,
               let panel = hud.panels.first(where: { $0.name == activeName }),
@@ -590,7 +650,7 @@ final class SessionManager: NSObject {
             return
         }
         _ = session  // used only for the locate-by-id chain above
-        let isUserShare = (sessionId == Self.userWindowsSessionID)
+        let isUserShare = sessionId.hasPrefix(Self.userSharesGroupPrefix)
         Task { @MainActor [weak self] in
             guard let self = self else { return }
             do {
@@ -691,63 +751,77 @@ final class SessionManager: NSObject {
 
     /// First-come-first-served claim of a user-initiated share.
     ///
-    /// The user opened a HUD via the menu bar (lives under
-    /// `userWindowsSessionID`), optionally marked it up, and hit Send —
-    /// which wrote a flattened PNG + JSON sidecar under
+    /// The user opened a HUD via the menu bar (lives in its own
+    /// `user-share-<random>` group), optionally marked it up, and hit
+    /// Send — which wrote a flattened PNG + JSON sidecar under
     /// `MarkupPaths.sharesBaseDir` and put a `[quickshow-share:<id>]`
     /// token on the clipboard. Claude reads the token from the user's
-    /// pasted message and calls the sidecar's `get_share(<id>)`, which
-    /// forwards here with `targetSessionID` = the claimer's session id.
+    /// pasted message and calls `get_share(<id>, group: ...)`, which
+    /// forwards here with `targetGroup` = where Claude wants the
+    /// migrated HUD to live.
     ///
     /// Side effects:
-    ///   1. The matching HUDInstance is detached from `user-windows`
-    ///      and re-parented to `targetSessionID` — all callbacks
+    ///   1. The matching HUDInstance is detached from its user-share
+    ///      group and re-parented to `targetGroup` — all callbacks
     ///      rewired so future Send / draw-mode / panel-event traffic
-    ///      lands in the new session.
-    ///   2. The share PNG moves from `shares/<id>.png` into the new
-    ///      session's artifacts dir at `<id>.png`. The sidecar then
-    ///      reads it through `markupArtifactPath(ctx.sessionId, id)`
-    ///      — same discipline as `get_markup` — and moves it to
-    ///      `.consumed/` after returning the image to the model.
+    ///      lands in the target group's events log + flags.
+    ///   2. The share PNG moves from `shares/<id>.png` into the
+    ///      target group's artifacts dir at `<id>.png`. `get_share`
+    ///      then reads it through `MarkupPaths.artifact(targetGroup,
+    ///      id: <id>)` — same discipline as `get_markup` — and moves
+    ///      it to `.consumed/` after returning the image to the model.
     ///   3. The share JSON moves to `shares/.consumed/<id>.json` so a
-    ///      second `claim_share(<same-id>)` from another session
+    ///      second `claim_share(<same-id>)` from another group
     ///      cleanly returns "already claimed."
     ///   4. The HUD's `alwaysShowSend` flips off — the window is in a
-    ///      Claude session now, so Send follows normal
-    ///      `armed && drawing` gating (Claude arms via
-    ///      `enable_markup_events`).
+    ///      Claude group now, so Send follows normal `armed && drawing`
+    ///      gating (Claude arms via `enable_markup_events(group:)`).
     ///
     /// The atomic point is step (3) — we move the JSON early, so a
-    /// concurrent claim from another session sees it gone and fails
+    /// concurrent claim from another group sees it gone and fails
     /// the same way a second claim of an already-consumed share does.
-    func claimShare(shareID: String, targetSessionID: String) throws -> ClaimedShare {
+    func claimShare(shareID: String, targetGroup: String) throws -> ClaimedShare {
         guard ShareID.isValid(shareID) else {
-            throw ControlError.invalidPayload("share_id is malformed (expected \(ShareID.length) lowercase-hex chars)")
+            throw ShareError.invalidPayload("share_id is malformed (expected \(ShareID.length) lowercase-hex chars)")
         }
         let fm = FileManager.default
         let metaURL = MarkupPaths.shareMeta(id: shareID)
         let pngURL = MarkupPaths.sharePNG(id: shareID)
         guard fm.fileExists(atPath: metaURL.path) else {
-            throw ControlError.invalidPayload("share '\(shareID)' not found (already claimed or never existed)")
+            throw ShareError.invalidPayload("share '\(shareID)' not found (already claimed or never existed)")
         }
         let metaData: Data
         do {
             metaData = try Data(contentsOf: metaURL)
         } catch {
-            throw ControlError.invalidPayload("failed to read share metadata: \(error.localizedDescription)")
+            throw ShareError.invalidPayload("failed to read share metadata: \(error.localizedDescription)")
         }
         let meta: ShareMetadata
         do {
             meta = try JSONDecoder().decode(ShareMetadata.self, from: metaData)
         } catch {
-            throw ControlError.invalidPayload("share metadata malformed: \(error.localizedDescription)")
+            throw ShareError.invalidPayload("share metadata malformed: \(error.localizedDescription)")
         }
-        guard let userSession = sessions[Self.userWindowsSessionID] else {
-            throw ControlError.invalidPayload("no user-windows session — share has no source HUD")
+        // Walk all user-share groups for the source HUD. Each user
+        // share is its own group keyed by `user-share-<random>`, so
+        // we scan only the prefixed entries — should be a handful at
+        // most.
+        var sourceGroupKey: String?
+        var sourceGroupState: GroupState?
+        var sourceHud: HUDInstance?
+        for (key, state) in groups where key.hasPrefix(Self.userSharesGroupPrefix) {
+            if let hud = state.huds.first(where: { $0.id.uuidString == meta.sourceHudId }) {
+                sourceGroupKey = key
+                sourceGroupState = state
+                sourceHud = hud
+                break
+            }
         }
-        guard let sourceHud = userSession.huds.first(where: { $0.id.uuidString == meta.sourceHudId }),
+        guard let sourceGroupKey,
+              let sourceGroupState,
+              let sourceHud,
               sourceHud.panels.contains(where: { $0.name == meta.sourcePanelName }) else {
-            throw ControlError.invalidPayload("source HUD for share '\(shareID)' is gone (user closed it before the claim landed)")
+            throw ShareError.invalidPayload("source HUD for share '\(shareID)' is gone (user closed it before the claim landed)")
         }
 
         // Atomic claim — move the metadata to .consumed/ before any
@@ -756,59 +830,67 @@ final class SessionManager: NSObject {
             try MarkupPaths.ensureShareDirs()
             try fm.moveItem(at: metaURL, to: MarkupPaths.consumedShareMeta(id: shareID))
         } catch {
-            throw ControlError.invalidPayload("share '\(shareID)' already claimed")
+            throw ShareError.invalidPayload("share '\(shareID)' already claimed")
         }
 
-        // Migrate the HUDInstance: detach from user-windows, attach to
-        // the claimer. Rewire callbacks against the new session id so
-        // future Send / draw-mode / panel-event traffic lands in the
-        // claimer's events log + flags.
-        let targetSession = ensureSession(targetSessionID)
-        userSession.huds.removeAll(where: { $0.id == sourceHud.id })
-        targetSession.huds.append(sourceHud)
-        sourceHud.window.sessionId = targetSessionID
-        wireHudCallbacks(sourceHud, sessionId: targetSessionID)
+        // Migrate the HUDInstance: detach from the user-share group,
+        // attach to the target group. Rewire callbacks against the
+        // target group so future Send / draw-mode / panel-event
+        // traffic lands in the right events log + flags.
+        let targetGroupState = ensureGroup(targetGroup)
+        sourceGroupState.huds.removeAll(where: { $0.id == sourceHud.id })
+        targetGroupState.huds.append(sourceHud)
+        sourceHud.window.sessionId = targetGroup
+        wireHudCallbacks(sourceHud, sessionId: targetGroup)
         // Re-wire each panel's renderer-level closures (strokes +
-        // panel events) for the new session id; the previous wiring
-        // captured `user-windows` as the session.
+        // panel events) for the new group; the previous wiring
+        // captured the user-share group as the owner.
         for panel in sourceHud.panels {
             wireStrokePersistence(renderer: panel.renderer,
-                                  sessionId: targetSessionID,
+                                  sessionId: targetGroup,
                                   panelName: panel.name)
             wirePanelEvents(renderer: panel.renderer,
-                            sessionId: targetSessionID,
+                            sessionId: targetGroup,
                             panelName: panel.name)
         }
-        // The HUD is in a Claude session now; Send follows normal
+        // Reflect the new owning group on the HUDInstance itself.
+        sourceHud.group = targetGroup
+        // The HUD is in a Claude-owned group now; Send follows normal
         // armed-AND-drawing gating.
         sourceHud.window.setAlwaysShowSend(false)
+        // If the source group is now empty, drop it from the map so
+        // we don't accumulate stale user-share-* entries.
+        if sourceGroupState.huds.isEmpty {
+            sourceGroupState.orphanTimerTask?.cancel()
+            groups.removeValue(forKey: sourceGroupKey)
+        }
 
-        // Move the PNG into the claimer's artifacts dir so the
-        // sidecar's get_share can read it through the same path
-        // markupArtifactPath() uses for get_markup. Best-effort —
-        // failure here means the HUD migrated but the image is
-        // unavailable; the sidecar surfaces that to the model.
+        // Move the PNG into the target group's artifacts dir so
+        // `get_share` can read it through MarkupPaths.artifact(
+        // targetGroup, id:) — same path get_markup uses for the
+        // standard markup loop. Best-effort: failure here leaves the
+        // HUD migrated but the image unavailable, surfaced to Claude.
         do {
-            try MarkupPaths.ensureDirs(targetSessionID)
+            try MarkupPaths.ensureDirs(targetGroup)
             try fm.moveItem(at: pngURL,
-                            to: MarkupPaths.artifact(targetSessionID, id: shareID))
+                            to: MarkupPaths.artifact(targetGroup, id: shareID))
         } catch {
             NSLog("QuickShow: claimShare PNG move failed: \(error) — HUD migrated but image unavailable")
         }
-        NSLog("QuickShow: claimed share \(shareID) → session \(targetSessionID) panel '\(meta.sourcePanelName)'")
+        NSLog("QuickShow: claimed share \(shareID) → group \(targetGroup) panel '\(meta.sourcePanelName)'")
         return ClaimedShare(panelName: meta.sourcePanelName, contentType: meta.contentType)
     }
 
     /// Emit a `markup_dismissed` line for a panel that was closed
     /// without sending. No artifact is written.
     func recordMarkupDismissed(sessionId: String, panel: String) {
-        let session = ensureSession(sessionId)
+        let session = ensureGroup(sessionId)
         session.eventWriter.emitMarkupDismissed(panel: panel)
         NSLog("QuickShow: markup_dismissed session=\(sessionId) panel=\(panel)")
     }
 
     func list(sessionId: String) -> [PanelDescriptor] {
-        guard let session = sessions[sessionId] else { return [] }
+        guard let session = groups[sessionId] else { return [] }
         var out: [PanelDescriptor] = []
         for hud in session.huds {
             let size = hud.window.frame.size
@@ -831,7 +913,7 @@ final class SessionManager: NSObject {
     /// under the cursor, with a drag-follow monitor that keeps the
     /// new HUD pinned to the cursor until mouseUp.
     func handleTearOut(sessionId: String, hudId: UUID, name: String, event: NSEvent) {
-        guard let session = sessions[sessionId],
+        guard let session = groups[sessionId],
               let source = session.huds.first(where: { $0.id == hudId }),
               source.panels.count > 1,
               let panelIdx = source.panels.firstIndex(where: { $0.name == name }) else {
@@ -862,10 +944,12 @@ final class SessionManager: NSObject {
         )
         let newWindow = HUDWindow(initialPosition: origin)
         newWindow.sessionId = sessionId
-        // Torn-out HUD has no group and no HUD-level description — a
-        // single torn tab is standalone. The panel's own description
-        // survives the move (it lives on the Panel object).
-        let newHud = HUDInstance(window: newWindow, panels: [panel], group: nil)
+        // Torn-out HUD inherits the source HUD's group (Phase 2: each
+        // GroupState holds only HUDs of its group). The panel's own
+        // description survives the move (it lives on the Panel
+        // object). HUD-level description doesn't carry over — a single
+        // torn tab is its own framing.
+        let newHud = HUDInstance(window: newWindow, panels: [panel], group: source.group)
         session.huds.append(newHud)
         wireHudCallbacks(newHud, sessionId: sessionId)
         newWindow.installPanel(name: name, view: panel.view, description: panel.description ?? "")
@@ -1007,7 +1091,7 @@ final class SessionManager: NSObject {
         }
         window.onResolveActiveStrokesEmpty = { [weak self] in
             guard let self = self,
-                  let session = self.sessions[sessionId],
+                  let session = self.groups[sessionId],
                   let hud = session.huds.first(where: { $0.id == hudId }),
                   let activeName = hud.window.activePanelName,
                   let panel = hud.panels.first(where: { $0.name == activeName }) else {
@@ -1016,7 +1100,7 @@ final class SessionManager: NSObject {
             return panel.strokes.isEmpty
         }
         window.onResolveArmedFlag = { [weak self] in
-            return self?.flag(sessionId: sessionId, key: "markup_events_armed")?.asBool == true
+            return self?.flag(group: sessionId, key: "markup_events_armed")?.asBool == true
         }
         // Bind the title bar to its owning session and pull the
         // current armed-flag state SYNCHRONOUSLY. This covers the
@@ -1024,8 +1108,8 @@ final class SessionManager: NSObject {
         // sets the flag) BEFORE its first `upsert`, so the flag is
         // already true by the time this HUD is born — the
         // notification observer alone would miss it.
-        window.setOwningSessionId(sessionId)
-        let armed = flag(sessionId: sessionId, key: "markup_events_armed")?.asBool == true
+        window.setOwningGroup(sessionId)
+        let armed = flag(group: sessionId, key: "markup_events_armed")?.asBool == true
         window.setArmed(armed)
     }
 
@@ -1033,7 +1117,7 @@ final class SessionManager: NSObject {
     /// from the title-bar pencil click via HUDWindow's
     /// `onDrawModeChanged` callback.
     private func applyDrawMode(sessionId: String, hudId: UUID, enter: Bool) {
-        guard let session = sessions[sessionId],
+        guard let session = groups[sessionId],
               let hud = session.huds.first(where: { $0.id == hudId }),
               let activeName = hud.window.activePanelName,
               let panel = hud.panels.first(where: { $0.name == activeName }),
@@ -1048,7 +1132,7 @@ final class SessionManager: NSObject {
     /// strokes pick up the change; committed strokes preserve their
     /// captured color.
     private func applyMarkupColor(sessionId: String, hudId: UUID, hex: String) {
-        guard let session = sessions[sessionId],
+        guard let session = groups[sessionId],
               let hud = session.huds.first(where: { $0.id == hudId }),
               let activeName = hud.window.activePanelName,
               let panel = hud.panels.first(where: { $0.name == activeName }),
@@ -1058,7 +1142,7 @@ final class SessionManager: NSObject {
 
     /// Symmetric counterpart for stroke width.
     private func applyMarkupWidth(sessionId: String, hudId: UUID, pts: CGFloat) {
-        guard let session = sessions[sessionId],
+        guard let session = groups[sessionId],
               let hud = session.huds.first(where: { $0.id == hudId }),
               let activeName = hud.window.activePanelName,
               let panel = hud.panels.first(where: { $0.name == activeName }),
@@ -1071,7 +1155,7 @@ final class SessionManager: NSObject {
     /// `Panel.strokes` mirror + the title bar's enabled-state gate
     /// via the existing `onStrokesChanged` plumbing.
     private func applyUndoMarkup(sessionId: String, hudId: UUID) {
-        guard let session = sessions[sessionId],
+        guard let session = groups[sessionId],
               let hud = session.huds.first(where: { $0.id == hudId }),
               let activeName = hud.window.activePanelName,
               let panel = hud.panels.first(where: { $0.name == activeName }),
@@ -1083,7 +1167,7 @@ final class SessionManager: NSObject {
     /// `currentTool` in `markup-canvas.js` between "draw" and "erase";
     /// the JS side branches pointer-handling accordingly.
     private func applyEraserMode(sessionId: String, hudId: UUID, erasing: Bool) {
-        guard let session = sessions[sessionId],
+        guard let session = groups[sessionId],
               let hud = session.huds.first(where: { $0.id == hudId }),
               let activeName = hud.window.activePanelName,
               let panel = hud.panels.first(where: { $0.name == activeName }),
@@ -1096,7 +1180,7 @@ final class SessionManager: NSObject {
     /// `Panel.strokes`. Title-bar ⌫ button calls this via the HUD's
     /// `onClearActivePanelMarkup` callback.
     private func clearActivePanelMarkup(sessionId: String, hudId: UUID) {
-        guard let session = sessions[sessionId],
+        guard let session = groups[sessionId],
               let hud = session.huds.first(where: { $0.id == hudId }),
               let activeName = hud.window.activePanelName,
               let panel = hud.panels.first(where: { $0.name == activeName }) else {
@@ -1122,7 +1206,7 @@ final class SessionManager: NSObject {
     /// zone contains the cursor; highlights it; un-highlights any
     /// previous candidate.
     func handleHudDragMove(sessionId: String, hudId: UUID, cursor: NSPoint) {
-        guard let session = sessions[sessionId] else { return }
+        guard let session = groups[sessionId] else { return }
         let candidate = session.huds.first(where: { hud in
             hud.id != hudId && hud.window.containsDropPoint(cursor)
         })
@@ -1149,7 +1233,7 @@ final class SessionManager: NSObject {
     /// HUD just stays where it was dropped (the move already happened
     /// during the drag).
     func handleHudDragEnd(sessionId: String, hudId: UUID, cursor: NSPoint) {
-        guard let session = sessions[sessionId] else {
+        guard let session = groups[sessionId] else {
             reattachTarget = nil
             return
         }
@@ -1172,7 +1256,7 @@ final class SessionManager: NSObject {
     /// `group` and `hudDescription` win — symmetric with how target's
     /// chrome dominates (size, position, title bar). Moved panels keep
     /// their own per-tab `description`.
-    private func performReattach(source: HUDInstance, target: HUDInstance, in session: SessionState) {
+    private func performReattach(source: HUDInstance, target: HUDInstance, in session: GroupState) {
         let movedPanels = source.panels
         source.panels.removeAll()
         for panel in movedPanels {
@@ -1200,7 +1284,7 @@ final class SessionManager: NSObject {
 
     @objc func handlePromote(_ sender: NSMenuItem) {
         guard let payload = sender.representedObject as? MenuPayload,
-              let session = sessions[payload.sessionId],
+              let session = groups[payload.sessionId],
               let (sourceHud, panel) = locate(in: session, name: payload.name),
               let promoteController = promoteController else { return }
         let panelSize = sourceHud.window.frame.size
@@ -1235,7 +1319,7 @@ final class SessionManager: NSObject {
 
     @objc func handleSnapshotToDownloads(_ sender: NSMenuItem) {
         guard let payload = sender.representedObject as? MenuPayload,
-              let session = sessions[payload.sessionId],
+              let session = groups[payload.sessionId],
               let (_, panel) = locate(in: session, name: payload.name) else { return }
         Task {
             do {
@@ -1261,7 +1345,7 @@ final class SessionManager: NSObject {
 
     @objc func handleOpacity(_ sender: NSMenuItem) {
         guard let payload = sender.representedObject as? OpacityPayload,
-              let session = sessions[payload.sessionId],
+              let session = groups[payload.sessionId],
               let hud = session.huds.first(where: { $0.id == payload.hudId }) else { return }
         hud.window.alphaValue = CGFloat(payload.percent) / 100.0
     }
@@ -1297,7 +1381,7 @@ final class SessionManager: NSObject {
 
     /// Find the panel and its owning HUD anywhere in a session. Used
     /// by every verb that operates on a named panel.
-    private func locate(in session: SessionState, name: String) -> (HUDInstance, Panel)? {
+    private func locate(in session: GroupState, name: String) -> (HUDInstance, Panel)? {
         for hud in session.huds {
             if let p = hud.panels.first(where: { $0.name == name }) {
                 return (hud, p)
@@ -1306,11 +1390,11 @@ final class SessionManager: NSObject {
         return nil
     }
 
-    /// Get or create a HUD for a session, keyed by `group`. `nil` group
-    /// → the default (unnamed) HUD; a present group resolves to the
-    /// existing HUD with that group, or spawns a new one. Called only
-    /// from `upsert`'s novel-name branch.
-    private func ensureHud(in session: SessionState, group: String?) -> HUDInstance {
+    /// Get or create the primary HUD for a group. Phase 2: each
+    /// GroupState holds one primary HUD plus any tear-out siblings —
+    /// all share the same group key. Called only from `upsert`'s
+    /// novel-name branch.
+    private func ensureHud(in session: GroupState, group: String) -> HUDInstance {
         if let existing = session.huds.first(where: { $0.group == group }) {
             return existing
         }
@@ -1349,7 +1433,7 @@ final class SessionManager: NSObject {
     /// is `.claudeSpace`. Updates `session.lastResolvedSpaceID` on
     /// success so subsequent placements can fall back to it when the
     /// terminal becomes temporarily invisible.
-    private func applyClaudeSpacePlacement(window: HUDWindow, session: SessionState) {
+    private func applyClaudeSpacePlacement(window: HUDWindow, session: GroupState) {
         guard Settings.shared.hudSpacePolicy == .claudeSpace else { return }
         let resolved = SpaceResolver.placeOnClaudeSpace(
             window: window,
@@ -1364,13 +1448,13 @@ final class SessionManager: NSObject {
     /// Close a HUD: tear down its window and remove from `session.huds`.
     /// `isReleasedWhenClosed = false` on HUDWindow means this order is
     /// safe — the window won't dangle even if removed before close.
-    private func closeHudInstance(_ hud: HUDInstance, in session: SessionState) {
+    private func closeHudInstance(_ hud: HUDInstance, in session: GroupState) {
         hud.window.close()
         session.huds.removeAll(where: { $0.id == hud.id })
     }
 
-    private func ensureSession(_ sessionId: String) -> SessionState {
-        if let s = sessions[sessionId] {
+    private func ensureGroup(_ sessionId: String) -> GroupState {
+        if let s = groups[sessionId] {
             if s.orphanTimerTask != nil || s.orphaned {
                 s.orphanTimerTask?.cancel()
                 s.orphanTimerTask = nil
@@ -1381,10 +1465,10 @@ final class SessionManager: NSObject {
             }
             return s
         }
-        let idx = sessionsRegisteredOrder
-        sessionsRegisteredOrder += 1
-        let s = SessionState(id: sessionId, cascadeIndex: idx)
-        sessions[sessionId] = s
+        let idx = groupsRegisteredOrder
+        groupsRegisteredOrder += 1
+        let s = GroupState(id: sessionId, cascadeIndex: idx)
+        groups[sessionId] = s
         return s
     }
 }
@@ -1407,4 +1491,19 @@ extension Notification.Name {
     /// and `key`. HUD UI (Send button gating) subscribes to refresh
     /// when relevant flags flip.
     static let quickShowSessionFlagChanged = Notification.Name("QuickShowSessionFlagChanged")
+
+    /// Posted whenever a markup-related NDJSON event lands in a
+    /// session's events.ndjson. userInfo:
+    ///   - "sessionId":  String
+    ///   - "type":       "markup_sent" | "markup_dismissed"
+    ///   - "panel":      String
+    ///   - "artifact":   String? (only present for markup_sent)
+    ///   - "ts_ms":      Double (milliseconds since epoch)
+    ///
+    /// The HTTP MCP layer's MCPSessionRouter listens to this and fans
+    /// the event out via SDK `server.notify(LogMessageNotification)`
+    /// so the MCP SSE channel carries the same payload that lands in
+    /// the file. The file channel remains the source of truth for
+    /// resume + forensic semantics; SSE is the live-consumer channel.
+    static let quickShowMarkupEvent = Notification.Name("QuickShowMarkupEvent")
 }

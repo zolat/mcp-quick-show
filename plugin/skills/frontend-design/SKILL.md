@@ -17,33 +17,41 @@ addition.
 
 ## The loop
 
-1. **Decide the aesthetic direction up front.** See "Design
+1. **Pick a `group` and save it to memory.** Every call below uses
+   the same `group` — pick a unique slug for this design session
+   (e.g. `"design-a3f"`, `"coffee-coop-<6hex>"`) and **save it to
+   memory immediately** so a follow-up `claude --resume` reads it
+   back instead of generating a fresh one. See the
+   `quickshow/SKILL.md` "memory-save pattern" section.
+2. **Decide the aesthetic direction up front.** See "Design
    thinking" below.
-2. **Generate a self-contained HTML document.** Inline everything —
+3. **Generate a self-contained HTML document.** Inline everything —
    styles, scripts, fonts, images. The QuickShow renderer blocks
    network requests by design; no remote CDN, fonts, or images will
    resolve.
-3. **Render via `show_html`.** Pick a `name` you'll reuse for the
-   life of this design session (e.g. `"design"`,
-   `"coffee-coop-hero"`). Set `width` to match the design's intended
-   canvas: 1280 for desktop, 800 for narrower content, 375 for
-   mobile mocks. Without `width`, the canvas defaults to ~400pt —
-   too narrow for most designs.
-4. **Arm feedback once.** Call `enable_markup_events()` at the start
-   of the session. The response includes the exact `Monitor` /
-   `tail -F` command — **start it** so markup events stream as
-   notifications.
-5. **Wait for the user.** They'll either:
+4. **Render via `show_html(name=…, group=<your-group>, width=…)`.**
+   Pick a `name` you'll reuse for the life of this design session
+   (e.g. `"design"`, `"coffee-coop-hero"`). Set `width` to match
+   the design's intended canvas: 1280 for desktop, 800 for narrower
+   content, 375 for mobile mocks. Without `width`, the canvas
+   defaults to ~400pt — too narrow for most designs.
+5. **Arm feedback once.** Call `enable_markup_events(group=<your-
+   group>)` at the start of the session. The response includes the
+   exact `Monitor` / `tail -F` command — **start it** so markup
+   events stream as notifications.
+6. **Wait for the user.** They'll either:
    - **Send (✓):** approving the current state, or marking it up.
      A `markup_sent` event lands with an `artifact` UUID.
    - **Close (×):** walking away. A `markup_dismissed` event lands.
    - **Type chat feedback:** react as usual.
-6. **On `markup_sent`:** call `get_markup(artifact_id)`. Inspect the
-   annotated image literally — red strokes are the user's marks
-   (circles, arrows, scribbles, X-outs). Read them, decide what
-   they mean, and iterate with another `show_html` call against the
-   same `name`. Write **one sentence** describing what you changed.
-7. **On `markup_dismissed`:** ask what direction the user wants
+7. **On `markup_sent`:** call `get_markup(artifact_id=<id>,
+   group=<your-group>)`. Inspect the annotated image literally —
+   red strokes are the user's marks (circles, arrows, scribbles,
+   X-outs). Read them, decide what they mean, and iterate with
+   another `show_html(name=…, group=<your-group>, …)` call against
+   the same `name` + `group`. Write **one sentence** describing
+   what you changed.
+8. **On `markup_dismissed`:** ask what direction the user wants
    next.
 
 ## Plan-mode usage
@@ -53,9 +61,9 @@ see the **"Plan mode & 'show, don't ask'"** section in
 `quickshow/SKILL.md` for the rationale, the substitution patterns
 versus `AskUserQuestion`, and the on-disk artifact path. Specific
 to the design loop: if a particular `markup_sent` annotation is
-load-bearing for the implementation, quote its `artifact_id` in
-your plan so future-you can refetch it with `get_markup(<id>)`
-after plan mode ends.
+load-bearing for the implementation, quote both its `artifact_id`
+AND the `group` in your plan so future-you can refetch it with
+`get_markup(<id>, group=<group>)` after plan mode ends.
 
 ## Design thinking
 

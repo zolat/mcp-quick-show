@@ -1,7 +1,8 @@
 {
   "mcpServers": {
     "quickshow": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/launcher/mcp-quick-show"
+      "type": "http",
+      "url": "http://127.0.0.1:7890/mcp"
     }
   }
 }

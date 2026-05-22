@@ -5,12 +5,17 @@ options:
     macOS: "13.0"
   createIntermediateGroups: true
 
+packages:
+  MCP:
+    url: https://github.com/modelcontextprotocol/swift-sdk
+    exactVersion: "0.12.1"
+
 settings:
   base:
     SWIFT_VERSION: "5.9"
     MACOSX_DEPLOYMENT_TARGET: "13.0"
     PRODUCT_BUNDLE_IDENTIFIER: com.zolat.QuickShow
-    MARKETING_VERSION: "0.1.1"
+    MARKETING_VERSION: "0.2.0"
     CURRENT_PROJECT_VERSION: "1"
     # Sign with the local Apple Development cert so the cdhash stays
     # stable across rebuilds — TCC keys on the cert identity, not the
@@ -29,6 +34,9 @@ targets:
     platform: macOS
     sources:
       - path: QuickShow/Sources
+    dependencies:
+      - package: MCP
+        product: MCP
     info:
       path: QuickShow/Info.plist
       properties:
@@ -56,8 +64,4 @@ targets:
       - name: Copy QuickShow resources (templates, libs)
         script: |
           "${SRCROOT}/tools/copy-resources.sh"
-        showEnvVarsInLog: false
-      - name: Build mcp-quick-show sidecar (bun)
-        script: |
-          "${SRCROOT}/tools/build-sidecar.sh"
         showEnvVarsInLog: false

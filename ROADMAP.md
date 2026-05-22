@@ -1,9 +1,11 @@
 # Roadmap
 
-**Current:** v0.1.1 released — first public tag + binary. The
-backlog narrows to a `show_html` security pass (deferred from v0.1)
-and Developer-ID signing + notarization (v0.1.1 ships ad-hoc signed,
-Apple-Silicon only).
+**Current:** Phase H1 — HTTP MCP server (PoC) ← in progress. De-risks
+the proposed sidecar→HTTP-MCP migration (`HTTP_MIGRATION.md`) before
+greenlighting Phase 2. Three empirical proof-points: libproc PID
+resolution, Claude Code's HTTP MCP client (incl. parallel-Claude
+distinction), server-initiated push notifications. Coexists with
+today's stdio sidecar — no destructive changes.
 
 ## v0.1 — Original scope (shipped)
 
@@ -100,6 +102,24 @@ Apple-Silicon only).
 - [x] CI — `.github/workflows/ci.yml` runs `bun test` on
   ubuntu-latest and `xcodebuild Debug` on macos-14, concurrency-
   grouped per ref with cancel-in-progress.
+
+## Phase H1 — HTTP MCP server (PoC) ← current
+
+De-risk the sidecar→HTTP migration proposed in `HTTP_MIGRATION.md`
+before committing to Phase 2 (full migration). Coexists with today's
+stdio sidecar — destructive changes deferred. Plan:
+`~/.claude/plans/sounds-like-a-good-zippy-seahorse.md`.
+
+- [ ] PeerPidResolver + P1 proof (libproc fd→pid via `proc_pidfdinfo`)
+- [ ] Wire `modelcontextprotocol/swift-sdk` via SPM
+- [ ] MCPHTTPServer scaffold (BSD-socket accept loop, HTTP/1.1, gated
+      on `QUICKSHOW_MCP_HTTP=1`)
+- [ ] Session router + SDK dispatch (`StatefulHTTPServerTransport` per
+      `Mcp-Session-Id`)
+- [ ] `show_html` tool reusing `SessionManager.upsert(...)` + P2 proof
+      (one Claude + parallel Claudes, distinct PIDs + Spaces)
+- [ ] Delayed `server.notify(...)` + P3 proof (push surfaceable?)
+- [ ] `HTTP_MIGRATION_POC_REPORT.md` with Phase 2 go/no-go
 
 ## Backlog
 

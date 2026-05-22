@@ -20,20 +20,11 @@ Package.resolved
 *.swp
 *.swo
 
-# Node / Bun
-node_modules/
-sidecar/dist/
-sidecar/.cache/
-sidecar/.*.bun-build
-
 # Test artifacts
 /tmp-test/
 
 # DMG output
 dist/
-
-# Plugin bundled binary (built by tools/build-plugin.sh)
-plugin/bin/
 
 # Claude Code local workspace (retros, worktrees, etc.)
 .claude/

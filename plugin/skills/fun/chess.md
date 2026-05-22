@@ -37,27 +37,34 @@ moves. The state machine is on the page.
 
 ## Setup (once per session)
 
-1. **Decide who plays White.** Default: user is White. If they
+1. **Pick a `group` and save it to memory.** Example:
+   ```
+   group = "chess-" + <6-hex-slug>           # e.g. "chess-a3f"
+   memory.save("chess_game_group", group)
+   ```
+   Read it back on every subsequent turn (including after
+   `claude --resume`) before calling any `show_*` / `enable_*`.
+2. **Decide who plays White.** Default: user is White. If they
    ask Claude to go first, swap. Board is always drawn with White
    on the bottom — if the user plays Black, they read the board
    from the top.
-2. **Bootstrap.** Get the starting FEN:
+3. **Bootstrap.** Get the starting FEN:
 
    ```sh
    ${CLAUDE_PLUGIN_ROOT}/skills/fun/chess_helper.py new
    ```
 
    Store the returned FEN. That's the only state to track.
-3. **Render the board.**
+4. **Render the board.**
 
    ```sh
    ${CLAUDE_PLUGIN_ROOT}/skills/fun/chess_helper.py render-html <FEN> --size 600
    ```
 
-   Pipe into `show_html(name: "chess-board", content: <HTML>, width: 640)`.
-4. **Arm panel events** once: `enable_panel_events()`. Start the
-   `Monitor` it returns.
-5. If Claude is White, **play the opening move first** (see
+   Pipe into `show_html(name="chess-board", group=group, content=<HTML>, width=640)`.
+5. **Arm panel events** once: `enable_panel_events(group=group)`.
+   Start the `Monitor` it returns.
+6. If Claude is White, **play the opening move first** (see
    "Claude's turn"). Otherwise, wait for the first `panel_event`.
 
 ## On every `panel_event` with `payload.type === "move"`
@@ -184,7 +191,7 @@ next turn.)
      --last-move <your-uci>
    ```
 
-   `show_html(name: "chess-board", ...)` — same panel name, panel
+   `show_html(name="chess-board", group=group, ...)` — same panel name + group,
    updates in place. The re-render embeds the user's new
    legal-moves map; the page's lock clears because the DOM is
    replaced.

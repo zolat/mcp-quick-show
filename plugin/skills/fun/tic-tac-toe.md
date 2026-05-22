@@ -6,25 +6,32 @@ panel that updates in place after each move.
 
 ## Setup (do this once at the start of the session)
 
-1. Decide who goes first. Default: **the user is X and moves first.**
+1. **Pick a `group` and save it to memory.** Example:
+   ```
+   group = "ttt-" + <6-hex-slug>             # e.g. "ttt-a3f"
+   memory.save("ttt_game_group", group)
+   ```
+   Read it back on every subsequent turn (including after
+   `claude --resume`) before calling any `show_*` / `enable_*`.
+2. Decide who goes first. Default: **the user is X and moves first.**
    If they ask Claude to go first, swap roles and start with O on
    cell 5 (center) — strong opening.
-2. Arm the panel-event channel **once**:
+3. Arm the panel-event channel **once for this group**:
 
    ```
-   enable_panel_events()
+   enable_panel_events(group=group)
    ```
 
    The response includes the `Monitor` command pointed at the
-   session's `events.ndjson`. Start that Monitor as
+   group's `events.ndjson`. Start that Monitor as
    `persistent: true` so each click fires a notification.
-3. Render the empty board (see "HTML starter" below):
+4. Render the empty board (see "HTML starter" below):
 
    ```
-   show_html(name: "ttt-board", content: <board HTML>, width: 600)
+   show_html(name="ttt-board", group=group, content=<board HTML>, width=600)
    ```
 
-4. Wait. The first `panel_event` with `payload.type === "move"` is
+5. Wait. The first `panel_event` with `payload.type === "move"` is
    the user's first move.
 
 ## The turn loop
