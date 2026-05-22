@@ -61,6 +61,13 @@ xattr -d com.apple.quarantine /Applications/QuickShow.app
 After launch the QuickShow icon sits in the menu bar. No Dock entry
 — this is intentional (`LSUIElement`).
 
+**Recommended: enable "Launch at login"** in QuickShow's
+Settings → General. From 0.2.0 onwards the MCP server runs inside
+QuickShow.app (HTTP on `127.0.0.1:7890`), so Claude Code can only
+reach it when the app is running. Launch-at-login means you don't
+have to remember to start QuickShow before opening a Claude
+terminal.
+
 ### 2. Claude Code plugin
 
 This repo doubles as a Claude Code marketplace. From any project:
@@ -73,9 +80,12 @@ This repo doubles as a Claude Code marketplace. From any project:
 /plugin install quickshow@mcp-quick-show
 ```
 
-The plugin registers the MCP server (pointing at the bundled sidecar
-inside the .app) and ships the three skills above. Restart Claude
-Code after installing so the MCP server boots.
+The plugin's `.mcp.json` points at `http://127.0.0.1:7890/mcp`,
+the embedded MCP server inside the QuickShow.app process. **Make
+sure QuickShow.app is running** (menu-bar icon visible) before
+issuing tool calls — Claude Code will report "connection refused"
+otherwise. Restart Claude Code after installing the plugin so the
+HTTP transport handshake fires.
 
 ## Verify
 

@@ -62,6 +62,24 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate, NSTextFieldDel
         launchAtLoginCheckbox.state = isLaunchAtLoginEnabled() ? .on : .off
         stack.addArrangedSubview(launchAtLoginCheckbox)
 
+        // --- Launch-at-login explainer ---
+        // 0.2.0+ embeds the MCP server inside the app process. Claude
+        // Code's plugin reaches it via http://127.0.0.1:7890/mcp, so
+        // QuickShow has to be running before any MCP tool call.
+        // Recommending launch-at-login removes a recurring "start the
+        // app first" gotcha for users.
+        let mcpHint = NSTextField(labelWithString:
+            "QuickShow must be running for the Claude Code plugin to "
+            + "reach the MCP server (HTTP on 127.0.0.1:7890). "
+            + "Enabling launch-at-login means you don't have to "
+            + "remember to start the app first."
+        )
+        mcpHint.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        mcpHint.textColor = .secondaryLabelColor
+        mcpHint.lineBreakMode = .byWordWrapping
+        mcpHint.preferredMaxLayoutWidth = 380
+        stack.addArrangedSubview(mcpHint)
+
         // --- Where new HUDs open across macOS Spaces ---
         let policyRow = NSStackView()
         policyRow.orientation = .horizontal
