@@ -38,6 +38,7 @@ enum MCPToolHandlers {
             showSVGTool(),
             showMermaidTool(),
             showImageTool(),
+            showURLTool(),
             enableMarkupEventsTool(),
             getMarkupTool(),
         ]
@@ -64,6 +65,8 @@ enum MCPToolHandlers {
                 return await Self.handleShowMermaid(args: args, sm: sm, rt: rt, sid: sid)
             case "show_image":
                 return await Self.handleShowImage(args: args, sm: sm, rt: rt, sid: sid)
+            case "show_url":
+                return await Self.handleShowURL(args: args, sm: sm, rt: rt, sid: sid)
             case "enable_markup_events":
                 return await Self.handleEnableMarkupEvents(sm: sm, markupEvents: me, sid: sid, port: port)
             case "get_markup":
@@ -362,6 +365,48 @@ enum MCPToolHandlers {
             return CallTool.Result(content: renderResultContent(
                 payload: payload, result: result, snapshot: snapshot
             ))
+        } catch let err as ToolValidation.Error {
+            return errorResult("invalid arguments: \(err.message)")
+        } catch {
+            return errorResult("render error: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - show_url
+
+    private static func handleShowURL(
+        args: [String: Value],
+        sm: SessionManager,
+        rt: MCPSessionRouter,
+        sid: String
+    ) async -> CallTool.Result {
+        do {
+            let name = try ToolValidation.parseName(args)
+            guard let uv = args["url"], let urlStr = uv.stringValue,
+                  !urlStr.trimmingCharacters(in: .whitespaces).isEmpty
+            else {
+                throw ToolValidation.Error(message: "`url` must be a non-empty string")
+            }
+            guard let parsed = URL(string: urlStr) else {
+                throw ToolValidation.Error(message: "`url` is not a valid URL: \(urlStr)")
+            }
+            let scheme = parsed.scheme?.lowercased() ?? ""
+            guard scheme == "http" || scheme == "https" else {
+                throw ToolValidation.Error(
+                    message: "`url` must use http: or https: (got '\(scheme):')"
+                )
+            }
+            let payload = UpsertPayload(
+                name: name,
+                contentType: "url",
+                form: "url",
+                body: parsed.absoluteString,
+                width: try ToolValidation.parseWidth(args),
+                returnScreenshot: ToolValidation.parseReturnScreenshot(args),
+                grouping: try ToolValidation.parseGroupingFields(args)
+            )
+            let (result, snapshot) = try await dispatch(sm: sm, rt: rt, sid: sid, payload: payload)
+            return CallTool.Result(content: renderResultContent(payload: payload, result: result, snapshot: snapshot))
         } catch let err as ToolValidation.Error {
             return errorResult("invalid arguments: \(err.message)")
         } catch {
@@ -670,6 +715,56 @@ enum MCPToolHandlers {
             inputSchema: .object([
                 "type": .string("object"),
                 "required": .array([.string("name"), .string("path")]),
+                "properties": .object(properties),
+            ])
+        )
+    }
+
+    private static func showURLTool() -> Tool {
+        var properties: [String: Value] = [
+            "name": .object([
+                "type": .string("string"),
+                "description": .string(
+                    "Stable, human-readable slot name (e.g. 'spec', 'staging'). Same name reloads the existing panel; different name opens a new tab."
+                ),
+            ]),
+            "url": .object([
+                "type": .string("string"),
+                "description": .string(
+                    "Absolute http(s) URL to load. `file:`, `javascript:`, and `data:` URLs are rejected — use `show_html` for inline content or `show_image` for local files."
+                ),
+            ]),
+            "width": .object([
+                "type": .string("number"),
+                "description": .string(
+                    "Optional canvas width in points (100–4096). Sizes the WebView's CSS viewport before navigation, so responsive sites render at this width. If omitted, the default ~400pt viewport is used."
+                ),
+            ]),
+            "return_screenshot": .object([
+                "type": .string("boolean"),
+                "description": .string(
+                    "If true (default), the tool response includes a PNG screenshot of the loaded page. Set to false to save tokens when you don't need to verify."
+                ),
+                "default": .bool(true),
+            ]),
+        ]
+        for (k, v) in ToolValidation.groupingSchemaProps { properties[k] = v }
+        return Tool(
+            name: "show_url",
+            description:
+                "Load a live URL in a floating HUD panel on the user's screen, and return "
+                + "a PNG screenshot of the rendered page. Use this to point the user at an "
+                + "online document, spec, or article you want them to read, or to show them "
+                + "a running site (local dev server, staging URL) during end-to-end "
+                + "verification. Calling again with the same `name` reloads the panel with "
+                + "the new URL; a different `name` opens a new tab. Same-origin navigation "
+                + "works in-place (the user can click around); cross-origin links open in "
+                + "the default browser. Only http(s) URLs are accepted. "
+                + "Pair with `enable_markup_events` to let the user circle what's wrong on "
+                + "a real page.",
+            inputSchema: .object([
+                "type": .string("object"),
+                "required": .array([.string("name"), .string("url")]),
                 "properties": .object(properties),
             ])
         )
