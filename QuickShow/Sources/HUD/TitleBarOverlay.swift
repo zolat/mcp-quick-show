@@ -145,7 +145,7 @@ final class TitleBarOverlay: NSView {
     /// Session id this title bar belongs to, used to filter the
     /// `quickShowSessionFlagChanged` notification so cross-session
     /// flag flips don't toggle our buttons.
-    private var owningSessionId: String?
+    private var owningGroup: String?
     /// Current draw-mode visual state — `markupButton` highlights when
     /// true. Host (HUDWindow) flips this in lockstep with its own
     /// `isInDrawMode`.
@@ -483,10 +483,10 @@ final class TitleBarOverlay: NSView {
         badgeView.stringValue = ended ? "● session ended" : ""
     }
 
-    /// Bind this title bar to its owning session. Required for the
+    /// Bind this title bar to its owning group. Required for the
     /// armed-flag observer to filter notifications correctly.
-    func setOwningSessionId(_ id: String) {
-        owningSessionId = id
+    func setOwningGroup(_ group: String) {
+        owningGroup = group
     }
 
     /// Show or hide the markup-toggle button on the idle bar. The
@@ -562,7 +562,7 @@ final class TitleBarOverlay: NSView {
     @objc private func handleSessionFlagChanged(_ note: Notification) {
         guard let info = note.userInfo as? [String: Any],
               let group = info["group"] as? String,
-              group == owningSessionId,
+              group == owningGroup,
               let key = info["key"] as? String,
               key == "markup_events_armed" else { return }
         // Re-pull via the host so the source of truth stays one place.

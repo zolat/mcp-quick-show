@@ -72,23 +72,25 @@ final class SessionManager: NSObject {
         }
     }
 
-    /// One HUD window inside a session, with its own ordered panels.
+    /// One HUD window inside a group, with its own ordered panels.
+    /// Phase 2: every HUD belongs to exactly one group (= the
+    /// GroupState in `groups[hud.group]`). Tear-out spawns a sibling
+    /// HUD in the same group; claim_share migrates a HUD across
+    /// groups (and flips this field).
     final class HUDInstance {
         let id: UUID
         let window: HUDWindow
         var panels: [Panel]
-        /// The agent-supplied grouping key this HUD was opened with.
-        /// `nil` for the session's default (unnamed) HUD and for HUDs
-        /// spawned by tear-out. Sticky once set: re-routing on
-        /// `upsert(group:)` is by lookup (group equality), so changing
-        /// this field at runtime isn't necessary.
-        var group: String?
+        /// The group this HUD belongs to. Non-optional in Phase 2:
+        /// the map keys onto this. Mutable so `claim_share` can
+        /// re-target a HUD across groups.
+        var group: String
         /// The HUD-level description paragraph (last-writer-wins
         /// among upserts that route here). `nil` means unset; the
         /// banner's "group line" shows `""` in that case (collapsed).
         var hudDescription: String?
 
-        init(window: HUDWindow, panels: [Panel] = [], group: String? = nil) {
+        init(window: HUDWindow, panels: [Panel] = [], group: String) {
             self.id = window.hudInstanceId
             self.window = window
             self.panels = panels
@@ -1065,7 +1067,7 @@ final class SessionManager: NSObject {
         // sets the flag) BEFORE its first `upsert`, so the flag is
         // already true by the time this HUD is born — the
         // notification observer alone would miss it.
-        window.setOwningSessionId(sessionId)
+        window.setOwningGroup(sessionId)
         let armed = flag(group: sessionId, key: "markup_events_armed")?.asBool == true
         window.setArmed(armed)
     }
@@ -1347,11 +1349,11 @@ final class SessionManager: NSObject {
         return nil
     }
 
-    /// Get or create a HUD for a session, keyed by `group`. `nil` group
-    /// → the default (unnamed) HUD; a present group resolves to the
-    /// existing HUD with that group, or spawns a new one. Called only
-    /// from `upsert`'s novel-name branch.
-    private func ensureHud(in session: GroupState, group: String?) -> HUDInstance {
+    /// Get or create the primary HUD for a group. Phase 2: each
+    /// GroupState holds one primary HUD plus any tear-out siblings —
+    /// all share the same group key. Called only from `upsert`'s
+    /// novel-name branch.
+    private func ensureHud(in session: GroupState, group: String) -> HUDInstance {
         if let existing = session.huds.first(where: { $0.group == group }) {
             return existing
         }

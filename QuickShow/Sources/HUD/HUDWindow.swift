@@ -471,10 +471,10 @@ final class HUDWindow: NSWindow {
         shareBanner.show(token: token)
     }
 
-    /// Bind the title bar to its owning session id so its
-    /// flag-change notification observer can filter to "our" session.
-    func setOwningSessionId(_ id: String) {
-        titleBar.setOwningSessionId(id)
+    /// Bind the title bar to its owning group so its flag-change
+    /// notification observer can filter to "our" group.
+    func setOwningGroup(_ group: String) {
+        titleBar.setOwningGroup(group)
     }
 
     /// Called by the title bar's notification observer when the
