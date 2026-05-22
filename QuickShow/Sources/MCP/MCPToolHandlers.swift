@@ -622,21 +622,27 @@ enum MCPToolHandlers {
         if shareIDPattern.firstMatch(in: id, options: [], range: range) == nil {
             return errorResult("invalid share id (must be a 12-char lowercase-hex string, e.g. 'a1b2c3d4e5f6')")
         }
-        // `group` is accepted in the input schema today but not load-
-        // bearing yet — it routes via the MCP session id in 2.1 and
-        // flips to targetGroup in 2.2 once the canonical namespace
-        // changes. Validate the cap so callers can't smuggle a 50KB
-        // string through.
-        _ = try? ToolValidation.parseBytesCapped(args, key: "group", cap: ToolValidation.groupMaxBytes)
+        // The migrated HUD lands in `group` if Claude specifies one,
+        // else the MCP session's default group (= mcpSessionId).
+        let targetGroup: String
+        do {
+            targetGroup = try ToolValidation.parseBytesCapped(
+                args, key: "group", cap: ToolValidation.groupMaxBytes
+            ) ?? sid
+        } catch let err as ToolValidation.Error {
+            return errorResult("invalid arguments: \(err.message)")
+        } catch {
+            return errorResult("invalid arguments: \(error.localizedDescription)")
+        }
 
         // .consumed/<id>.png fallback — same discipline as get_markup.
-        let consumedDir = MarkupPaths.artifactsDir(sid).appendingPathComponent(".consumed", isDirectory: true)
+        let consumedDir = MarkupPaths.artifactsDir(targetGroup).appendingPathComponent(".consumed", isDirectory: true)
         let consumed = consumedDir.appendingPathComponent("\(id).png", isDirectory: false)
         let fm = FileManager.default
 
         let claimed: SessionManager.ClaimedShare
         do {
-            claimed = try sm.claimShare(shareID: id, targetSessionID: sid)
+            claimed = try sm.claimShare(shareID: id, targetGroup: targetGroup)
         } catch {
             // Same-session fallback (re-fetch after consume).
             if fm.fileExists(atPath: consumed.path) {
@@ -649,7 +655,7 @@ enum MCPToolHandlers {
             return errorResult("share \(id) not available: \(reason)")
         }
 
-        let live = MarkupPaths.artifact(sid, id: id)
+        let live = MarkupPaths.artifact(targetGroup, id: id)
         let bytes: Data
         do {
             bytes = try Data(contentsOf: live)
@@ -669,9 +675,9 @@ enum MCPToolHandlers {
 
         let text =
             "QuickShow share \(id) attached (panel '\(claimed.panelName)', content '\(claimed.contentType)'). "
-            + "The originating HUD is now in this session — call show_url / show_image / show_html / show_markdown "
-            + "with name=\"\(claimed.panelName)\" to update it in place, or enable_markup_events to let the user "
-            + "annotate it again. Image (\(bytes.count) bytes) follows."
+            + "The originating HUD is now in group '\(targetGroup)' — call show_url / show_image / show_html / show_markdown "
+            + "with name=\"\(claimed.panelName)\", group=\"\(targetGroup)\" to update it in place, or enable_markup_events(group=\"\(targetGroup)\") "
+            + "to let the user annotate it again. Image (\(bytes.count) bytes) follows."
         return CallTool.Result(content: [
             .text(text: text, annotations: nil, _meta: nil),
             .image(data: bytes.base64EncodedString(), mimeType: "image/png", annotations: nil, _meta: nil),

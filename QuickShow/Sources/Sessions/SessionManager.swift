@@ -23,14 +23,15 @@ final class SessionManager: NSObject {
         return 60
     }
 
-    /// Reserved session id for user-initiated HUDs (menu-bar "Open
-    /// URL…" / "Open File…" → AppDelegate → `userUpsert`). Deliberately
-    /// non-UUID so it can never collide with a real Claude conversation
-    /// id minted by `resolveSessionId()` on the sidecar. HUDs born here
-    /// migrate into a Claude session via `claimShare(...)` once the
-    /// user pastes the share token into Claude and Claude calls
-    /// `get_share(<id>)`.
-    static let userWindowsSessionID = "user-windows"
+    /// Reserved prefix for groups that hold user-initiated HUDs
+    /// (menu-bar "Open URL…" / "Open File…" → AppDelegate →
+    /// `userUpsert`). Each user share gets its own group named
+    /// `user-share-<random>` so the separate-HUD-per-share UX is
+    /// preserved (each share is its own HUD with its own Space
+    /// placement). HUDs born here migrate into a Claude-specified
+    /// group via `claimShare(...)` once the user pastes the share
+    /// token into Claude and Claude calls `get_share(<id>, group: ...)`.
+    static let userSharesGroupPrefix = "user-share-"
 
     private let renderers: RendererRegistry
     weak var promoteController: PromoteToWindowController?
@@ -216,19 +217,23 @@ final class SessionManager: NSObject {
                     width: Double? = nil,
                     displayName: String? = nil,
                     autoEnterDrawMode: Bool = false) async throws -> (RenderResult, Data) {
-        let sessionId = Self.userWindowsSessionID
-        setFlag(group: sessionId, key: "markup_events_armed", value: .bool(true))
+        // Each user-initiated HUD lives in its own group so the
+        // separate-HUD-per-share UX is preserved. The shareId carries
+        // through claim_share — see recordShareSent + claimShare.
+        let group = "\(Self.userSharesGroupPrefix)\(ShareID.mint())"
+        setFlag(group: group, key: "markup_events_armed", value: .bool(true))
         let result = try await upsert(
-            sessionId: sessionId,
+            sessionId: group,
             name: name,
             contentType: contentType,
             form: form,
             body: body,
             width: width,
+            group: group,
             description: displayName
         )
-        if let session = groups[sessionId],
-           let (hud, _) = locate(in: session, name: name) {
+        if let groupState = groups[group],
+           let (hud, _) = locate(in: groupState, name: name) {
             hud.window.setAlwaysShowSend(true)
             if autoEnterDrawMode && !hud.window.isInDrawMode {
                 hud.window.toggleDrawMode()
@@ -587,12 +592,12 @@ final class SessionManager: NSObject {
     ///   - Agent-panel session: writes `<artifact-id>.png` into the
     ///     session's artifacts dir + appends a `markup_sent` line to
     ///     `events.ndjson` so the agent's tail picks it up.
-    ///   - User-windows session (`userWindowsSessionID`): no agent is
+    ///   - User-share group (`user-share-<random>`): no agent is
     ///     listening, so we instead write a share PNG + JSON to
     ///     `MarkupPaths.sharesBaseDir`, put `[quickshow-share:<id>]`
-    ///     on the clipboard, and pop an NSAlert telling the user
-    ///     where the token is. The HUD lives on; a future
-    ///     `get_share(<id>)` migrates it into a Claude session.
+    ///     on the clipboard, and pop an in-bar confirmation. The HUD
+    ///     lives on; a future `get_share(<id>, group: …)` migrates it
+    ///     into a Claude-specified group.
     func sendActivePanelMarkup(sessionId: String, hudId: UUID) {
         guard let session = groups[sessionId],
               let hud = session.huds.first(where: { $0.id == hudId }),
@@ -602,7 +607,7 @@ final class SessionManager: NSObject {
             return
         }
         _ = session  // used only for the locate-by-id chain above
-        let isUserShare = (sessionId == Self.userWindowsSessionID)
+        let isUserShare = sessionId.hasPrefix(Self.userSharesGroupPrefix)
         Task { @MainActor [weak self] in
             guard let self = self else { return }
             do {
@@ -703,36 +708,36 @@ final class SessionManager: NSObject {
 
     /// First-come-first-served claim of a user-initiated share.
     ///
-    /// The user opened a HUD via the menu bar (lives under
-    /// `userWindowsSessionID`), optionally marked it up, and hit Send —
-    /// which wrote a flattened PNG + JSON sidecar under
+    /// The user opened a HUD via the menu bar (lives in its own
+    /// `user-share-<random>` group), optionally marked it up, and hit
+    /// Send — which wrote a flattened PNG + JSON sidecar under
     /// `MarkupPaths.sharesBaseDir` and put a `[quickshow-share:<id>]`
     /// token on the clipboard. Claude reads the token from the user's
-    /// pasted message and calls the sidecar's `get_share(<id>)`, which
-    /// forwards here with `targetSessionID` = the claimer's session id.
+    /// pasted message and calls `get_share(<id>, group: ...)`, which
+    /// forwards here with `targetGroup` = where Claude wants the
+    /// migrated HUD to live.
     ///
     /// Side effects:
-    ///   1. The matching HUDInstance is detached from `user-windows`
-    ///      and re-parented to `targetSessionID` — all callbacks
+    ///   1. The matching HUDInstance is detached from its user-share
+    ///      group and re-parented to `targetGroup` — all callbacks
     ///      rewired so future Send / draw-mode / panel-event traffic
-    ///      lands in the new session.
-    ///   2. The share PNG moves from `shares/<id>.png` into the new
-    ///      session's artifacts dir at `<id>.png`. The sidecar then
-    ///      reads it through `markupArtifactPath(ctx.sessionId, id)`
-    ///      — same discipline as `get_markup` — and moves it to
-    ///      `.consumed/` after returning the image to the model.
+    ///      lands in the target group's events log + flags.
+    ///   2. The share PNG moves from `shares/<id>.png` into the
+    ///      target group's artifacts dir at `<id>.png`. `get_share`
+    ///      then reads it through `MarkupPaths.artifact(targetGroup,
+    ///      id: <id>)` — same discipline as `get_markup` — and moves
+    ///      it to `.consumed/` after returning the image to the model.
     ///   3. The share JSON moves to `shares/.consumed/<id>.json` so a
-    ///      second `claim_share(<same-id>)` from another session
+    ///      second `claim_share(<same-id>)` from another group
     ///      cleanly returns "already claimed."
     ///   4. The HUD's `alwaysShowSend` flips off — the window is in a
-    ///      Claude session now, so Send follows normal
-    ///      `armed && drawing` gating (Claude arms via
-    ///      `enable_markup_events`).
+    ///      Claude group now, so Send follows normal `armed && drawing`
+    ///      gating (Claude arms via `enable_markup_events(group:)`).
     ///
     /// The atomic point is step (3) — we move the JSON early, so a
-    /// concurrent claim from another session sees it gone and fails
+    /// concurrent claim from another group sees it gone and fails
     /// the same way a second claim of an already-consumed share does.
-    func claimShare(shareID: String, targetSessionID: String) throws -> ClaimedShare {
+    func claimShare(shareID: String, targetGroup: String) throws -> ClaimedShare {
         guard ShareID.isValid(shareID) else {
             throw ControlError.invalidPayload("share_id is malformed (expected \(ShareID.length) lowercase-hex chars)")
         }
@@ -754,10 +759,24 @@ final class SessionManager: NSObject {
         } catch {
             throw ControlError.invalidPayload("share metadata malformed: \(error.localizedDescription)")
         }
-        guard let userSession = groups[Self.userWindowsSessionID] else {
-            throw ControlError.invalidPayload("no user-windows session — share has no source HUD")
+        // Walk all user-share groups for the source HUD. Each user
+        // share is its own group keyed by `user-share-<random>`, so
+        // we scan only the prefixed entries — should be a handful at
+        // most.
+        var sourceGroupKey: String?
+        var sourceGroupState: GroupState?
+        var sourceHud: HUDInstance?
+        for (key, state) in groups where key.hasPrefix(Self.userSharesGroupPrefix) {
+            if let hud = state.huds.first(where: { $0.id.uuidString == meta.sourceHudId }) {
+                sourceGroupKey = key
+                sourceGroupState = state
+                sourceHud = hud
+                break
+            }
         }
-        guard let sourceHud = userSession.huds.first(where: { $0.id.uuidString == meta.sourceHudId }),
+        guard let sourceGroupKey,
+              let sourceGroupState,
+              let sourceHud,
               sourceHud.panels.contains(where: { $0.name == meta.sourcePanelName }) else {
             throw ControlError.invalidPayload("source HUD for share '\(shareID)' is gone (user closed it before the claim landed)")
         }
@@ -771,43 +790,51 @@ final class SessionManager: NSObject {
             throw ControlError.invalidPayload("share '\(shareID)' already claimed")
         }
 
-        // Migrate the HUDInstance: detach from user-windows, attach to
-        // the claimer. Rewire callbacks against the new session id so
-        // future Send / draw-mode / panel-event traffic lands in the
-        // claimer's events log + flags.
-        let targetSession = ensureGroup(targetSessionID)
-        userSession.huds.removeAll(where: { $0.id == sourceHud.id })
-        targetSession.huds.append(sourceHud)
-        sourceHud.window.sessionId = targetSessionID
-        wireHudCallbacks(sourceHud, sessionId: targetSessionID)
+        // Migrate the HUDInstance: detach from the user-share group,
+        // attach to the target group. Rewire callbacks against the
+        // target group so future Send / draw-mode / panel-event
+        // traffic lands in the right events log + flags.
+        let targetGroupState = ensureGroup(targetGroup)
+        sourceGroupState.huds.removeAll(where: { $0.id == sourceHud.id })
+        targetGroupState.huds.append(sourceHud)
+        sourceHud.window.sessionId = targetGroup
+        wireHudCallbacks(sourceHud, sessionId: targetGroup)
         // Re-wire each panel's renderer-level closures (strokes +
-        // panel events) for the new session id; the previous wiring
-        // captured `user-windows` as the session.
+        // panel events) for the new group; the previous wiring
+        // captured the user-share group as the owner.
         for panel in sourceHud.panels {
             wireStrokePersistence(renderer: panel.renderer,
-                                  sessionId: targetSessionID,
+                                  sessionId: targetGroup,
                                   panelName: panel.name)
             wirePanelEvents(renderer: panel.renderer,
-                            sessionId: targetSessionID,
+                            sessionId: targetGroup,
                             panelName: panel.name)
         }
-        // The HUD is in a Claude session now; Send follows normal
+        // Reflect the new owning group on the HUDInstance itself.
+        sourceHud.group = targetGroup
+        // The HUD is in a Claude-owned group now; Send follows normal
         // armed-AND-drawing gating.
         sourceHud.window.setAlwaysShowSend(false)
+        // If the source group is now empty, drop it from the map so
+        // we don't accumulate stale user-share-* entries.
+        if sourceGroupState.huds.isEmpty {
+            sourceGroupState.orphanTimerTask?.cancel()
+            groups.removeValue(forKey: sourceGroupKey)
+        }
 
-        // Move the PNG into the claimer's artifacts dir so the
-        // sidecar's get_share can read it through the same path
-        // markupArtifactPath() uses for get_markup. Best-effort —
-        // failure here means the HUD migrated but the image is
-        // unavailable; the sidecar surfaces that to the model.
+        // Move the PNG into the target group's artifacts dir so
+        // `get_share` can read it through MarkupPaths.artifact(
+        // targetGroup, id:) — same path get_markup uses for the
+        // standard markup loop. Best-effort: failure here leaves the
+        // HUD migrated but the image unavailable, surfaced to Claude.
         do {
-            try MarkupPaths.ensureDirs(targetSessionID)
+            try MarkupPaths.ensureDirs(targetGroup)
             try fm.moveItem(at: pngURL,
-                            to: MarkupPaths.artifact(targetSessionID, id: shareID))
+                            to: MarkupPaths.artifact(targetGroup, id: shareID))
         } catch {
             NSLog("QuickShow: claimShare PNG move failed: \(error) — HUD migrated but image unavailable")
         }
-        NSLog("QuickShow: claimed share \(shareID) → session \(targetSessionID) panel '\(meta.sourcePanelName)'")
+        NSLog("QuickShow: claimed share \(shareID) → group \(targetGroup) panel '\(meta.sourcePanelName)'")
         return ClaimedShare(panelName: meta.sourcePanelName, contentType: meta.contentType)
     }
 

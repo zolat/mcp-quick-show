@@ -146,7 +146,7 @@ enum ControlHandlers {
         }
         let claimed = try manager.claimShare(
             shareID: payload.shareId,
-            targetSessionID: payload.session
+            targetGroup: payload.session
         )
         return ControlOk(id: req.id, result: ClaimShareResult(
             panelName: claimed.panelName,
