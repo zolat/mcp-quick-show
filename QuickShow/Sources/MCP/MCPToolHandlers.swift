@@ -6,10 +6,11 @@ import MCP
 //
 // Mirrors `sidecar/src/handlers/*.ts` 1:1. Reuses `SessionManager`,
 // `MarkupPaths`, and the renderer/HUD pipeline directly. The MCP
-// session id (assigned by the SDK) maps to the existing `sessionId`
-// argument; the libproc-resolved Claude PID flows in via the router
-// stash and `registerSession(_:parentPid:)` so `.claudeSpace`
-// placement reuses unchanged from "have a PID" onward.
+// session id (assigned by the SDK) is used only to default the
+// `group` arg when callers omit it; storage is keyed by `group`. The
+// libproc-resolved Claude PID flows in via the router stash and
+// `registerGroup(_:parentPid:)` so `.claudeSpace` placement reuses
+// unchanged from "have a PID" onward.
 
 @MainActor
 enum MCPToolHandlers {
@@ -70,9 +71,9 @@ enum MCPToolHandlers {
             case "show_url":
                 return await Self.handleShowURL(args: args, sm: sm, rt: rt, sid: sid)
             case "enable_markup_events":
-                return await Self.handleEnableMarkupEvents(sm: sm, markupEvents: me, sid: sid, port: port)
+                return await Self.handleEnableMarkupEvents(args: args, sm: sm, markupEvents: me, sid: sid, port: port)
             case "enable_panel_events":
-                return await Self.handleEnablePanelEvents(sm: sm, sid: sid)
+                return await Self.handleEnablePanelEvents(args: args, sm: sm, sid: sid)
             case "get_markup":
                 return await Self.handleGetMarkup(args: args, sid: sid)
             case "get_share":
@@ -109,7 +110,12 @@ enum MCPToolHandlers {
         payload: UpsertPayload
     ) async throws -> (RenderResult, Data) {
         let claudePid = await rt.claudePidFor(sessionID: sid)
-        sm.registerSession(sid, parentPid: claudePid)
+        // Resolve the group at the wire boundary so every downstream
+        // call has a defined namespace. Omitted `group` means "this
+        // MCP session's own group" (= mcpSessionId), preserving
+        // today's per-session-default-HUD behaviour.
+        let groupKey = payload.grouping.group ?? sid
+        sm.registerGroup(groupKey, parentPid: claudePid)
         return try await sm.upsert(
             sessionId: sid,
             name: payload.name,
@@ -117,7 +123,7 @@ enum MCPToolHandlers {
             form: payload.form,
             body: payload.body,
             width: payload.width.map { Double($0) },
-            group: payload.grouping.group,
+            group: groupKey,
             description: payload.grouping.description,
             hudDescription: payload.grouping.hudDescription
         )
@@ -423,22 +429,33 @@ enum MCPToolHandlers {
     // MARK: - enable_markup_events dispatch
 
     private static func handleEnableMarkupEvents(
+        args: [String: Value],
         sm: SessionManager,
         markupEvents: MarkupEventsStream,
         sid: String,
         port: UInt16
     ) async -> CallTool.Result {
+        let groupKey: String
+        do {
+            groupKey = try ToolValidation.parseBytesCapped(
+                args, key: "group", cap: ToolValidation.groupMaxBytes
+            ) ?? sid
+        } catch let err as ToolValidation.Error {
+            return errorResult("invalid arguments: \(err.message)")
+        } catch {
+            return errorResult("invalid arguments: \(error.localizedDescription)")
+        }
         let logPath: URL
         do {
-            logPath = try MarkupPaths.ensureDirs(sid)
+            logPath = try MarkupPaths.ensureDirs(groupKey)
         } catch {
             return errorResult("failed to prepare markup dirs: \(error.localizedDescription)")
         }
-        let listenerConnected = await markupEvents.hasSubscriber(sessionID: sid)
+        let listenerConnected = await markupEvents.hasSubscriber(group: groupKey)
         await MainActor.run {
-            sm.setFlag(sessionId: sid, key: "markup_events_armed", value: .bool(true))
+            sm.setFlag(sessionId: groupKey, key: "markup_events_armed", value: .bool(true))
         }
-        let monitorCommand = "curl -sN -H \"Mcp-Session-Id: \(sid)\" http://127.0.0.1:\(port)/markup-events | grep --line-buffered -v '\"type\":\"heartbeat\"'"
+        let monitorCommand = "curl -sN -H \"Mcp-Session-Id: \(groupKey)\" http://127.0.0.1:\(port)/markup-events | grep --line-buffered -v '\"type\":\"heartbeat\"'"
 
         var lines: [String] = []
         if !listenerConnected {
@@ -472,17 +489,28 @@ enum MCPToolHandlers {
     // MARK: - enable_panel_events dispatch
 
     private static func handleEnablePanelEvents(
+        args: [String: Value],
         sm: SessionManager,
         sid: String
     ) async -> CallTool.Result {
+        let groupKey: String
+        do {
+            groupKey = try ToolValidation.parseBytesCapped(
+                args, key: "group", cap: ToolValidation.groupMaxBytes
+            ) ?? sid
+        } catch let err as ToolValidation.Error {
+            return errorResult("invalid arguments: \(err.message)")
+        } catch {
+            return errorResult("invalid arguments: \(error.localizedDescription)")
+        }
         let logPath: URL
         do {
-            logPath = try MarkupPaths.ensureDirs(sid)
+            logPath = try MarkupPaths.ensureDirs(groupKey)
         } catch {
             return errorResult("failed to prepare events dir: \(error.localizedDescription)")
         }
         await MainActor.run {
-            sm.setFlag(sessionId: sid, key: "panel_events_armed", value: .bool(true))
+            sm.setFlag(sessionId: groupKey, key: "panel_events_armed", value: .bool(true))
         }
         let text = [
             "Panel events armed for this session.",
@@ -529,9 +557,19 @@ enum MCPToolHandlers {
         if artifactIDPattern.firstMatch(in: artifactID, options: [], range: range) == nil {
             return errorResult("invalid artifact_id (must be a UUID like '550e8400-e29b-41d4-a716-446655440000')")
         }
+        let groupKey: String
+        do {
+            groupKey = try ToolValidation.parseBytesCapped(
+                args, key: "group", cap: ToolValidation.groupMaxBytes
+            ) ?? sid
+        } catch let err as ToolValidation.Error {
+            return errorResult("invalid arguments: \(err.message)")
+        } catch {
+            return errorResult("invalid arguments: \(error.localizedDescription)")
+        }
 
-        let live = MarkupPaths.artifact(sid, id: artifactID)
-        let consumedDir = MarkupPaths.artifactsDir(sid).appendingPathComponent(".consumed", isDirectory: true)
+        let live = MarkupPaths.artifact(groupKey, id: artifactID)
+        let consumedDir = MarkupPaths.artifactsDir(groupKey).appendingPathComponent(".consumed", isDirectory: true)
         let consumed = consumedDir.appendingPathComponent("\(artifactID).png", isDirectory: false)
         let fm = FileManager.default
 
@@ -893,18 +931,26 @@ enum MCPToolHandlers {
         return Tool(
             name: "enable_markup_events",
             description:
-                "Arm the markup push channel for this session. After calling this, "
-                + "the HUD's Send button is enabled on markup-capable panels, and a "
+                "Arm the markup push channel for a group. After calling this, the HUD's "
+                + "Send button is enabled on markup-capable panels in that group, and a "
                 + "user pressing Send (or closing without sending) emits a one-line "
-                + "NDJSON event to a per-session log file. Call this ONCE per session "
-                + "before rendering markup-capable panels. The tool response tells you "
-                + "the exact `Monitor` command to start watching the events log — when "
-                + "you see a `markup_sent` line, call `get_markup(artifact_id)` to "
-                + "fetch the image. When you see `markup_dismissed`, the user closed "
-                + "the panel without marking up. Idempotent.",
+                + "NDJSON event to the group's events log. Call this ONCE per group "
+                + "before rendering markup-capable panels into it. The tool response tells "
+                + "you the exact `Monitor` command to start watching the events log — "
+                + "when you see a `markup_sent` line, call `get_markup(artifact_id, group)` "
+                + "to fetch the image. When you see `markup_dismissed`, the user closed "
+                + "the panel without marking up. Idempotent. Pass the same `group` you "
+                + "use on `show_*` calls; if omitted, defaults to your MCP session's group.",
             inputSchema: .object([
                 "type": .string("object"),
-                "properties": .object([:]),
+                "properties": .object([
+                    "group": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "The group whose markup channel to arm. If omitted, defaults to this MCP session's own group. ≤256 bytes."
+                        ),
+                    ]),
+                ]),
             ])
         )
     }
@@ -913,19 +959,28 @@ enum MCPToolHandlers {
         return Tool(
             name: "enable_panel_events",
             description:
-                "Arm the panel-event push channel for this session. After calling "
-                + "this, agent HTML rendered via `show_html` (or any WebView panel) "
-                + "can call `window.quickshow.emit(payload)` and the payload lands as "
-                + "a one-line NDJSON event in a per-session log file. Call this ONCE "
-                + "per session before rendering interactive panels. The tool response "
+                "Arm the panel-event push channel for a group. After calling this, agent "
+                + "HTML rendered via `show_html` (or any WebView panel) in that group "
+                + "can call `window.quickshow.emit(payload)` and the payload lands as a "
+                + "one-line NDJSON event in the group's events log. Call this ONCE per "
+                + "group before rendering interactive panels into it. The tool response "
                 + "tells you the exact `Monitor` command to start watching the events "
                 + "log — react to `panel_event` lines (your free-form payload, "
                 + "agent-defined semantics) and `panel_event_dropped` lines (throttle "
                 + "warning, ≥1 event/sec was discarded). Independent of "
-                + "`enable_markup_events`; arm either, both, or neither. Idempotent.",
+                + "`enable_markup_events`; arm either, both, or neither. Idempotent. "
+                + "Pass the same `group` you use on `show_*` calls; if omitted, defaults "
+                + "to your MCP session's group.",
             inputSchema: .object([
                 "type": .string("object"),
-                "properties": .object([:]),
+                "properties": .object([
+                    "group": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "The group whose panel-events channel to arm. If omitted, defaults to this MCP session's own group. ≤256 bytes."
+                        ),
+                    ]),
+                ]),
             ])
         )
     }
@@ -974,7 +1029,9 @@ enum MCPToolHandlers {
                 + "emits a `markup_sent` line — the `artifact` field on that line is "
                 + "the id to pass here. The artifact is moved to a `.consumed/` "
                 + "subfolder on success so it's clear which markups have been "
-                + "processed. Returns an MCP image (PNG) the model can inspect.",
+                + "processed. Returns an MCP image (PNG) the model can inspect. "
+                + "Pass the same `group` you used on `enable_markup_events`; if omitted, "
+                + "defaults to this MCP session's group.",
             inputSchema: .object([
                 "type": .string("object"),
                 "required": .array([.string("artifact_id")]),
@@ -983,6 +1040,12 @@ enum MCPToolHandlers {
                         "type": .string("string"),
                         "description": .string(
                             "UUID of the artifact, copied verbatim from the `artifact` field of a `markup_sent` event line."
+                        ),
+                    ]),
+                    "group": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "The group the artifact lives under. If omitted, defaults to this MCP session's own group. ≤256 bytes."
                         ),
                     ]),
                 ]),

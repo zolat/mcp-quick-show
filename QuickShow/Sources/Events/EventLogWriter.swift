@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-/// Appends NDJSON events to the per-session log that Claude tails via
+/// Appends NDJSON events to the per-group log that Claude tails via
 /// the `Monitor` tool. Four event types are emitted:
 ///   `markup_sent`         — user pressed Send on a markup-capable panel
 ///   `markup_dismissed`    — user closed the panel without sending
@@ -14,18 +14,18 @@ import Foundation
 /// this file. `panel_event` lines are gated by an arming flag + a token
 /// bucket — see `SessionManager.wirePanelEvents` for the throttle.
 ///
-/// Concurrency model: one writer per session, serialized through a
+/// Concurrency model: one writer per group, serialized through a
 /// dedicated queue. The underlying file is opened `O_APPEND` so even
-/// cross-process writes (e.g. a second app instance) stay line-atomic
-/// for short payloads.
+/// cross-process writes (e.g. a second app instance, or two MCP
+/// sessions sharing a group) stay line-atomic for short payloads.
 final class EventLogWriter: @unchecked Sendable {
-    private let sessionId: String
+    private let group: String
     private let queue: DispatchQueue
     private var fd: Int32 = -1
 
-    init(sessionId: String) {
-        self.sessionId = sessionId
-        self.queue = DispatchQueue(label: "QuickShow.EventLogWriter.\(sessionId)")
+    init(group: String) {
+        self.group = group
+        self.queue = DispatchQueue(label: "QuickShow.EventLogWriter.\(group)")
     }
 
     deinit {
@@ -35,7 +35,7 @@ final class EventLogWriter: @unchecked Sendable {
     }
 
     /// Emit a `markup_sent` line. `artifact` is the UUID of the PNG
-    /// already written into the session's artifacts dir.
+    /// already written into the group's artifacts dir.
     func emitMarkupSent(panel: String, artifact: String) {
         let tsMs = Date().timeIntervalSince1970 * 1000
         emit([
@@ -67,7 +67,7 @@ final class EventLogWriter: @unchecked Sendable {
     /// is the live-consumer channel.
     private func postMarkupNotification(type: String, panel: String, artifact: String?, tsMs: Double) {
         var info: [String: Any] = [
-            "sessionId": sessionId,
+            "group": group,
             "type": type,
             "panel": panel,
             "ts_ms": tsMs,
@@ -161,12 +161,12 @@ final class EventLogWriter: @unchecked Sendable {
     private func writeLine(_ line: String) {
         if fd < 0 {
             do {
-                try MarkupPaths.ensureDirs(sessionId)
+                try MarkupPaths.ensureDirs(group)
             } catch {
-                NSLog("QuickShow: EventLogWriter ensureDirs failed for \(sessionId): \(error)")
+                NSLog("QuickShow: EventLogWriter ensureDirs failed for \(group): \(error)")
                 return
             }
-            let path = MarkupPaths.eventsLog(sessionId).path
+            let path = MarkupPaths.eventsLog(group).path
             fd = Darwin.open(path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
             if fd < 0 {
                 NSLog("QuickShow: EventLogWriter open failed for \(path): errno=\(errno)")

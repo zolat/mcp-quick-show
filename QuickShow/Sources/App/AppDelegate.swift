@@ -164,7 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSLog("QuickShow: TEST_HTML render width=\(result.width) height=\(result.height) snapshot_bytes=\(snapshot.count)")
 
                 // Drive the WebView to read the post-script DOM state.
-                guard let panel = sessionManager.sessions[session]?.huds.first?.panels.first,
+                guard let panel = sessionManager.groups[session]?.huds.first?.panels.first,
                       let web = panel.renderer as? WebViewPanelRenderer else {
                     NSLog("QuickShow: TEST_HTML failed: renderer missing")
                     return
@@ -206,7 +206,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     body: "# circle the bug\n\n- thing\n- other thing\n"
                 )
 
-                guard let s = sessionManager.sessions[session],
+                guard let s = sessionManager.groups[session],
                       let hud = s.huds.first,
                       let panel = hud.panels.first,
                       let web = panel.renderer as? WebViewPanelRenderer else {
@@ -296,7 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     form: "inline",
                     body: "# initial pull race\n"
                 )
-                guard let hud1 = sessionManager.sessions[s1]?.huds.first?.window else {
+                guard let hud1 = sessionManager.groups[s1]?.huds.first?.window else {
                     NSLog("QuickShow: TEST_MARKUP_UI failed step=1 kind=no-hud")
                     return
                 }
@@ -314,7 +314,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     form: "inline",
                     body: "# notification path\n"
                 )
-                guard let hud2 = sessionManager.sessions[s2]?.huds.first?.window else {
+                guard let hud2 = sessionManager.groups[s2]?.huds.first?.window else {
                     NSLog("QuickShow: TEST_MARKUP_UI failed step=2 kind=no-hud")
                     return
                 }
@@ -346,7 +346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     form: "inline",
                     body: "# send flow\n\nclick send.\n"
                 )
-                guard let hud3 = sessionManager.sessions[s3]?.huds.first?.window else {
+                guard let hud3 = sessionManager.groups[s3]?.huds.first?.window else {
                     NSLog("QuickShow: TEST_MARKUP_UI failed step=3 kind=no-hud")
                     return
                 }
@@ -379,8 +379,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     form: "inline",
                     body: "# draw + composite\n"
                 )
-                guard let hud4 = sessionManager.sessions[s4]?.huds.first?.window,
-                      let hud4Instance = sessionManager.sessions[s4]?.huds.first,
+                guard let hud4 = sessionManager.groups[s4]?.huds.first?.window,
+                      let hud4Instance = sessionManager.groups[s4]?.huds.first,
                       let panel4 = hud4Instance.panels.first(where: { $0.name == "design" }),
                       let web4 = panel4.renderer as? WebViewPanelRenderer else {
                     NSLog("QuickShow: TEST_MARKUP_UI failed step=4 kind=no-hud")
@@ -459,7 +459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     form: "inline",
                     body: "# rerender baseline\n"
                 )
-                guard let hud6 = sessionManager.sessions[s6]?.huds.first?.window else {
+                guard let hud6 = sessionManager.groups[s6]?.huds.first?.window else {
                     NSLog("QuickShow: TEST_MARKUP_UI failed step=6 kind=no-hud")
                     return
                 }
@@ -506,7 +506,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     form: "inline",
                     body: "# panel b\n"
                 )
-                guard let session7 = sessionManager.sessions[s7],
+                guard let session7 = sessionManager.groups[s7],
                       let bPanel = session7.huds.first?.panels.first(where: { $0.name == "b" }),
                       let bWeb = bPanel.renderer as? WebViewPanelRenderer else {
                     NSLog("QuickShow: TEST_MARKUP_UI failed step=7 kind=no-panel")
@@ -597,7 +597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     body: "flowchart LR\nA-->B-->C-->D"
                 )
                 try await Task.sleep(nanoseconds: 500_000_000)
-                guard let session = sessionManager.sessions["panzoom-smoke"],
+                guard let session = sessionManager.groups["panzoom-smoke"],
                       let mermaidPanel = session.huds.first?.panels.first(where: { $0.name == "diagram" }),
                       let mermaidScroll = mermaidPanel.view as? ZoomableCanvasScrollView else {
                     NSLog("QuickShow: TEST_PANZOOM failed: no mermaid scroll view")
@@ -665,7 +665,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         body: body
                     )
                 }
-                guard let session = sessionManager.sessions["fused-smoke"] else { return }
+                guard let session = sessionManager.groups["fused-smoke"] else { return }
                 let primary = session.huds[0]
                 let primaryId = primary.id
                 let dragEvent = NSEvent.mouseEvent(
@@ -720,7 +720,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         body: body
                     )
                 }
-                guard let session = sessionManager.sessions["reattach-smoke"] else {
+                guard let session = sessionManager.groups["reattach-smoke"] else {
                     NSLog("QuickShow: TEST_REATTACH failed: session missing")
                     return
                 }
@@ -802,7 +802,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         body: body
                     )
                 }
-                guard let session = sessionManager.sessions["tearout-smoke"] else {
+                guard let session = sessionManager.groups["tearout-smoke"] else {
                     NSLog("QuickShow: TEST_TEAROUT failed: session missing")
                     return
                 }
@@ -844,7 +844,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let waitNs = UInt64((Double(originalGrace) ?? 60) * 1_000_000_000) + 200_000_000
                 try await Task.sleep(nanoseconds: waitNs)
                 NSLog("QuickShow: TEST_TEAROUT step=orphan orphaned=\(session.orphaned) huds=\(session.huds.count)")
-                sessionManager.registerSession("tearout-smoke")
+                sessionManager.registerGroup("tearout-smoke")
                 try await Task.sleep(nanoseconds: 100_000_000)
                 NSLog("QuickShow: TEST_TEAROUT step=reattach orphaned=\(session.orphaned)")
 
@@ -898,7 +898,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     laborum.
                     """
                 )
-                if let session = sessionManager.sessions["prefs-smoke"],
+                if let session = sessionManager.groups["prefs-smoke"],
                    let hud = session.huds.first?.window {
                     NSLog("QuickShow: TEST_PREFS opacity alphaValue=\(hud.alphaValue)")
                     NSLog("QuickShow: TEST_PREFS sizeCap frame=\(hud.frame.size.width)x\(hud.frame.size.height)")
@@ -921,7 +921,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 // Exercise the copy bridge: pull the renderer for the
                 // panel and invoke its bridge with a {copy: ...} payload.
-                if let session = sessionManager.sessions["prefs-smoke"],
+                if let session = sessionManager.groups["prefs-smoke"],
                    let panel = session.huds.first?.panels.first,
                    let webRenderer = panel.renderer as? WebViewPanelRenderer {
                     // The bridge handler is private; route through the

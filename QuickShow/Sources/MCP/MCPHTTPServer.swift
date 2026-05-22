@@ -190,12 +190,18 @@ final class MCPHTTPServer {
 
     // MARK: - /markup-events handler (off-MCP NDJSON stream)
 
-    /// Validates the request, subscribes to the per-session markup
+    /// Validates the request, subscribes to the per-group markup
     /// event channel, writes 200 + NDJSON content-type headers, then
     /// pumps each yielded event line onto the FD. Heartbeat every 10s
     /// (a `{"type":"heartbeat",…}` line) so writes to a dead peer
     /// fail and the loop exits, which removes the subscriber and
     /// flips `hasSubscriber` back to false.
+    ///
+    /// The `Mcp-Session-Id` header value carries the group identifier
+    /// the Monitor wants to subscribe to (the value gets emitted by
+    /// `enable_markup_events` substituted with the resolved group).
+    /// Cosmetic rename of the header itself to `X-QuickShow-Group` is
+    /// deferred to keep the wire stable across the 2.2 series.
     private nonisolated static func serveMarkupEvents(
         req: HTTPRequest,
         fd: Int32,
@@ -209,7 +215,7 @@ final class MCPHTTPServer {
             )
             return
         }
-        guard let sid = req.header(HTTPHeaderName.sessionID), !sid.isEmpty else {
+        guard let group = req.header(HTTPHeaderName.sessionID), !group.isEmpty else {
             MCPHTTPParser.writeResponse(
                 .error(statusCode: 400, .invalidRequest("Missing \(HTTPHeaderName.sessionID) header")),
                 to: fd
@@ -224,7 +230,7 @@ final class MCPHTTPServer {
             + "Content-Type: application/x-ndjson\r\n"
             + "Cache-Control: no-cache, no-transform\r\n"
             + "Connection: keep-alive\r\n"
-            + "\(HTTPHeaderName.sessionID): \(sid)\r\n"
+            + "\(HTTPHeaderName.sessionID): \(group)\r\n"
             + "\r\n"
         )
         if !MCPHTTPParser.writeAllBytes(Data(head.utf8), to: fd) { return }
@@ -234,10 +240,10 @@ final class MCPHTTPServer {
         // source consumer (no race, no group.cancelAll-killing-the-
         // iterator footgun). Each yielded Data is one NDJSON line
         // already terminated with \n.
-        let (subID, events) = await stream.addSubscriber(sessionID: sid)
+        let (subID, events) = await stream.addSubscriber(group: group)
         defer {
             Task { @MainActor in
-                await stream.removeSubscriber(id: subID, sessionID: sid)
+                await stream.removeSubscriber(id: subID, group: group)
             }
         }
         for await chunk in events {

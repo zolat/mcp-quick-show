@@ -247,7 +247,7 @@ final class ControlServer {
             parentPid: payload.parentPid
         )
         NSLog("QuickShow: hello from session=\(granted) client=\(payload.client ?? "?") ppid=\(payload.parentPid.map(String.init) ?? "?") (claim=\(payload.sessionId))")
-        srv.appDelegate?.sessionManager.registerSession(granted, parentPid: payload.parentPid)
+        srv.appDelegate?.sessionManager.registerGroup(granted, parentPid: payload.parentPid)
         return try ControlProtocol.encoder.encode(ControlOk(
             id: req.id,
             result: HelloResult(
