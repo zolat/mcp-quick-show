@@ -34,6 +34,14 @@ enum ShareID {
 /// Sidecar-readable metadata for an unclaimed share. Written next to
 /// the PNG so `claim_share` can find the originating HUD (in the
 /// user-windows session) and rehome it into a Claude session.
+/// Error surface for `SessionManager.claimShare`. Thrown when the
+/// share id is malformed, the share is missing/already-claimed, or
+/// the source HUD is gone. The MCP `get_share` handler unwraps
+/// `.invalidPayload(msg)` into the human-readable response text.
+enum ShareError: Error {
+    case invalidPayload(String)
+}
+
 struct ShareMetadata: Codable {
     /// The panel name inside the user-windows session that produced
     /// this share. Used to locate the HUDInstance + Panel pair at claim

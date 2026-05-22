@@ -5,7 +5,6 @@ import Cocoa
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var controlServer: ControlServer?
     private var mcpHTTPServer: MCPHTTPServer?
     private var statusItem: NSStatusItem?
     private(set) var sessionManager: SessionManager!
@@ -22,7 +21,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         userOpenActions = UserOpenActions()
         userOpenActions.sessionManager = sessionManager
         installMenuBarItem()
-        startControlServer()
         startMCPHTTPServer()
         if ProcessInfo.processInfo.environment["QUICKSHOW_AUTO_PANEL"] == "1" {
             runAutoPanelSmoke()
@@ -989,7 +987,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        controlServer?.stop()
         mcpHTTPServer?.stop()
     }
 
@@ -1098,28 +1095,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func startControlServer() {
-        // Allow tests / parallel instances to override the socket path.
-        let override = ProcessInfo.processInfo.environment["QUICKSHOW_SOCKET_PATH"]
-        let server = ControlServer(socketPath: override ?? ControlServer.defaultSocketPath)
-        server.appDelegate = self
-        do {
-            try server.start()
-            controlServer = server
-        } catch {
-            NSLog("QuickShow: control server failed to start: \(error)")
-        }
-    }
-
-    /// Phase-1 HTTP MCP server boot. Gated on QUICKSHOW_MCP_HTTP=1
-    /// so end users running the stdio sidecar aren't affected. Port
-    /// defaults to MCPHTTPServer.defaultPort; override via
-    /// QUICKSHOW_MCP_PORT for parallel test instances.
+    /// Embedded HTTP MCP server boot. Always-on as of 0.2.0 —
+    /// plugin/.mcp.json points at http://127.0.0.1:7890/mcp.
+    /// Set QUICKSHOW_MCP_HTTP=0 to opt out for headless integration
+    /// tests that don't touch the wire. Port defaults to
+    /// MCPHTTPServer.defaultPort; override via QUICKSHOW_MCP_PORT
+    /// for parallel test instances.
     private func startMCPHTTPServer() {
-        // Phase 2: the embedded HTTP MCP server is the canonical
-        // sidecar — plugin/.mcp.json points at http://127.0.0.1:7890/mcp.
-        // Always start it. Set QUICKSHOW_MCP_HTTP=0 to opt out for
-        // headless integration tests that don't touch the wire.
         if ProcessInfo.processInfo.environment["QUICKSHOW_MCP_HTTP"] == "0" { return }
         let env = ProcessInfo.processInfo.environment["QUICKSHOW_MCP_PORT"]
         let port = env.flatMap(UInt16.init) ?? MCPHTTPServer.defaultPort

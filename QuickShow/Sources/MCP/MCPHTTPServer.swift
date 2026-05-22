@@ -6,19 +6,11 @@ import MCP
 //
 // AF_INET listener on 127.0.0.1:<port> that accepts HTTP/1.1
 // connections from local Claude Code processes and routes them
-// through the SDK's `StatefulHTTPServerTransport`. Cloned from
-// `ControlServer.swift`'s AF_UNIX accept-loop pattern — same
-// DispatchSource shape, same per-connection detached task shape.
+// through the SDK's `StatefulHTTPServerTransport`. DispatchSource
+// accept loop with one detached task per connection.
 //
-// Gated on the `QUICKSHOW_MCP_HTTP` env var (off by default) so
-// the existing stdio sidecar remains the production path. Coexists
-// without interference: different transport, different port, no
-// shared state.
-//
-// This commit lands only the accept loop + HTTP/1.1 framing.
-// MCP routing (session router + SDK dispatch) lands in the next
-// commit; for now we log the parsed request line and return a
-// placeholder 200 to exercise the framing end-to-end.
+// Always-on as of 0.2.0. Opt-out via QUICKSHOW_MCP_HTTP=0 for
+// headless integration tests.
 
 @MainActor
 final class MCPHTTPServer {

@@ -648,9 +648,9 @@ enum MCPToolHandlers {
             if fm.fileExists(atPath: consumed.path) {
                 return errorResult("share \(id) was already consumed in this session")
             }
-            let reason = (error as? ControlError).map { ce -> String in
-                if case let .invalidPayload(msg) = ce { return msg }
-                return "\(ce)"
+            let reason = (error as? ShareError).map { se -> String in
+                if case let .invalidPayload(msg) = se { return msg }
+                return "\(se)"
             } ?? error.localizedDescription
             return errorResult("share \(id) not available: \(reason)")
         }

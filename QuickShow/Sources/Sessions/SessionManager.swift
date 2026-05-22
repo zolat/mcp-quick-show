@@ -185,11 +185,12 @@ final class SessionManager: NSObject {
         groups[sessionId] = state
     }
 
+    /// Test-only entry: trigger an orphan-grace timer directly on a
+    /// named group. The QUICKSHOW_TEST_TEAROUT smoke uses this to
+    /// exercise the orphaned-badge path without an MCP session round
+    /// trip. Production callers should go through
+    /// `mcpSessionDisconnected(mcpSessionId:)`.
     func sidecarDisconnected(sessionId: String) {
-        // Legacy entry: the stdio sidecar disconnected. Pre-Phase 2
-        // each sidecar mapped 1:1 to a group, so this just starts the
-        // orphan timer on the matching GroupState directly. Used by
-        // test smokes and ControlServer's TCP path (both gone in 2.5).
         startOrphanTimer(for: sessionId)
     }
 
@@ -781,25 +782,25 @@ final class SessionManager: NSObject {
     /// the same way a second claim of an already-consumed share does.
     func claimShare(shareID: String, targetGroup: String) throws -> ClaimedShare {
         guard ShareID.isValid(shareID) else {
-            throw ControlError.invalidPayload("share_id is malformed (expected \(ShareID.length) lowercase-hex chars)")
+            throw ShareError.invalidPayload("share_id is malformed (expected \(ShareID.length) lowercase-hex chars)")
         }
         let fm = FileManager.default
         let metaURL = MarkupPaths.shareMeta(id: shareID)
         let pngURL = MarkupPaths.sharePNG(id: shareID)
         guard fm.fileExists(atPath: metaURL.path) else {
-            throw ControlError.invalidPayload("share '\(shareID)' not found (already claimed or never existed)")
+            throw ShareError.invalidPayload("share '\(shareID)' not found (already claimed or never existed)")
         }
         let metaData: Data
         do {
             metaData = try Data(contentsOf: metaURL)
         } catch {
-            throw ControlError.invalidPayload("failed to read share metadata: \(error.localizedDescription)")
+            throw ShareError.invalidPayload("failed to read share metadata: \(error.localizedDescription)")
         }
         let meta: ShareMetadata
         do {
             meta = try JSONDecoder().decode(ShareMetadata.self, from: metaData)
         } catch {
-            throw ControlError.invalidPayload("share metadata malformed: \(error.localizedDescription)")
+            throw ShareError.invalidPayload("share metadata malformed: \(error.localizedDescription)")
         }
         // Walk all user-share groups for the source HUD. Each user
         // share is its own group keyed by `user-share-<random>`, so
@@ -820,7 +821,7 @@ final class SessionManager: NSObject {
               let sourceGroupState,
               let sourceHud,
               sourceHud.panels.contains(where: { $0.name == meta.sourcePanelName }) else {
-            throw ControlError.invalidPayload("source HUD for share '\(shareID)' is gone (user closed it before the claim landed)")
+            throw ShareError.invalidPayload("source HUD for share '\(shareID)' is gone (user closed it before the claim landed)")
         }
 
         // Atomic claim — move the metadata to .consumed/ before any
@@ -829,7 +830,7 @@ final class SessionManager: NSObject {
             try MarkupPaths.ensureShareDirs()
             try fm.moveItem(at: metaURL, to: MarkupPaths.consumedShareMeta(id: shareID))
         } catch {
-            throw ControlError.invalidPayload("share '\(shareID)' already claimed")
+            throw ShareError.invalidPayload("share '\(shareID)' already claimed")
         }
 
         // Migrate the HUDInstance: detach from the user-share group,
