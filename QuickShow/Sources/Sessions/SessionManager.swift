@@ -59,9 +59,17 @@ final class SessionManager: NSObject {
         /// rather than dumping the panel on whichever Space the user
         /// happens to be on.
         var lastResolvedSpaceID: UInt64?
-        /// Generic per-session flags driven by the `set_session_flag`
-        /// control verb. First consumer: `markup_events_armed`.
+        /// Generic per-group flags. First consumer: `markup_events_armed`.
         var flags: [String: SessionFlagValue] = [:]
+        /// The MCP session that most recently wrote into this group.
+        /// Used for orphan-grace: when that MCP session disconnects
+        /// (DELETE or idle-timeout sweep), groups whose lastWriter
+        /// matches trigger the existing orphan timer. Multiple MCP
+        /// sessions can write to the same group; only the last writer
+        /// is recorded, but the orphan signal is best-effort anyway —
+        /// the worst case is a stale badge that clears on the next
+        /// write.
+        var lastWriterMcpSession: String?
         /// Lazy NDJSON writer for markup events. Created on first
         /// emit; the file lives at `MarkupPaths.eventsLog(group)`.
         lazy var eventWriter: EventLogWriter = EventLogWriter(group: id)
@@ -178,19 +186,45 @@ final class SessionManager: NSObject {
     }
 
     func sidecarDisconnected(sessionId: String) {
-        guard let session = groups[sessionId] else { return }
-        guard !session.huds.isEmpty else { return }
-        session.orphanTimerTask?.cancel()
+        // Legacy entry: the stdio sidecar disconnected. Pre-Phase 2
+        // each sidecar mapped 1:1 to a group, so this just starts the
+        // orphan timer on the matching GroupState directly. Used by
+        // test smokes and ControlServer's TCP path (both gone in 2.5).
+        startOrphanTimer(for: sessionId)
+    }
+
+    /// Called by the HTTP router when an MCP session is removed —
+    /// either via an explicit DELETE or via the cleanup loop's
+    /// idle-timeout sweep. Walks groups for any whose
+    /// `lastWriterMcpSession` matches and starts the orphan-grace
+    /// timer on each. A subsequent write into the group (by a fresh
+    /// MCP session, possibly post-`claude --resume`) cancels the
+    /// timer via `ensureGroup`'s reattach path.
+    func mcpSessionDisconnected(mcpSessionId: String) {
+        for (groupKey, state) in groups where state.lastWriterMcpSession == mcpSessionId {
+            NSLog("QuickShow: MCP session \(mcpSessionId) dropped — starting orphan grace for group \(groupKey)")
+            startOrphanTimer(for: groupKey)
+        }
+    }
+
+    /// Common orphan-grace timer body. Cancels any prior timer for
+    /// the group, schedules a new one to flip the badge after the
+    /// grace window. `ensureGroup` clears both the timer and the
+    /// flag when a fresh write lands.
+    private func startOrphanTimer(for groupKey: String) {
+        guard let state = groups[groupKey] else { return }
+        guard !state.huds.isEmpty else { return }
+        state.orphanTimerTask?.cancel()
         let grace = Self.reconnectGraceSeconds
-        session.orphanTimerTask = Task { [weak self, weak session] in
+        state.orphanTimerTask = Task { [weak self, weak state] in
             try? await Task.sleep(nanoseconds: UInt64(grace * 1_000_000_000))
             if Task.isCancelled { return }
             await MainActor.run {
-                guard let self = self, let session = session,
-                      self.groups[session.id] === session else { return }
-                session.orphaned = true
-                for hud in session.huds { hud.window.setSessionEnded(true) }
-                NSLog("QuickShow: session \(session.id) orphan grace expired — badge on \(session.huds.count) HUD(s)")
+                guard let self = self, let state = state,
+                      self.groups[state.id] === state else { return }
+                state.orphaned = true
+                for hud in state.huds { hud.window.setSessionEnded(true) }
+                NSLog("QuickShow: group \(state.id) orphan grace expired — badge on \(state.huds.count) HUD(s)")
             }
         }
     }
@@ -259,6 +293,12 @@ final class SessionManager: NSObject {
         // session storage that existed before the group flip.
         let groupKey = group ?? sessionId
         let session = ensureGroup(groupKey)
+        // Record this MCP session as the lastWriter — used by
+        // orphan-grace when the router signals the MCP session has
+        // dropped (DELETE or idle-timeout). Multiple MCP sessions
+        // writing to the same group rotate this; the live one always
+        // wins.
+        session.lastWriterMcpSession = sessionId
 
         // Locate the panel across all HUDs first (in-place update path).
         if let (hud, panel) = locate(in: session, name: name) {

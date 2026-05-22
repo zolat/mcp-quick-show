@@ -1145,6 +1145,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     markupEvents: markupEvents,
                     endpointPort: port
                 )
+            },
+            onSessionRemoved: { @MainActor @Sendable mcpSessionID in
+                sm.mcpSessionDisconnected(mcpSessionId: mcpSessionID)
             }
         )
         routerHolder = router
