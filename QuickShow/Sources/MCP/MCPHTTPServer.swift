@@ -26,6 +26,7 @@ final class MCPHTTPServer {
 
     private let port: UInt16
     private let router: MCPSessionRouter
+    private let markupEvents: MarkupEventsStream
     private let queue = DispatchQueue(
         label: "com.zolat.QuickShow.mcphttp",
         qos: .userInitiated
@@ -34,9 +35,14 @@ final class MCPHTTPServer {
     private var listenSource: DispatchSourceRead?
     private(set) var actualPort: UInt16 = 0
 
-    init(port: UInt16 = MCPHTTPServer.defaultPort, router: MCPSessionRouter) {
+    init(
+        port: UInt16 = MCPHTTPServer.defaultPort,
+        router: MCPSessionRouter,
+        markupEvents: MarkupEventsStream
+    ) {
         self.port = port
         self.router = router
+        self.markupEvents = markupEvents
     }
 
     func start() throws {
@@ -81,9 +87,10 @@ final class MCPHTTPServer {
 
         listenFD = fd
         let routerRef = router
+        let markupRef = markupEvents
         let src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         src.setEventHandler {
-            MCPHTTPServer.acceptOne(listenFD: fd, router: routerRef)
+            MCPHTTPServer.acceptOne(listenFD: fd, router: routerRef, markupEvents: markupRef)
         }
         src.resume()
         listenSource = src
@@ -103,7 +110,11 @@ final class MCPHTTPServer {
 
     // MARK: - Connection handling (off the main actor)
 
-    private nonisolated static func acceptOne(listenFD: Int32, router: MCPSessionRouter) {
+    private nonisolated static func acceptOne(
+        listenFD: Int32,
+        router: MCPSessionRouter,
+        markupEvents: MarkupEventsStream
+    ) {
         let connFD = Darwin.accept(listenFD, nil, nil)
         guard connFD >= 0 else { return }
         // SO_NOSIGPIPE: writes to a closed socket return EPIPE (which we
@@ -117,14 +128,20 @@ final class MCPHTTPServer {
         // socket is still alive on both ends — accept→getpeername→walk.
         let claudePid = PeerPidResolver.resolve(fd: connFD, tag: "mcp-http-accept")
         Task.detached {
-            await MCPHTTPServer.serveConnection(fd: connFD, claudePid: claudePid, router: router)
+            await MCPHTTPServer.serveConnection(
+                fd: connFD,
+                claudePid: claudePid,
+                router: router,
+                markupEvents: markupEvents
+            )
         }
     }
 
     private nonisolated static func serveConnection(
         fd: Int32,
         claudePid: pid_t?,
-        router: MCPSessionRouter
+        router: MCPSessionRouter,
+        markupEvents: MarkupEventsStream
     ) async {
         defer { Darwin.close(fd) }
         do {
@@ -132,34 +149,31 @@ final class MCPHTTPServer {
             let bodyLen = req.body?.count ?? 0
             NSLog("QuickShow: mcp http \(req.method) \(req.path ?? "?") claude_pid=\(claudePid.map(String.init) ?? "nil") body_bytes=\(bodyLen) sess=\(req.header(HTTPHeaderName.sessionID) ?? "-")")
 
+            // Branch: /markup-events lives outside the SDK's /mcp
+            // routing because the SDK enforces a single standalone-SSE
+            // GET per session (claimed by Claude Code's MCP client at
+            // initialize). Our custom NDJSON endpoint sidesteps that
+            // constraint so harness-Monitor consumers actually have a
+            // channel to attach to.
+            if req.path == "/markup-events" {
+                await Self.serveMarkupEvents(req: req, fd: fd, stream: markupEvents)
+                return
+            }
+
             let response = await router.handle(req, claudePid: claudePid)
 
             switch response {
             case .stream(let stream, let extraHeaders):
-                // Server-Sent-Events stream — SDK already framed each
-                // event; we just pump bytes onto the wire until the
-                // stream ends or the client drops.
+                // SDK-managed SSE stream (initialize response or
+                // standalone GET claimed by Claude's MCP client). We
+                // pump bytes onto the wire until the stream ends or
+                // the client drops.
                 var headers = extraHeaders
-                // Surface the Mcp-Session-Id on SSE responses too —
-                // the SDK only sets it on initialize today.
                 let sid = req.header(HTTPHeaderName.sessionID)
                 if let sid, headers[HTTPHeaderName.sessionID] == nil {
                     headers[HTTPHeaderName.sessionID] = sid
                 }
-                // Bracket the long-lived standalone GET SSE stream
-                // with router liveness hooks so `hasOpenSSEStream`
-                // reflects reality. POST-initiated SSE streams (per-
-                // request response streams) are typically short-lived
-                // and don't carry the standalone-listener semantics
-                // we care about, so we restrict the bracket to GETs.
-                let isStandaloneSSE = req.method.uppercased() == "GET"
-                if isStandaloneSSE, let sid {
-                    await router.markSSEOpen(sessionID: sid)
-                }
                 await MCPHTTPParser.writeStream(stream, extraHeaders: headers, to: fd)
-                if isStandaloneSSE, let sid {
-                    await router.markSSEClosed(sessionID: sid)
-                }
             default:
                 MCPHTTPParser.writeResponse(response, to: fd)
             }
@@ -171,6 +185,63 @@ final class MCPHTTPServer {
                 .error(statusCode: 400, .invalidRequest("malformed HTTP/1.1 request")),
                 to: fd
             )
+        }
+    }
+
+    // MARK: - /markup-events handler (off-MCP NDJSON stream)
+
+    /// Validates the request, subscribes to the per-session markup
+    /// event channel, writes 200 + NDJSON content-type headers, then
+    /// pumps each yielded event line onto the FD. Heartbeat every 10s
+    /// (a `{"type":"heartbeat",…}` line) so writes to a dead peer
+    /// fail and the loop exits, which removes the subscriber and
+    /// flips `hasSubscriber` back to false.
+    private nonisolated static func serveMarkupEvents(
+        req: HTTPRequest,
+        fd: Int32,
+        stream: MarkupEventsStream
+    ) async {
+        // GET only — anything else gets 405.
+        if req.method.uppercased() != "GET" {
+            MCPHTTPParser.writeResponse(
+                .error(statusCode: 405, .invalidRequest("Method Not Allowed"), extraHeaders: ["Allow": "GET"]),
+                to: fd
+            )
+            return
+        }
+        guard let sid = req.header(HTTPHeaderName.sessionID), !sid.isEmpty else {
+            MCPHTTPParser.writeResponse(
+                .error(statusCode: 400, .invalidRequest("Missing \(HTTPHeaderName.sessionID) header")),
+                to: fd
+            )
+            return
+        }
+
+        // Write response headers BEFORE subscribing so the client
+        // sees a successful status even if no events ever fire.
+        let head = (
+            "HTTP/1.1 200 OK\r\n"
+            + "Content-Type: application/x-ndjson\r\n"
+            + "Cache-Control: no-cache, no-transform\r\n"
+            + "Connection: keep-alive\r\n"
+            + "\(HTTPHeaderName.sessionID): \(sid)\r\n"
+            + "\r\n"
+        )
+        if !MCPHTTPParser.writeAllBytes(Data(head.utf8), to: fd) { return }
+
+        // Subscribe — heartbeats are yielded into the same stream by
+        // the per-subscriber timer task, so this loop is a single-
+        // source consumer (no race, no group.cancelAll-killing-the-
+        // iterator footgun). Each yielded Data is one NDJSON line
+        // already terminated with \n.
+        let (subID, events) = await stream.addSubscriber(sessionID: sid)
+        defer {
+            Task { @MainActor in
+                await stream.removeSubscriber(id: subID, sessionID: sid)
+            }
+        }
+        for await chunk in events {
+            if !MCPHTTPParser.writeAllBytes(chunk, to: fd) { return }
         }
     }
 

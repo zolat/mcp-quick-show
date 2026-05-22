@@ -42,7 +42,9 @@ enum MCPToolHandlers {
         on server: Server,
         mcpSessionID: String,
         sessionManager: SessionManager,
-        router: MCPSessionRouter
+        router: MCPSessionRouter,
+        markupEvents: MarkupEventsStream,
+        endpointPort: UInt16
     ) async {
         let showHTML = showHTMLTool()
         let enableMarkup = enableMarkupEventsTool()
@@ -55,18 +57,25 @@ enum MCPToolHandlers {
 
         // CallTool handler — runs off the main actor by default,
         // hops back via `await` when calling @MainActor methods on
-        // sessionManager / router. mcpSessionID is captured by
-        // value; sessionManager + router are class references.
+        // sessionManager / router / markupEvents. mcpSessionID and
+        // endpointPort are captured by value.
         let sm = sessionManager
         let rt = router
+        let me = markupEvents
         let sid = mcpSessionID
+        let port = endpointPort
         await server.withMethodHandler(CallTool.self) { params in
             let args = params.arguments ?? [:]
             switch params.name {
             case showHTML.name:
                 return await Self.handleShowHTML(args: args, sm: sm, rt: rt, sid: sid)
             case enableMarkup.name:
-                return await Self.handleEnableMarkupEvents(sm: sm, rt: rt, sid: sid)
+                return await Self.handleEnableMarkupEvents(
+                    sm: sm,
+                    markupEvents: me,
+                    sid: sid,
+                    port: port
+                )
             case getMarkup.name:
                 return await Self.handleGetMarkup(args: args, sid: sid)
             default:
@@ -140,8 +149,9 @@ enum MCPToolHandlers {
 
     private static func handleEnableMarkupEvents(
         sm: SessionManager,
-        rt: MCPSessionRouter,
-        sid: String
+        markupEvents: MarkupEventsStream,
+        sid: String,
+        port: UInt16
     ) async -> CallTool.Result {
         let logPath: URL
         do {
@@ -155,42 +165,38 @@ enum MCPToolHandlers {
                 isError: true
             )
         }
-        let listenerOpen = await rt.hasOpenSSEStream(sessionID: sid)
+        let listenerConnected = await markupEvents.hasSubscriber(sessionID: sid)
         await MainActor.run {
             sm.setFlag(sessionId: sid, key: "markup_events_armed", value: .bool(true))
-            // Idempotent — the existing flag-changed Notification fires
-            // whether or not the value actually changed; HUDs that
-            // already booted observe the change via that channel.
+            // Idempotent — the flag-changed Notification fires whether
+            // or not the value actually changed; live HUDs observe via
+            // that channel.
         }
+        let monitorCommand = "curl -sN -H \"Mcp-Session-Id: \(sid)\" http://127.0.0.1:\(port)/markup-events | grep --line-buffered -v '\"type\":\"heartbeat\"'"
+
         var lines: [String] = []
-        if !listenerOpen {
+        if !listenerConnected {
             lines += [
-                "⚠️  No live SSE listener for this session.",
+                "⚠️  No live markup-events consumer connected for this session.",
                 "",
-                "Markup events will still be appended to the file log, but no MCP notifications/message will reach you until a Monitor (or the SDK's standalone GET /mcp stream) is open. Start the Monitor BEFORE the user begins drawing.",
+                "Markup events will be appended to the on-disk log (forensic), but no live notification will reach you until the Monitor below is running. Start the Monitor BEFORE the user begins drawing.",
                 "",
             ]
         }
         lines += [
             "Markup events armed for this session.",
             "",
-            "Two consumer options — pick one:",
+            "Recommended Monitor (off-MCP NDJSON stream — sidesteps the SDK's single-SSE-per-session limit, and the app knows you're listening):",
             "",
-            "(a) File channel (works always, survives `--resume`):",
-            "",
-            "  command: `tail -n 0 -F \(logPath.path)`",
+            "  command: `\(monitorCommand)`",
             "  persistent: true",
-            "  description: \"QuickShow markup events (file)\"",
+            "  description: \"QuickShow markup events\"",
             "",
-            "(b) MCP-native SSE channel (live, app knows you're listening, warns you if disconnected):",
-            "",
-            "  command: `curl -sN -H \"Mcp-Session-Id: \(sid)\" -H \"Accept: text/event-stream\" -H \"MCP-Protocol-Version: 2025-11-25\" http://127.0.0.1:7891/mcp | awk '/^data: /{ sub(/^data: /,\"\"); print; fflush() }' | grep --line-buffered '\"logger\":\"quickshow.markup\"'`",
-            "  persistent: true",
-            "  description: \"QuickShow markup events (SSE)\"",
-            "",
-            "Each notification is one JSON line carrying:",
+            "Each notification is one JSON line:",
             "  - `{\"type\":\"markup_sent\",\"panel\":\"<name>\",\"artifact\":\"<id>\",...}` → call `get_markup(artifact_id: \"<id>\")` to fetch the PNG.",
             "  - `{\"type\":\"markup_dismissed\",\"panel\":\"<name>\",...}` → user closed the panel without sending.",
+            "",
+            "Forensic log (also written, useful for `claude --resume` or post-hoc inspection): \(logPath.path)",
             "",
             "This call is idempotent — calling again returns the same instructions and leaves the flag armed.",
         ]

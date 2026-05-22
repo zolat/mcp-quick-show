@@ -1120,6 +1120,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let env = ProcessInfo.processInfo.environment["QUICKSHOW_MCP_PORT"]
         let port = env.flatMap(UInt16.init) ?? MCPHTTPServer.defaultPort
 
+        // MarkupEventsStream owns the off-MCP /markup-events NDJSON
+        // channel — outside the SDK's /mcp routing so it can coexist
+        // with Claude Code's MCP client (which claims the SDK's single
+        // standalone-SSE slot).
+        let markupEvents = MarkupEventsStream()
+
         // Two-phase wiring: build the router first with a registrar
         // closure that captures the (about-to-exist) router by `var`,
         // then assign the router into the closure's captured slot.
@@ -1135,13 +1141,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     on: server,
                     mcpSessionID: mcpSessionID,
                     sessionManager: sm,
-                    router: r
+                    router: r,
+                    markupEvents: markupEvents,
+                    endpointPort: port
                 )
             }
         )
         routerHolder = router
 
-        let server = MCPHTTPServer(port: port, router: router)
+        let server = MCPHTTPServer(port: port, router: router, markupEvents: markupEvents)
         do {
             try server.start()
             mcpHTTPServer = server

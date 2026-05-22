@@ -169,21 +169,18 @@ enum MCPHTTPParser {
     /// Write SSE response headers (200 + text/event-stream + per-stream
     /// extras) then pump events from the SDK's AsyncThrowingStream
     /// onto the wire as `data: <json>\n\n` frames. Returns when the
-    /// stream ends or the client closes the connection.
+    /// stream ends, the client closes, or a write fails.
     ///
-    /// Liveness: a `:heartbeat\n\n` SSE comment is written every
-    /// `heartbeatSeconds` seconds. Heartbeats are mandatory for the
-    /// app's "is anyone listening?" signal (`MCPSessionRouter.
-    /// hasOpenSSEStream`) — the kernel's TCP send buffer absorbs
-    /// 1–2 writes to a peer-closed connection without failing, so
-    /// without a recurring write attempt a dead client looks alive
-    /// until a real event tries to land. Comment lines are no-ops
-    /// per the SSE spec (clients ignore lines starting with `:`).
+    /// No application-level heartbeat here: the previous experiment
+    /// destabilized Claude Code's MCP client (reconnect-every-10s
+    /// cycle that lined up with the heartbeat interval), and since
+    /// Phase 1.6.1 the markup channel lives on the off-MCP
+    /// /markup-events endpoint — this pump no longer needs to surface
+    /// dead-peer signals to any business logic.
     static func writeStream(
         _ stream: AsyncThrowingStream<Data, Swift.Error>,
         extraHeaders: [String: String],
-        to fd: Int32,
-        heartbeatSeconds: UInt64 = 10
+        to fd: Int32
     ) async {
         var head = "HTTP/1.1 200 OK\r\n"
         var headers = extraHeaders
@@ -202,50 +199,25 @@ enum MCPHTTPParser {
         head.append("\r\n")
         writeAll(head.data(using: .utf8) ?? Data(), to: fd)
 
-        let heartbeat = Data(": heartbeat\n\n".utf8)
-
-        // Tee the SDK's AsyncThrowingStream into a Sendable AsyncStream
-        // we can race against a heartbeat tick.
-        enum Item: Sendable { case chunk(Data); case end; case error(any Error) }
-        let (events, cont) = AsyncStream<Item>.makeStream()
-        let pumpTask = Task {
-            do {
-                for try await chunk in stream {
-                    cont.yield(.chunk(chunk))
-                }
-                cont.yield(.end)
-            } catch {
-                cont.yield(.error(error))
+        // The SDK ships each event already SSE-formatted (`id: <n>\n
+        // event: message\ndata: <json>\n\n`), so we just relay bytes.
+        do {
+            for try await chunk in stream {
+                if !writeAll(chunk, to: fd) { return }
             }
-            cont.finish()
+        } catch {
+            NSLog("QuickShow: MCPHTTPParser stream error: \(error)")
         }
-        defer { pumpTask.cancel() }
+    }
 
-        // Loop: take whichever fires first — next event from the SDK,
-        // or the heartbeat tick. A failed write returns; a stream end
-        // returns; a stream error logs + returns.
-        var iter = events.makeAsyncIterator()
-        while true {
-            let next: Item = await withTaskGroup(of: Item?.self) { group in
-                group.addTask { await iter.next() }
-                group.addTask {
-                    try? await Task.sleep(nanoseconds: heartbeatSeconds * 1_000_000_000)
-                    return .chunk(heartbeat)
-                }
-                let first = await group.next() ?? Optional<Item>.none
-                group.cancelAll()
-                return first ?? .end
-            }
-            switch next {
-            case .chunk(let data):
-                if !writeAll(data, to: fd) { return }
-            case .end:
-                return
-            case .error(let err):
-                NSLog("QuickShow: MCPHTTPParser stream error: \(err)")
-                return
-            }
-        }
+    /// Write all bytes of `data` to `fd`. Returns false if any write
+    /// returns ≤ 0 (peer closed, EPIPE — SO_NOSIGPIPE means we get
+    /// the errno without a process-level signal). Public so the
+    /// off-MCP /markup-events handler can reuse the same blocking-
+    /// write helper.
+    @discardableResult
+    static func writeAllBytes(_ data: Data, to fd: Int32) -> Bool {
+        return writeAll(data, to: fd)
     }
 
     @discardableResult
