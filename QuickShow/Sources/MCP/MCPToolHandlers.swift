@@ -2,42 +2,28 @@ import Cocoa
 import Foundation
 import MCP
 
-// MCPToolHandlers — Phase 1.5 tool registration. Exposes three tools
-// that together cover the QuickShow render+markup feedback loop:
+// MCPToolHandlers — Phase 2 tool registration.
 //
-//   - `show_html`           — render HTML into a HUD panel (mirror of
-//                             sidecar/src/handlers/html.ts)
-//   - `enable_markup_events` — arm the per-session markup push channel
-//                              + return the `Monitor` tail incantation
-//                              (mirror of sidecar/src/handlers/enableMarkupEvents.ts)
-//   - `get_markup`          — read a marked-up artifact PNG by id and
-//                             return it as an MCP image content block
-//                             (mirror of sidecar/src/handlers/getMarkup.ts)
-//
-// Reuses `SessionManager`, `MarkupPaths`, and the renderer/HUD pipeline
-// directly — no wire protocol, no NDJSON, no socket. The MCP session id
-// (assigned by the SDK) maps 1:1 to the existing `sessionId` argument;
-// the libproc-resolved Claude PID (stashed by the router) flows in via
-// `registerSession(_:parentPid:)` so `.claudeSpace` placement reuses
-// unchanged from "have a PID" onward.
+// Mirrors `sidecar/src/handlers/*.ts` 1:1. Reuses `SessionManager`,
+// `MarkupPaths`, and the renderer/HUD pipeline directly. The MCP
+// session id (assigned by the SDK) maps to the existing `sessionId`
+// argument; the libproc-resolved Claude PID flows in via the router
+// stash and `registerSession(_:parentPid:)` so `.claudeSpace`
+// placement reuses unchanged from "have a PID" onward.
 
 @MainActor
 enum MCPToolHandlers {
 
-    // Schema caps — kept in lockstep with sidecar/_groupingFields.ts
-    // and sidecar/html.ts. Byte caps are UTF-8 bytes via
-    // `Data(_.utf8).count` so multibyte content respects the cap.
-    static let groupMaxBytes = 256
-    static let descriptionMaxBytes = 256
-    static let hudDescriptionMaxBytes = 4 * 1024
-    static let inlineMaxBytes = 10 * 1024 * 1024
-    static let widthMin: Double = 100
-    static let widthMax: Double = 4096
+    // Size caps (mirroring sidecar handlers exactly).
+    static let inlineHTMLMaxBytes = 10 * 1024 * 1024  // html.ts
+    static let inlineMarkdownMaxBytes = 10 * 1024 * 1024  // markdown.ts inline
+    static let pathMarkdownMaxBytes = 50 * 1024 * 1024  // markdown.ts path
+    static let inlineSVGMaxBytes = 50 * 1024 * 1024  // svg.ts
+    static let inlineMermaidMaxBytes = 1 * 1024 * 1024  // mermaid.ts
+    static let pathImageMaxBytes = 1024 * 1024 * 1024  // image.ts (1 GB)
 
     /// Register tools/list + tools/call on the per-session Server,
-    /// capturing the (sessionManager, router, mcpSessionId) trio.
-    /// The router is needed to look up the libproc-resolved claudePid
-    /// at call time (lookup, not capture, so it stays current).
+    /// capturing the (sessionManager, router, mcpSessionId, port) tuple.
     static func register(
         on server: Server,
         mcpSessionID: String,
@@ -46,19 +32,19 @@ enum MCPToolHandlers {
         markupEvents: MarkupEventsStream,
         endpointPort: UInt16
     ) async {
-        let showHTML = showHTMLTool()
-        let enableMarkup = enableMarkupEventsTool()
-        let getMarkup = getMarkupTool()
-        let tools: [Tool] = [showHTML, enableMarkup, getMarkup]
+        let tools: [Tool] = [
+            showHTMLTool(),
+            showMarkdownTool(),
+            showSVGTool(),
+            showMermaidTool(),
+            enableMarkupEventsTool(),
+            getMarkupTool(),
+        ]
 
         await server.withMethodHandler(ListTools.self) { _ in
             ListTools.Result(tools: tools)
         }
 
-        // CallTool handler — runs off the main actor by default,
-        // hops back via `await` when calling @MainActor methods on
-        // sessionManager / router / markupEvents. mcpSessionID and
-        // endpointPort are captured by value.
         let sm = sessionManager
         let rt = router
         let me = markupEvents
@@ -67,16 +53,17 @@ enum MCPToolHandlers {
         await server.withMethodHandler(CallTool.self) { params in
             let args = params.arguments ?? [:]
             switch params.name {
-            case showHTML.name:
+            case "show_html":
                 return await Self.handleShowHTML(args: args, sm: sm, rt: rt, sid: sid)
-            case enableMarkup.name:
-                return await Self.handleEnableMarkupEvents(
-                    sm: sm,
-                    markupEvents: me,
-                    sid: sid,
-                    port: port
-                )
-            case getMarkup.name:
+            case "show_markdown":
+                return await Self.handleShowMarkdown(args: args, sm: sm, rt: rt, sid: sid)
+            case "show_svg":
+                return await Self.handleShowSVG(args: args, sm: sm, rt: rt, sid: sid)
+            case "show_mermaid":
+                return await Self.handleShowMermaid(args: args, sm: sm, rt: rt, sid: sid)
+            case "enable_markup_events":
+                return await Self.handleEnableMarkupEvents(sm: sm, markupEvents: me, sid: sid, port: port)
+            case "get_markup":
                 return await Self.handleGetMarkup(args: args, sid: sid)
             default:
                 return CallTool.Result(
@@ -87,7 +74,75 @@ enum MCPToolHandlers {
         }
     }
 
-    // MARK: - show_html dispatch
+    // MARK: - Generic upsert dispatch
+
+    /// Validated payload for any of the content-bearing show_* tools.
+    /// `body` is the resolved string (inline content; for path-form
+    /// markdown the file contents; for image the absolute path; for
+    /// url the URL string).
+    struct UpsertPayload: Sendable {
+        let name: String
+        let contentType: String  // matches RendererRegistry.typeKey
+        let form: String         // "inline" / "path" / "url"
+        let body: String
+        let width: Int?
+        let returnScreenshot: Bool
+        let grouping: GroupingFields
+    }
+
+    private static func dispatch(
+        sm: SessionManager,
+        rt: MCPSessionRouter,
+        sid: String,
+        payload: UpsertPayload
+    ) async throws -> (RenderResult, Data) {
+        let claudePid = await rt.claudePidFor(sessionID: sid)
+        sm.registerSession(sid, parentPid: claudePid)
+        return try await sm.upsert(
+            sessionId: sid,
+            name: payload.name,
+            contentType: payload.contentType,
+            form: payload.form,
+            body: payload.body,
+            width: payload.width.map { Double($0) },
+            group: payload.grouping.group,
+            description: payload.grouping.description,
+            hudDescription: payload.grouping.hudDescription
+        )
+    }
+
+    private static func renderResultContent(
+        payload: UpsertPayload,
+        result: RenderResult,
+        snapshot: Data,
+        snapshotMime: String = "image/png"
+    ) -> [Tool.Content] {
+        var content: [Tool.Content] = [
+            .text(
+                text: "Rendered '\(payload.name)' (\(payload.contentType)) — \(result.width)×\(result.height).",
+                annotations: nil,
+                _meta: nil
+            )
+        ]
+        if payload.returnScreenshot {
+            content.append(.image(
+                data: snapshot.base64EncodedString(),
+                mimeType: snapshotMime,
+                annotations: nil,
+                _meta: nil
+            ))
+        }
+        return content
+    }
+
+    private static func errorResult(_ message: String) -> CallTool.Result {
+        CallTool.Result(
+            content: [.text(text: message, annotations: nil, _meta: nil)],
+            isError: true
+        )
+    }
+
+    // MARK: - show_html
 
     private static func handleShowHTML(
         args: [String: Value],
@@ -96,52 +151,168 @@ enum MCPToolHandlers {
         sid: String
     ) async -> CallTool.Result {
         do {
-            let normalized = try ShowHTMLArgs.validate(args)
-            let claudePid = await rt.claudePidFor(sessionID: sid)
-            let (result, snapshot) = try await Self.dispatch(
-                sm: sm,
-                sessionID: sid,
-                claudePid: claudePid,
-                args: normalized
-            )
-
-            var content: [Tool.Content] = [
-                .text(
-                    text: "Rendered '\(normalized.name)' (html) — \(result.width)×\(result.height).",
-                    annotations: nil,
-                    _meta: nil
-                )
-            ]
-            if normalized.returnScreenshot {
-                content.append(.image(
-                    data: snapshot.base64EncodedString(),
-                    mimeType: "image/png",
-                    annotations: nil,
-                    _meta: nil
-                ))
+            let name = try ToolValidation.parseName(args)
+            guard let cv = args["content"], let content = cv.stringValue, !content.isEmpty else {
+                throw ToolValidation.Error(message: "`content` must be a non-empty HTML string")
             }
-            // P3: 5s after a successful show_html, push a
-            // notifications/message to the session's SSE stream.
-            // Tests whether Claude Code surfaces server-initiated
-            // notifications. Detached so it doesn't block the
-            // tool response; captures `sid`, `rt`, panel name
-            // by value.
-            let panelName = normalized.name
-            Task.detached {
-                try? await Task.sleep(for: .seconds(5))
-                await Self.firePushTest(router: rt, sessionID: sid, panelName: panelName)
+            let bytes = Data(content.utf8).count
+            if bytes > inlineHTMLMaxBytes {
+                throw ToolValidation.Error(message: "inline content too large: \(bytes) bytes > 10 MB cap")
             }
-            return CallTool.Result(content: content)
-        } catch let err as ShowHTMLArgs.ValidationError {
-            return CallTool.Result(
-                content: [.text(text: "invalid arguments: \(err.message)", annotations: nil, _meta: nil)],
-                isError: true
+            let payload = UpsertPayload(
+                name: name,
+                contentType: "html",
+                form: "inline",
+                body: content,
+                width: try ToolValidation.parseWidth(args),
+                returnScreenshot: ToolValidation.parseReturnScreenshot(args),
+                grouping: try ToolValidation.parseGroupingFields(args)
             )
+            let (result, snapshot) = try await dispatch(sm: sm, rt: rt, sid: sid, payload: payload)
+            return CallTool.Result(content: renderResultContent(payload: payload, result: result, snapshot: snapshot))
+        } catch let err as ToolValidation.Error {
+            return errorResult("invalid arguments: \(err.message)")
         } catch {
-            return CallTool.Result(
-                content: [.text(text: "render error: \(error.localizedDescription)", annotations: nil, _meta: nil)],
-                isError: true
+            return errorResult("render error: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - show_markdown
+
+    private static func handleShowMarkdown(
+        args: [String: Value],
+        sm: SessionManager,
+        rt: MCPSessionRouter,
+        sid: String
+    ) async -> CallTool.Result {
+        do {
+            let name = try ToolValidation.parseName(args)
+            let inline = args["content"]?.stringValue
+            let pathArg = args["path"]?.stringValue
+            let hasInline = (inline != nil)
+            let hasPath = (pathArg != nil)
+            if hasInline == hasPath {
+                throw ToolValidation.Error(message: "exactly one of `content` or `path` must be provided")
+            }
+            let body: String
+            if hasInline {
+                let content = inline!
+                let bytes = Data(content.utf8).count
+                if bytes > inlineMarkdownMaxBytes {
+                    throw ToolValidation.Error(message: "inline content too large: \(bytes) bytes > 10 MB cap")
+                }
+                body = content
+            } else {
+                let resolved: MCPPathResolver.Resolved
+                do {
+                    resolved = try MCPPathResolver.resolve(
+                        pathArg!,
+                        maxBytes: pathMarkdownMaxBytes,
+                        allowedMimes: ["text/plain"]
+                    )
+                } catch let err as MCPPathResolver.Error {
+                    throw ToolValidation.Error(message: err.message)
+                }
+                do {
+                    body = try String(contentsOfFile: resolved.absolutePath, encoding: .utf8)
+                } catch {
+                    throw ToolValidation.Error(message: "failed to read \(resolved.absolutePath): \(error.localizedDescription)")
+                }
+            }
+            let payload = UpsertPayload(
+                name: name,
+                contentType: "markdown",
+                form: "inline",
+                body: body,
+                width: nil,
+                returnScreenshot: ToolValidation.parseReturnScreenshot(args),
+                grouping: try ToolValidation.parseGroupingFields(args)
             )
+            let (result, snapshot) = try await dispatch(sm: sm, rt: rt, sid: sid, payload: payload)
+            return CallTool.Result(content: renderResultContent(payload: payload, result: result, snapshot: snapshot))
+        } catch let err as ToolValidation.Error {
+            return errorResult("invalid arguments: \(err.message)")
+        } catch {
+            return errorResult("render error: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - show_svg
+
+    private static func handleShowSVG(
+        args: [String: Value],
+        sm: SessionManager,
+        rt: MCPSessionRouter,
+        sid: String
+    ) async -> CallTool.Result {
+        do {
+            let name = try ToolValidation.parseName(args)
+            guard let cv = args["content"], let content = cv.stringValue,
+                  !content.trimmingCharacters(in: .whitespaces).isEmpty
+            else {
+                throw ToolValidation.Error(message: "`content` must be a non-empty SVG string")
+            }
+            let bytes = Data(content.utf8).count
+            if bytes > inlineSVGMaxBytes {
+                throw ToolValidation.Error(message: "SVG too large: \(bytes) bytes > 50 MB cap")
+            }
+            // Cheap pre-flight (matches sidecar). Actual <svg> presence
+            // is enforced by the template's DOMPurify pass.
+            if content.range(of: "<svg[\\s>]", options: [.regularExpression, .caseInsensitive]) == nil {
+                throw ToolValidation.Error(message: "content does not contain an <svg> element")
+            }
+            let payload = UpsertPayload(
+                name: name,
+                contentType: "svg",
+                form: "inline",
+                body: content,
+                width: nil,
+                returnScreenshot: ToolValidation.parseReturnScreenshot(args),
+                grouping: try ToolValidation.parseGroupingFields(args)
+            )
+            let (result, snapshot) = try await dispatch(sm: sm, rt: rt, sid: sid, payload: payload)
+            return CallTool.Result(content: renderResultContent(payload: payload, result: result, snapshot: snapshot))
+        } catch let err as ToolValidation.Error {
+            return errorResult("invalid arguments: \(err.message)")
+        } catch {
+            return errorResult("render error: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - show_mermaid
+
+    private static func handleShowMermaid(
+        args: [String: Value],
+        sm: SessionManager,
+        rt: MCPSessionRouter,
+        sid: String
+    ) async -> CallTool.Result {
+        do {
+            let name = try ToolValidation.parseName(args)
+            guard let dv = args["definition"], let definition = dv.stringValue,
+                  !definition.trimmingCharacters(in: .whitespaces).isEmpty
+            else {
+                throw ToolValidation.Error(message: "`definition` must be a non-empty string")
+            }
+            let bytes = Data(definition.utf8).count
+            if bytes > inlineMermaidMaxBytes {
+                throw ToolValidation.Error(message: "mermaid spec too large: \(bytes) bytes > 1 MB cap")
+            }
+            let payload = UpsertPayload(
+                name: name,
+                contentType: "mermaid",
+                form: "inline",
+                body: definition,
+                width: nil,
+                returnScreenshot: ToolValidation.parseReturnScreenshot(args),
+                grouping: try ToolValidation.parseGroupingFields(args)
+            )
+            let (result, snapshot) = try await dispatch(sm: sm, rt: rt, sid: sid, payload: payload)
+            return CallTool.Result(content: renderResultContent(payload: payload, result: result, snapshot: snapshot))
+        } catch let err as ToolValidation.Error {
+            return errorResult("invalid arguments: \(err.message)")
+        } catch {
+            return errorResult("render error: \(error.localizedDescription)")
         }
     }
 
@@ -157,20 +328,11 @@ enum MCPToolHandlers {
         do {
             logPath = try MarkupPaths.ensureDirs(sid)
         } catch {
-            return CallTool.Result(
-                content: [.text(
-                    text: "failed to prepare markup dirs: \(error.localizedDescription)",
-                    annotations: nil, _meta: nil
-                )],
-                isError: true
-            )
+            return errorResult("failed to prepare markup dirs: \(error.localizedDescription)")
         }
         let listenerConnected = await markupEvents.hasSubscriber(sessionID: sid)
         await MainActor.run {
             sm.setFlag(sessionId: sid, key: "markup_events_armed", value: .bool(true))
-            // Idempotent — the flag-changed Notification fires whether
-            // or not the value actually changed; live HUDs observe via
-            // that channel.
         }
         let monitorCommand = "curl -sN -H \"Mcp-Session-Id: \(sid)\" http://127.0.0.1:\(port)/markup-events | grep --line-buffered -v '\"type\":\"heartbeat\"'"
 
@@ -219,23 +381,11 @@ enum MCPToolHandlers {
         sid: String
     ) async -> CallTool.Result {
         guard let v = args["artifact_id"], let artifactID = v.stringValue else {
-            return CallTool.Result(
-                content: [.text(
-                    text: "invalid artifact_id (must be a UUID like '550e8400-e29b-41d4-a716-446655440000')",
-                    annotations: nil, _meta: nil
-                )],
-                isError: true
-            )
+            return errorResult("invalid artifact_id (must be a UUID like '550e8400-e29b-41d4-a716-446655440000')")
         }
         let range = NSRange(artifactID.startIndex..., in: artifactID)
         if artifactIDPattern.firstMatch(in: artifactID, options: [], range: range) == nil {
-            return CallTool.Result(
-                content: [.text(
-                    text: "invalid artifact_id (must be a UUID like '550e8400-e29b-41d4-a716-446655440000')",
-                    annotations: nil, _meta: nil
-                )],
-                isError: true
-            )
+            return errorResult("invalid artifact_id (must be a UUID like '550e8400-e29b-41d4-a716-446655440000')")
         }
 
         let live = MarkupPaths.artifact(sid, id: artifactID)
@@ -247,39 +397,18 @@ enum MCPToolHandlers {
         if fm.fileExists(atPath: live.path) {
             source = live
         } else if fm.fileExists(atPath: consumed.path) {
-            return CallTool.Result(
-                content: [.text(
-                    text: "artifact \(artifactID) was already consumed in this session",
-                    annotations: nil, _meta: nil
-                )],
-                isError: true
-            )
+            return errorResult("artifact \(artifactID) was already consumed in this session")
         } else {
-            return CallTool.Result(
-                content: [.text(
-                    text: "no artifact named '\(artifactID)' for this session",
-                    annotations: nil, _meta: nil
-                )],
-                isError: true
-            )
+            return errorResult("no artifact named '\(artifactID)' for this session")
         }
 
         let bytes: Data
         do {
             bytes = try Data(contentsOf: source)
         } catch {
-            return CallTool.Result(
-                content: [.text(
-                    text: "failed to read artifact: \(error.localizedDescription)",
-                    annotations: nil, _meta: nil
-                )],
-                isError: true
-            )
+            return errorResult("failed to read artifact: \(error.localizedDescription)")
         }
 
-        // Best-effort: move to .consumed/ so a second get_markup for the
-        // same id returns "already consumed". Failure here is non-fatal
-        // — we still hand the bytes back.
         do {
             try fm.createDirectory(at: consumedDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             try? fm.removeItem(at: consumed)
@@ -294,131 +423,37 @@ enum MCPToolHandlers {
         ])
     }
 
-    // MARK: - P3 push test
-
-    /// Send a `notifications/message` to the given session, ~5s
-    /// after `show_html`. The SDK's transport routes server-initiated
-    /// notifications onto the session's standalone GET SSE stream
-    /// (or its event-store backlog if no GET is open). NSLogs both
-    /// outcomes so the proof-point test rig can grep for them.
-    @Sendable
-    private static func firePushTest(
-        router: MCPSessionRouter,
-        sessionID: String,
-        panelName: String
-    ) async {
-        guard let server = await router.serverFor(sessionID: sessionID) else {
-            await MainActor.run {
-                NSLog("QuickShow: P3 push session_gone session=\(sessionID)")
-            }
-            return
-        }
-        let msg = Message<LogMessageNotification>(
-            method: LogMessageNotification.name,
-            params: LogMessageNotification.Parameters(
-                level: .info,
-                logger: "quickshow.poc",
-                data: .object([
-                    "event": .string("delayed_push_p3"),
-                    "panel": .string(panelName),
-                    "session": .string(sessionID),
-                    "ts_ms": .int(Int(Date().timeIntervalSince1970 * 1000)),
-                ])
-            )
-        )
-        do {
-            try await server.notify(msg)
-            await MainActor.run {
-                NSLog("QuickShow: P3 push SENT session=\(sessionID) panel=\(panelName)")
-            }
-        } catch {
-            await MainActor.run {
-                NSLog("QuickShow: P3 push FAILED session=\(sessionID) error=\(error)")
-            }
-        }
-    }
-
-    // MARK: - SessionManager dispatch
-
-    @MainActor
-    private static func dispatch(
-        sm: SessionManager,
-        sessionID: String,
-        claudePid: pid_t?,
-        args: ShowHTMLArgs
-    ) async throws -> (RenderResult, Data) {
-        // registerSession is idempotent; we call it before every
-        // upsert so a claudePid arriving after the session was
-        // created (theoretical — the router stashes it on create)
-        // still lands on SessionState.parentPid before the first
-        // .claudeSpace placement.
-        sm.registerSession(sessionID, parentPid: claudePid)
-        return try await sm.upsert(
-            sessionId: sessionID,
-            name: args.name,
-            contentType: "html",
-            form: "inline",
-            body: args.content,
-            width: args.width.map { Double($0) },
-            group: args.group,
-            description: args.description,
-            hudDescription: args.hudDescription
-        )
-    }
-
-    // MARK: - Tool definition
+    // MARK: - Tool definitions
 
     private static func showHTMLTool() -> Tool {
-        let inputSchema: Value = .object([
-            "type": .string("object"),
-            "required": .array([.string("name"), .string("content")]),
-            "properties": .object([
-                "name": .object([
-                    "type": .string("string"),
-                    "description": .string(
-                        "Stable, human-readable slot name (e.g. 'design', 'hero-v2'). Same name updates the existing panel; different name opens a new tab."
-                    ),
-                ]),
-                "content": .object([
-                    "type": .string("string"),
-                    "description": .string(
-                        "Complete, self-contained HTML document (up to 10 MB). Must be a full <html>...</html> with all CSS/JS/fonts/images inlined."
-                    ),
-                ]),
-                "width": .object([
-                    "type": .string("number"),
-                    "description": .string(
-                        "Optional canvas width in points (typically 320–2400). Sizes the WebView's CSS viewport before the page lays out, so responsive designs render at this width."
-                    ),
-                ]),
-                "return_screenshot": .object([
-                    "type": .string("boolean"),
-                    "description": .string(
-                        "If true (default), the tool response includes a PNG screenshot of the rendered panel."
-                    ),
-                    "default": .bool(true),
-                ]),
-                "group": .object([
-                    "type": .string("string"),
-                    "description": .string(
-                        "Optional grouping key. Panels sharing a `group` are rendered as tabs in the same floating HUD."
-                    ),
-                ]),
-                "description": .object([
-                    "type": .string("string"),
-                    "description": .string(
-                        "Optional short framing line for THIS tab, shown in the panel's description banner above the rendered content. Plain text, ≤256 bytes."
-                    ),
-                ]),
-                "hud_description": .object([
-                    "type": .string("string"),
-                    "description": .string(
-                        "Optional framing paragraph for the whole HUD, shown above the per-tab description. Plain text, ≤4 KB."
-                    ),
-                ]),
+        var properties: [String: Value] = [
+            "name": .object([
+                "type": .string("string"),
+                "description": .string(
+                    "Stable, human-readable slot name (e.g. 'design', 'hero-v2'). Same name updates the existing panel; different name opens a new tab."
+                ),
             ]),
-        ])
-
+            "content": .object([
+                "type": .string("string"),
+                "description": .string(
+                    "Complete, self-contained HTML document (up to 10 MB). Must be a full <html>...</html> with all CSS/JS/fonts/images inlined."
+                ),
+            ]),
+            "width": .object([
+                "type": .string("number"),
+                "description": .string(
+                    "Optional canvas width in points (typically 320–2400). Sizes the WebView's CSS viewport before the page lays out, so responsive designs render at this width."
+                ),
+            ]),
+            "return_screenshot": .object([
+                "type": .string("boolean"),
+                "description": .string(
+                    "If true (default), the tool response includes a PNG screenshot of the rendered panel."
+                ),
+                "default": .bool(true),
+            ]),
+        ]
+        for (k, v) in ToolValidation.groupingSchemaProps { properties[k] = v }
         return Tool(
             name: "show_html",
             description:
@@ -428,15 +463,130 @@ enum MCPToolHandlers {
                 + "the same `name` updates the existing panel in place; a different `name` opens a new "
                 + "tab. REQUIREMENTS: provide a full <html>...</html> document. Inline ALL styles and "
                 + "scripts. Do NOT reference external CDNs.",
-            inputSchema: inputSchema
+            inputSchema: .object([
+                "type": .string("object"),
+                "required": .array([.string("name"), .string("content")]),
+                "properties": .object(properties),
+            ])
+        )
+    }
+
+    private static func showMarkdownTool() -> Tool {
+        var properties: [String: Value] = [
+            "name": .object([
+                "type": .string("string"),
+                "description": .string(
+                    "Stable, human-readable slot name (e.g. 'arch', 'plan-v2'). Same name updates the existing panel; different name opens a new one."
+                ),
+            ]),
+            "content": .object([
+                "type": .string("string"),
+                "description": .string(
+                    "Inline markdown text (up to 10 MB). Mutually exclusive with `path`."
+                ),
+            ]),
+            "path": .object([
+                "type": .string("string"),
+                "description": .string(
+                    "Filesystem path to a markdown file (up to 50 MB). Supports ~ and relative paths. Mutually exclusive with `content`."
+                ),
+            ]),
+            "return_screenshot": .object([
+                "type": .string("boolean"),
+                "description": .string(
+                    "If true (default), the tool response includes a PNG screenshot of the rendered panel. Set to false to save tokens when you don't need to verify the output."
+                ),
+                "default": .bool(true),
+            ]),
+        ]
+        for (k, v) in ToolValidation.groupingSchemaProps { properties[k] = v }
+        return Tool(
+            name: "show_markdown",
+            description:
+                "Render a markdown string or file in a floating HUD panel on the user's screen, and "
+                + "return a PNG screenshot of the rendered output. Use this to surface long-form reports, "
+                + "summaries, or rendered docs visually instead of dumping text into the chat. Calling "
+                + "again with the same `name` updates the existing panel in place; a different `name` "
+                + "opens a new tab. Exactly one of `content` or `path` must be provided.",
+            inputSchema: .object([
+                "type": .string("object"),
+                "required": .array([.string("name")]),
+                "properties": .object(properties),
+            ])
+        )
+    }
+
+    private static func showSVGTool() -> Tool {
+        var properties: [String: Value] = [
+            "name": .object([
+                "type": .string("string"),
+                "description": .string("Stable, human-readable slot name. Same name updates in place."),
+            ]),
+            "content": .object([
+                "type": .string("string"),
+                "description": .string(
+                    "Inline SVG markup (must contain an <svg> root element). Up to 50 MB."
+                ),
+            ]),
+            "return_screenshot": .object([
+                "type": .string("boolean"),
+                "description": .string("If true (default), include a PNG snapshot in the response."),
+                "default": .bool(true),
+            ]),
+        ]
+        for (k, v) in ToolValidation.groupingSchemaProps { properties[k] = v }
+        return Tool(
+            name: "show_svg",
+            description:
+                "Render an inline SVG image in a floating HUD panel on the user's screen, and return "
+                + "a PNG screenshot of the rendered output. Use this for hand-drawn or generated "
+                + "vector visualizations, annotated diagrams, illustrations. The SVG is sanitized "
+                + "(scripts, event handlers, foreignObject stripped). Same `name` updates the existing "
+                + "panel in place.",
+            inputSchema: .object([
+                "type": .string("object"),
+                "required": .array([.string("name"), .string("content")]),
+                "properties": .object(properties),
+            ])
+        )
+    }
+
+    private static func showMermaidTool() -> Tool {
+        var properties: [String: Value] = [
+            "name": .object([
+                "type": .string("string"),
+                "description": .string("Stable slot name. Same name updates in place."),
+            ]),
+            "definition": .object([
+                "type": .string("string"),
+                "description": .string(
+                    "Mermaid diagram source. Starts with the diagram type, e.g. 'flowchart LR\\nA-->B'."
+                ),
+            ]),
+            "return_screenshot": .object([
+                "type": .string("boolean"),
+                "description": .string("If true (default), include a PNG snapshot."),
+                "default": .bool(true),
+            ]),
+        ]
+        for (k, v) in ToolValidation.groupingSchemaProps { properties[k] = v }
+        return Tool(
+            name: "show_mermaid",
+            description:
+                "Render a Mermaid diagram (flowchart, sequence, class, state, ER, gantt, …) in a "
+                + "floating HUD panel on the user's screen, and return a PNG screenshot. Pass the "
+                + "definition string starting with the diagram type (e.g. 'graph LR; A-->B'). On a "
+                + "syntax error the response is a render_error with the parser's line number so you "
+                + "can fix and retry. Same `name` updates the existing panel in place.",
+            inputSchema: .object([
+                "type": .string("object"),
+                "required": .array([.string("name"), .string("definition")]),
+                "properties": .object(properties),
+            ])
         )
     }
 
     private static func enableMarkupEventsTool() -> Tool {
-        let inputSchema: Value = .object([
-            "type": .string("object"),
-            "properties": .object([:]),
-        ])
         return Tool(
             name: "enable_markup_events",
             description:
@@ -449,23 +599,14 @@ enum MCPToolHandlers {
                 + "you see a `markup_sent` line, call `get_markup(artifact_id)` to "
                 + "fetch the image. When you see `markup_dismissed`, the user closed "
                 + "the panel without marking up. Idempotent.",
-            inputSchema: inputSchema
+            inputSchema: .object([
+                "type": .string("object"),
+                "properties": .object([:]),
+            ])
         )
     }
 
     private static func getMarkupTool() -> Tool {
-        let inputSchema: Value = .object([
-            "type": .string("object"),
-            "required": .array([.string("artifact_id")]),
-            "properties": .object([
-                "artifact_id": .object([
-                    "type": .string("string"),
-                    "description": .string(
-                        "UUID of the artifact, copied verbatim from the `artifact` field of a `markup_sent` event line."
-                    ),
-                ]),
-            ]),
-        ])
         return Tool(
             name: "get_markup",
             description:
@@ -475,83 +616,18 @@ enum MCPToolHandlers {
                 + "the id to pass here. The artifact is moved to a `.consumed/` "
                 + "subfolder on success so it's clear which markups have been "
                 + "processed. Returns an MCP image (PNG) the model can inspect.",
-            inputSchema: inputSchema
+            inputSchema: .object([
+                "type": .string("object"),
+                "required": .array([.string("artifact_id")]),
+                "properties": .object([
+                    "artifact_id": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "UUID of the artifact, copied verbatim from the `artifact` field of a `markup_sent` event line."
+                        ),
+                    ]),
+                ]),
+            ])
         )
-    }
-}
-
-// MARK: - Args validation
-
-struct ShowHTMLArgs: Sendable {
-    let name: String
-    let content: String
-    let width: Int?
-    let returnScreenshot: Bool
-    // Empty string vs missing matters: empty → clear, missing → leave alone.
-    let group: String?
-    let description: String?
-    let hudDescription: String?
-
-    struct ValidationError: Error, Sendable {
-        let message: String
-    }
-
-    static func validate(_ args: [String: Value]) throws -> ShowHTMLArgs {
-        guard let nameVal = args["name"], let name = nameVal.stringValue, !name.trimmingCharacters(in: .whitespaces).isEmpty else {
-            throw ValidationError(message: "`name` must be a non-empty string")
-        }
-        guard let contentVal = args["content"], let content = contentVal.stringValue, !content.isEmpty else {
-            throw ValidationError(message: "`content` must be a non-empty HTML string")
-        }
-        let contentBytes = Data(content.utf8).count
-        if contentBytes > MCPToolHandlers.inlineMaxBytes {
-            throw ValidationError(message: "inline content too large: \(contentBytes) bytes > 10 MB cap")
-        }
-
-        var width: Int? = nil
-        if let widthVal = args["width"], !widthVal.isNull {
-            let asDouble: Double? = widthVal.doubleValue ?? widthVal.intValue.map { Double($0) }
-            guard let w = asDouble, w.isFinite, w >= MCPToolHandlers.widthMin, w <= MCPToolHandlers.widthMax else {
-                throw ValidationError(message: "`width` must be a finite number between 100 and 4096 points")
-            }
-            width = Int(w.rounded())
-        }
-
-        let returnScreenshot: Bool
-        if let rsv = args["return_screenshot"], let b = rsv.boolValue {
-            returnScreenshot = b
-        } else {
-            returnScreenshot = true
-        }
-
-        let group = try parseBytesCapped(args, key: "group", cap: MCPToolHandlers.groupMaxBytes)
-        let description = try parseBytesCapped(args, key: "description", cap: MCPToolHandlers.descriptionMaxBytes)
-        let hudDescription = try parseBytesCapped(args, key: "hud_description", cap: MCPToolHandlers.hudDescriptionMaxBytes)
-
-        return ShowHTMLArgs(
-            name: name,
-            content: content,
-            width: width,
-            returnScreenshot: returnScreenshot,
-            group: group,
-            description: description,
-            hudDescription: hudDescription
-        )
-    }
-
-    /// Parse an optional string field with a UTF-8 byte cap. Returns
-    /// nil when the field is absent (so the caller preserves
-    /// "missing means leave-alone" semantics vs "empty means clear").
-    private static func parseBytesCapped(_ args: [String: Value], key: String, cap: Int) throws -> String? {
-        guard let v = args[key] else { return nil }
-        if v.isNull { return nil }
-        guard let s = v.stringValue else {
-            throw ValidationError(message: "`\(key)` must be a string when present")
-        }
-        let bytes = Data(s.utf8).count
-        if bytes > cap {
-            throw ValidationError(message: "`\(key)` too large: \(bytes) bytes > \(cap) byte cap")
-        }
-        return s
     }
 }
