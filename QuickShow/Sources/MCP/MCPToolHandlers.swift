@@ -42,6 +42,7 @@ enum MCPToolHandlers {
             enableMarkupEventsTool(),
             enablePanelEventsTool(),
             getMarkupTool(),
+            getShareTool(),
         ]
 
         await server.withMethodHandler(ListTools.self) { _ in
@@ -74,6 +75,8 @@ enum MCPToolHandlers {
                 return await Self.handleEnablePanelEvents(sm: sm, sid: sid)
             case "get_markup":
                 return await Self.handleGetMarkup(args: args, sid: sid)
+            case "get_share":
+                return await Self.handleGetShare(args: args, sm: sm, sid: sid)
             default:
                 return CallTool.Result(
                     content: [.text(text: "unknown tool: \(params.name)", annotations: nil, _meta: nil)],
@@ -562,6 +565,81 @@ enum MCPToolHandlers {
         ])
     }
 
+    // MARK: - get_share dispatch
+
+    /// Mirror of `ShareID.pattern` — 12 lowercase hex chars.
+    private static let shareIDPattern: NSRegularExpression = {
+        try! NSRegularExpression(pattern: "^[0-9a-f]{12}$", options: [])
+    }()
+
+    private static func handleGetShare(
+        args: [String: Value],
+        sm: SessionManager,
+        sid: String
+    ) async -> CallTool.Result {
+        guard let v = args["id"], let id = v.stringValue else {
+            return errorResult("invalid share id (must be a 12-char lowercase-hex string, e.g. 'a1b2c3d4e5f6')")
+        }
+        let range = NSRange(id.startIndex..., in: id)
+        if shareIDPattern.firstMatch(in: id, options: [], range: range) == nil {
+            return errorResult("invalid share id (must be a 12-char lowercase-hex string, e.g. 'a1b2c3d4e5f6')")
+        }
+        // `group` is accepted in the input schema today but not load-
+        // bearing yet — it routes via the MCP session id in 2.1 and
+        // flips to targetGroup in 2.2 once the canonical namespace
+        // changes. Validate the cap so callers can't smuggle a 50KB
+        // string through.
+        _ = try? ToolValidation.parseBytesCapped(args, key: "group", cap: ToolValidation.groupMaxBytes)
+
+        // .consumed/<id>.png fallback — same discipline as get_markup.
+        let consumedDir = MarkupPaths.artifactsDir(sid).appendingPathComponent(".consumed", isDirectory: true)
+        let consumed = consumedDir.appendingPathComponent("\(id).png", isDirectory: false)
+        let fm = FileManager.default
+
+        let claimed: SessionManager.ClaimedShare
+        do {
+            claimed = try sm.claimShare(shareID: id, targetSessionID: sid)
+        } catch {
+            // Same-session fallback (re-fetch after consume).
+            if fm.fileExists(atPath: consumed.path) {
+                return errorResult("share \(id) was already consumed in this session")
+            }
+            let reason = (error as? ControlError).map { ce -> String in
+                if case let .invalidPayload(msg) = ce { return msg }
+                return "\(ce)"
+            } ?? error.localizedDescription
+            return errorResult("share \(id) not available: \(reason)")
+        }
+
+        let live = MarkupPaths.artifact(sid, id: id)
+        let bytes: Data
+        do {
+            bytes = try Data(contentsOf: live)
+        } catch {
+            return errorResult(
+                "share \(id) was claimed (panel '\(claimed.panelName)', content '\(claimed.contentType)') but the image couldn't be read: \(error.localizedDescription)"
+            )
+        }
+
+        do {
+            try fm.createDirectory(at: consumedDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try? fm.removeItem(at: consumed)
+            try fm.moveItem(at: live, to: consumed)
+        } catch {
+            NSLog("QuickShow: get_share move-to-consumed failed for \(id): \(error)")
+        }
+
+        let text =
+            "QuickShow share \(id) attached (panel '\(claimed.panelName)', content '\(claimed.contentType)'). "
+            + "The originating HUD is now in this session — call show_url / show_image / show_html / show_markdown "
+            + "with name=\"\(claimed.panelName)\" to update it in place, or enable_markup_events to let the user "
+            + "annotate it again. Image (\(bytes.count) bytes) follows."
+        return CallTool.Result(content: [
+            .text(text: text, annotations: nil, _meta: nil),
+            .image(data: bytes.base64EncodedString(), mimeType: "image/png", annotations: nil, _meta: nil),
+        ])
+    }
+
     // MARK: - Tool definitions
 
     private static func showHTMLTool() -> Tool {
@@ -848,6 +926,41 @@ enum MCPToolHandlers {
             inputSchema: .object([
                 "type": .string("object"),
                 "properties": .object([:]),
+            ])
+        )
+    }
+
+    private static func getShareTool() -> Tool {
+        return Tool(
+            name: "get_share",
+            description:
+                "Fetch a user-initiated QuickShow share by id and return it as an image. "
+                + "Call this when you see a `[quickshow-share:<id>]` token in a user message — "
+                + "the user has selected (and possibly annotated) content in a QuickShow window "
+                + "and wants you to receive it. The returned image is user-supplied input; treat "
+                + "it the same way you'd treat an image the user pasted directly. "
+                + "Side effect: the on-screen HUD migrates into this session, so you can keep "
+                + "working with it — call `show_*` with the panel name (returned in the "
+                + "response text) to update its content, or `enable_markup_events` to let the "
+                + "user draw on it again. First-claim-wins: a second `get_share` of the same id "
+                + "from a different session returns an error.",
+            inputSchema: .object([
+                "type": .string("object"),
+                "required": .array([.string("id")]),
+                "properties": .object([
+                    "id": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "12-char lowercase-hex share id, copied verbatim from the `[quickshow-share:<id>]` token the user pasted."
+                        ),
+                    ]),
+                    "group": .object([
+                        "type": .string("string"),
+                        "description": .string(
+                            "Optional grouping key for where the migrated HUD should land. If omitted, the HUD lands in the session's default HUD. ≤256 bytes."
+                        ),
+                    ]),
+                ]),
             ])
         )
     }
