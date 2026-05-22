@@ -8,6 +8,9 @@ Companion docs:
 - `ROADMAP.md` — phase pointer. Read first.
 - `BACKLOG.md` — unscheduled post-v0.2 ideas. Agent-ready outlines;
   move into ROADMAP.md as a phase when picking one up.
+- `TECH_DEBT.md` — rot / regressions / missing tests / diagnostic
+  gaps in shipped code, prioritised. Same agent-ready-outline format
+  as BACKLOG.md; promote to ROADMAP.md the same way.
 - `PRD.md` — full v0.1 PRD (what + how).
 - `~/.claude/plans/mcp-quick-show-v01.md` — long-form plan with the
   *why* behind decisions.
