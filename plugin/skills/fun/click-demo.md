@@ -12,20 +12,28 @@ channels are independent (`enable_markup_events` vs.
 
 ## Setup (do this once at the start of the session)
 
-1. Arm the panel-event channel:
+1. **Pick a `group` and save it to memory.** Example:
    ```
-   enable_panel_events()
+   group = "click-demo-" + <6-hex-slug>   # e.g. "click-demo-a3f"
+   memory.save("click_demo_group", group)
    ```
-   The response includes a `Monitor` command pointed at the session's
+   On follow-up turns or after `claude --resume`, read it back
+   before every call below.
+
+2. Arm the panel-event channel **for that group**:
+   ```
+   enable_panel_events(group=group)
+   ```
+   The response includes a `Monitor` command pointed at the group's
    `events.ndjson`. **Start that Monitor as `persistent: true`** so
    each click triggers a notification.
 
-2. Render the initial panel:
+3. Render the initial panel:
    ```
-   show_html(name: "click-demo", content: <HTML below>, width: 480)
+   show_html(name="click-demo", group=group, content=<HTML below>, width=480)
    ```
 
-3. Wait. The next `panel_event` line on the Monitor channel is the
+4. Wait. The next `panel_event` line on the Monitor channel is the
    user's click.
 
 ## Initial HTML
@@ -102,9 +110,10 @@ Example follow-up render (after the first click):
   buttons in the agent HTML stop responding until they leave draw
   mode. Not a bug — same trade-off the markup loop already makes.
   Don't try to "fix" it client-side.
-- **Same `name` updates in place.** Re-rendering with
-  `name: "click-demo"` replaces the HTML; JS state is lost. Encode
-  any state the user should keep in the re-rendered HTML directly.
+- **Same `name` + `group` updates in place.** Re-rendering with
+  `name="click-demo", group=group` replaces the HTML; JS state is
+  lost. Encode any state the user should keep in the re-rendered
+  HTML directly.
 - **The events log is shared.** Lines have a `type` field —
   `panel_event` for emits, `panel_event_dropped` for throttle
   summaries, `markup_sent` / `markup_dismissed` for markup events.

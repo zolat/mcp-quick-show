@@ -64,28 +64,60 @@ Pick the right one. They're not interchangeable.
 | `show_html` | Full design that needs CSS/JS/layout — landing pages, dashboards, mockups, anything where the styling is the point. Heavier than the others; pick it deliberately. The whole document must be inline (no remote fonts, no CDN). |
 | `show_url` | Point the user at a **live URL** — online doc, spec, article, or a running site (local dev server, staging) during end-to-end verification. Same-origin navigation works in-place; cross-origin links open in the default browser. Use this when you *want* network; use `show_html` when you want a fully self-contained design. |
 
-## Iteration is the point
+## `group` is the content namespace
 
-Pass a **stable, semantic `name`** the first time and reuse it. Same
-name updates the existing panel in place; different name opens a new
-tab. Pick `"architecture"`, `"billing-mock"`, `"q3-report"` —
-something the user (and future-you) can recognize.
+Every `show_*` call optionally takes a `group` argument — and you
+**should always pass one**. Without it your panels land in a default
+group keyed by the MCP session id, which is *different* between
+`claude --resume` runs of the same conversation. That means:
 
-Tabs are cheap to open but visually noisy. Prefer updating in place
-when you're iterating; only fan out when you're showing genuine
-alternatives the user should compare side-by-side.
+- A panel rendered with `name=architecture` in one Claude session
+  becomes unreachable after `claude --resume` if no `group` was
+  passed — the resumed session has a fresh default group, so a
+  follow-up `show_*` with the same `name` opens a *new* panel
+  instead of updating in place.
+- With an explicit `group`, both the original and the resumed
+  sessions write into the same group — the panel updates in place
+  across resume, parallel agents, even subagents.
 
-## Grouping tabs into a presentation
+### The memory-save pattern (required for multi-turn work)
 
-Three optional fields on every `show_*` call let you bundle related
-panels into a single tabbed HUD with framing prose:
+For any body of work that spans more than one tool call, save the
+group to memory on first use and recall it thereafter. This makes
+the workflow resume-safe.
 
-- **`group: "design-review"`** — panels sharing a `group` land in the
+Worked example for a multi-turn design iteration:
+
+```
+# Turn 1 — pick a group, save it, use it
+group = "design-" + <short-random-slug>     # e.g. "design-a3f"
+# save to memory under a key tied to this body of work:
+#   user_design_session_<topic>:  group=design-a3f
+show_html(name="hero", content="…", group=group)
+
+# Turn 2 (same conversation, or after claude --resume)
+# read group back from memory before calling show_*:
+group = memory.get("user_design_session_hero")  # "design-a3f"
+show_html(name="hero", content="…v2", group=group)   # updates in place
+```
+
+Naming convention: keep the slug **unique per body of work**
+(`<topic>-<6-hex>` is plenty) so two parallel agent sessions on
+different topics don't collide. Use a literal group name only when
+the work is intentionally shared between agents (collaboration
+scenario — same group across two terminals means panels tab-group
+into one HUD).
+
+### Other grouping fields
+
+Three optional fields on every `show_*` call bundle related panels
+into a single tabbed HUD with framing prose:
+
+- **`group: "design-a3f"`** — panels sharing a `group` land in the
   same HUD with the same tab strip. Each distinct group spawns its
-  own HUD with its own cascade origin. Without `group`, panels go
-  into the session's default HUD as before. **`group` on update
-  calls is ignored** — a `name` is sticky to whichever HUD it was
-  first created in.
+  own HUD with its own cascade origin. **`group` on update calls
+  is ignored** — a `name` is sticky to whichever HUD it was first
+  created in.
 - **`description: "Bold serif hero, 90s editorial revival."`** —
   one-line framing for *this tab*. Shown in a banner above the
   rendered content while the tab is active. ≤256 bytes. Empty
@@ -95,10 +127,17 @@ panels into a single tabbed HUD with framing prose:
   switches; last writer wins among calls sharing a `group`. ≤4 KB.
   Empty string clears.
 
-Reach for `group` + `hud_description` when you're presenting a
-multi-tab story (variants to compare, a deck of related diagrams,
-a doc + its accompanying mockup). One ungrouped `show_*` is still
-the right move when the panel is standalone.
+## Iteration is the point
+
+Pass a **stable, semantic `name`** the first time and reuse it. Same
+name (in the same group) updates the existing panel in place;
+different name opens a new tab in the same HUD. Pick `"architecture"`,
+`"billing-mock"`, `"q3-report"` — something the user (and future-you)
+can recognize.
+
+Tabs are cheap to open but visually noisy. Prefer updating in place
+when you're iterating; only fan out when you're showing genuine
+alternatives the user should compare side-by-side.
 
 ## Verify before responding
 
@@ -127,10 +166,11 @@ Use this to your advantage: **when you would otherwise reach for
 read.** If yes, render the options instead.
 
 - "Which of these three layouts?" → `show_html` × 3 with a shared
-  `group:` and a `hud_description:` framing the comparison. Arm
-  `enable_markup_events()` and ask the user to circle the keeper.
+  `group: "layout-<6hex>"` and a `hud_description:` framing the
+  comparison. Arm `enable_markup_events(group: "layout-<6hex>")`
+  and ask the user to circle the keeper.
 - "Which architecture should we use?" → `show_mermaid` × 2 with
-  `group: "arch-choice"`. The user sees the difference instead of
+  `group: "arch-<6hex>"`. The user sees the difference instead of
   parsing two bulleted paragraphs.
 - "Does this copy work?" → `show_markdown` with the draft. Annotate
   via markup or react in chat.
@@ -142,13 +182,15 @@ default to the visual surface whenever the question is "which of
 these *looks* right."
 
 **Artifacts persist past plan mode.** Markup PNGs land at
-`~/Library/Caches/QuickShow/events/<sessionId>/artifacts/<id>.png`
-under the Claude conversation UUID — stable across plan-mode exit,
-sidecar respawn, and `claude --resume`. `get_markup(<artifact_id>)`
-works in any phase. So a sketch the user annotated during planning
-is still a referenceable design artifact during implementation —
-fetch it again later if you need to remember what the user marked
-up. Quote the artifact id in your plan if it's load-bearing for
+`~/Library/Caches/QuickShow/events/<group>/artifacts/<id>.png`,
+keyed by the group you chose — stable across plan-mode exit,
+QuickShow respawn, and `claude --resume` (provided you saved the
+group to memory and use it again). `get_markup(<artifact_id>,
+group=<group>)` works in any phase. So a sketch the user
+annotated during planning is still a referenceable design
+artifact during implementation — fetch it again later if you
+need to remember what the user marked up. Quote both the
+artifact id AND the group in your plan if it's load-bearing for
 the implementation.
 
 ## When the user should react visually, not verbally
@@ -158,14 +200,15 @@ QuickShow has a markup feedback loop: the user draws on a panel
 Use it when the user's response is more naturally "circle the thing
 that's wrong" than "type a paragraph of feedback."
 
-Two extra tools:
+Two extra tools — pass the **same `group`** you used on the
+`show_*` calls so the channel arms on the right HUD:
 
-- `enable_markup_events()` — arms the per-session push channel.
-  Returns the exact `Monitor` / `tail -F` command to start. Call
-  once per session before rendering markup-capable panels.
-- `get_markup(artifact_id)` — fetch the annotated PNG that landed
-  with a `markup_sent` event. Returns an MCP image content block
-  you can inspect like any other.
+- `enable_markup_events(group=<group>)` — arms the per-group push
+  channel. Returns the exact `Monitor` / `tail -F` command to start.
+  Call once per group before rendering markup-capable panels.
+- `get_markup(artifact_id=<id>, group=<group>)` — fetch the
+  annotated PNG that landed with a `markup_sent` event. Returns an
+  MCP image content block you can inspect like any other.
 
 Event log lines look like:
 
@@ -188,20 +231,28 @@ copied to their clipboard, paste it into your conversation, and
 expect you to fetch it.
 
 **When you see `[quickshow-share:<id>]` in a user message, call
-`get_share(<id>)`.** The returned image is user-supplied input —
-treat it the same way you would an image they pasted directly.
+`get_share(<id>, group=<your-group>)`.** Pick a `group` that fits
+the surrounding body of work (and persist it to memory, same as
+above) — the migrated HUD lands in that group, and follow-on
+`show_*` / `enable_markup_events` calls must use the same group
+to keep updating it in place.
+
+The returned image is user-supplied input — treat it the same way
+you would an image they pasted directly.
 
 Side effect worth knowing: the on-screen HUD migrates into *your*
-session. The `get_share` response text tells you the panel name
-the migrated HUD lives at (something like `user-url-...` or
-`user-file-...`). From that point you can:
+group. The `get_share` response text tells you the panel name the
+migrated HUD lives at (something like `user-url-...` or
+`user-file-...`) AND the group it now belongs to. From that point
+you can:
 
 - Update its content with `show_url` / `show_image` / `show_html` /
-  `show_markdown` using `name=<panel-name>` — same in-place update
-  discipline as any other panel.
-- Arm `enable_markup_events()` and let the user keep annotating —
-  subsequent Send presses go through the normal `markup_sent`
-  channel, fetched with `get_markup(<artifact-id>)`.
+  `show_markdown` using `name=<panel-name>, group=<your-group>` —
+  same in-place update discipline as any other panel.
+- Arm `enable_markup_events(group=<your-group>)` and let the user
+  keep annotating — subsequent Send presses go through the normal
+  `markup_sent` channel, fetched with `get_markup(<artifact-id>,
+  group=<your-group>)`.
 
 First-claim-wins: a second `get_share(<same-id>)` from a different
 session returns "not available." A re-fetch from the same session
@@ -209,6 +260,12 @@ returns "already consumed in this session."
 
 ## Common-trap reminders
 
+- **Always pass `group` on multi-turn work, and save it to memory.**
+  Skipping `group` ties the panel to a default group keyed by the
+  MCP session id — fine for one-shot renders, fatal for anything
+  spanning a `claude --resume`. Save the group on first use; read
+  it back before every subsequent `show_*` / `enable_markup_events`
+  / `get_markup` call.
 - **Don't paste raw mermaid/SVG/HTML into chat as a substitute for
   rendering.** If you'd consider opening a file or pasting a code
   block "for the user to look at," that's the trigger to call

@@ -27,14 +27,21 @@ don't pick for them.
 
 These show up in every child file too, but worth knowing up front:
 
-- **Arm the right channel.** `enable_panel_events()` for chess /
-  tic-tac-toe / click-demo. `enable_markup_events()` for pictionary.
-  Both arm calls return a `Monitor` command — start it
-  `persistent: true` so each event fires a notification.
-- **Same `name:` for every re-render.** Each game uses one panel
-  name (e.g. `chess-board`, `ttt-board`, `pictionary-canvas`,
-  `click-demo`); re-rendering with the same name updates the panel
-  in place. A different name opens a new tab and breaks the loop.
+- **Pick a `group` slug per game and save it to memory.** Each
+  game's body of work shares one group (e.g. `chess-<6hex>`,
+  `ttt-<6hex>`). Pass it on every `show_html` / `enable_*` /
+  `get_*` call so the panel survives `claude --resume`. See
+  `quickshow/SKILL.md` "memory-save pattern".
+- **Arm the right channel.** `enable_panel_events(group=…)` for
+  chess / tic-tac-toe / click-demo. `enable_markup_events(group=…)`
+  for pictionary. Both arm calls return a `Monitor` command — start
+  it `persistent: true` so each event fires a notification.
+- **Same `name:` + `group:` for every re-render.** Each game uses
+  one panel name (e.g. `chess-board`, `ttt-board`,
+  `pictionary-canvas`, `click-demo`) inside one group;
+  re-rendering with the same `(name, group)` updates the panel in
+  place. A different name (or group) opens a new tab/HUD and
+  breaks the loop.
 - **Draw mode steals pointer events.** If the user toggles markup
   draw mode (✏︎ in the title bar), the in-DOM canvas captures
   clicks and drags. Cell clicks / piece drags stop working until
