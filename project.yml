@@ -65,7 +65,3 @@ targets:
         script: |
           "${SRCROOT}/tools/copy-resources.sh"
         showEnvVarsInLog: false
-      - name: Build mcp-quick-show sidecar (bun)
-        script: |
-          "${SRCROOT}/tools/build-sidecar.sh"
-        showEnvVarsInLog: false

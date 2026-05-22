@@ -1,257 +1,177 @@
 # Adding a new renderer
 
 QuickShow's renderer abstraction is designed so that adding a new
-content type costs **one file in the sidecar**, **one file in the
-app** (plus an HTML template if you're using the WebView base), and
-**two registration lines**.
+content type costs **one Swift renderer file**, **one HTML template
+file** (if you're using the WebView base), and a tool handler +
+two registration lines in the MCP layer.
 
 This doc walks through a concrete example: adding a hypothetical
 `show_dot` tool that renders Graphviz DOT diagrams via [Viz.js].
 
 ## The three files
 
-### 1. Sidecar handler — `sidecar/src/handlers/dot.ts`
-
-```ts
-import { registerHandler, type ContentTypeHandler, type ValidationResult } from "./registry.ts";
-
-const INLINE_MAX_BYTES = 1 * 1024 * 1024; // 1 MB
-
-const handler: ContentTypeHandler = {
-  toolName: "show_dot",
-  description:
-    "Render a Graphviz DOT diagram in a floating HUD panel. Returns a " +
-    "PNG screenshot. Same `name` updates the existing panel in place.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      name: { type: "string", description: "Stable slot name." },
-      definition: {
-        type: "string",
-        description: "DOT source, e.g. 'digraph { A -> B; B -> C; }'",
-      },
-      return_screenshot: {
-        type: "boolean",
-        description: "If true (default), include a PNG snapshot.",
-        default: true,
-      },
-    },
-    required: ["name", "definition"],
-  },
-
-  async validate(args: Record<string, unknown>): Promise<ValidationResult> {
-    const name = args.name;
-    if (typeof name !== "string" || !name.trim()) {
-      return { ok: false, error: "`name` must be a non-empty string" };
-    }
-    const definition = args.definition;
-    if (typeof definition !== "string" || !definition.trim()) {
-      return { ok: false, error: "`definition` must be a non-empty string" };
-    }
-    const bytes = Buffer.byteLength(definition, "utf8");
-    if (bytes > INLINE_MAX_BYTES) {
-      return { ok: false, error: `DOT spec too large: ${bytes} > 1 MB cap` };
-    }
-    return {
-      ok: true,
-      payload: {
-        contentType: "dot",
-        name,
-        form: "inline",
-        body: definition,
-        returnScreenshot: args.return_screenshot !== false,
-      },
-    };
-  },
-};
-
-registerHandler(handler);
-```
-
-A sidecar handler always:
-- Declares a `toolName` (becomes the MCP tool's identifier).
-- Carries a `description` written **for the LLM**, not the user — be
-  specific about when to use this tool and what it returns.
-- Defines a JSON-schema `inputSchema`.
-- Implements `validate()`: returns `{ ok: false, error: "..." }` on
-  invalid args, or `{ ok: true, payload: NormalizedUpsert }` with a
-  `contentType` matching the app-side renderer's `typeKey`.
-
-For path-form arguments, use `pathResolver.resolvePath()` to get
-filesystem chokepoint behavior (tilde expansion, MIME sniffing, size
-caps) for free.
-
-### 2. App renderer — `QuickShow/Sources/Renderers/DotRenderer.swift`
+### 1. Swift renderer — `QuickShow/Sources/Renderers/DotRenderer.swift`
 
 ```swift
-/// Graphviz DOT renderer. Inline-form only.
+import Cocoa
+import WebKit
+
 @MainActor
 final class DotRenderer: WebViewPanelRenderer {
     override class var typeKey: String { "dot" }
     override var templateName: String { "dot" }
+    // Defaults to useTemplate=true (the bundled HTML template
+    // is loaded; the agent's body is fed into the page's
+    // `window.__quickshow_render(body)` entry point).
 }
 ```
 
-Yes — that's literally it for a WebView-based renderer. The
-`WebViewPanelRenderer` base class handles:
+For non-WebView content types, conform to `PanelRenderer` directly
+and implement `makeView()`, `update(payload:)`, `snapshot()`.
 
-- `WKWebView` lifecycle (creation, navigation, teardown).
-- CSP injection + `connect-src 'none'` exfiltration block.
-- Bundled-library inlining (template placeholders like
-  `<!--QS_VIZ-->` get replaced with `<script>...</script>`).
-- The single `renderComplete` JS bridge handler.
-- Snapshotting via `WKWebView.takeSnapshot(with:)`.
-- 5-second async timeout on each update.
-- External link routing through `NSWorkspace`.
-
-If your renderer needs to transform the body before it lands in JS
-(say, read from disk when `form == "path"`), override `prepareBody`:
-
-```swift
-override func prepareBody(_ body: String, form: String) throws -> String {
-    if form == "path" {
-        return try String(contentsOfFile: body, encoding: .utf8)
-    }
-    return body
-}
-```
-
-**If you need a non-WebView renderer** (e.g. raster images via
-`NSImageView`), conform directly to `PanelRenderer` and implement
-`makeView()`, `update(payload:)`, `snapshot()` — see
-`ImageRenderer.swift` for the canonical example.
-
-### 3. HTML template — `QuickShow/Resources/templates/dot.html`
-
-Skip this file if your renderer doesn't use the WebView base. The
-template should:
-
-1. Declare a strict CSP at the top.
-2. Mark the spots where bundled libs should be inlined with
-   `<!--QS_*-->` placeholder comments.
-3. Implement `window.__quickshow_render(body)` that calls
-   `window.webkit.messageHandlers.renderComplete.postMessage(...)`
-   with `{ ok, width, height }` or `{ ok: false, error, line, width, height }`.
-4. Fire `{ ready: true, width: 0, height: 0 }` on `DOMContentLoaded`.
+### 2. HTML template — `QuickShow/Resources/templates/dot.html`
 
 ```html
-<!DOCTYPE html>
+<!doctype html>
 <html>
 <head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline'; connect-src 'none'; img-src 'self' file: data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'">
-<!--QS_THEME-->
-<style>body { padding: 16px; box-sizing: border-box; }</style>
+  <meta charset="utf-8">
+  <style>
+    html, body { margin: 0; background: transparent; }
+    #out { padding: 16px; }
+  </style>
+  <!-- Bundled libs get inlined here by tools/copy-resources.sh -->
+  <!--QS_VIZJS-->
 </head>
 <body>
-<div id="qs-content"></div>
-<div id="qs-error"></div>
-<!--QS_VIZ-->
-<script>
-(function() {
-  // ... mirror the boilerplate from markdown.html / svg.html ...
-  window.__quickshow_render = async function(body) {
-    try {
-      const svg = await viz.renderString(body);
-      document.getElementById('qs-content').innerHTML = svg;
-      const m = { width: document.documentElement.scrollWidth,
-                  height: document.documentElement.scrollHeight };
-      window.webkit.messageHandlers.renderComplete.postMessage({
-        ok: true, width: m.width, height: m.height
-      });
-    } catch (err) {
-      // ... error UI + post {ok: false, error, line} ...
-    }
-  };
-  document.addEventListener('DOMContentLoaded', () => {
-    window.webkit.messageHandlers.renderComplete.postMessage({
-      ok: true, ready: true, width: 0, height: 0
-    });
-  });
-})();
-</script>
+  <div id="out"></div>
+  <script>
+    window.__quickshow_render = function(body) {
+      try {
+        const svg = Viz(body, { format: "svg" });
+        document.getElementById("out").innerHTML = svg;
+      } catch (err) {
+        document.getElementById("out").textContent =
+          "DOT error: " + err.message;
+      }
+    };
+  </script>
 </body>
 </html>
 ```
 
-If you're bundling a new JS library, drop it at
-`QuickShow/Resources/libs/viz.min.js` and teach
-`WebViewPanelRenderer.loadTemplate` to inline it for any template
-that has the corresponding `<!--QS_VIZ-->` marker.
+The `<!--QS_*-->` placeholders are processed by
+`tools/copy-resources.sh` during the build — drop the library
+file under `QuickShow/Resources/libs/` and update the script's
+substitution table.
 
-## The two registration lines
-
-### Sidecar — `sidecar/src/index.ts`
-
-```ts
-import "./handlers/markdown.ts";
-import "./handlers/svg.ts";
-import "./handlers/mermaid.ts";
-import "./handlers/image.ts";
-import "./handlers/dot.ts";    // ← add this line
-```
-
-The MCP tool list is built by iterating `allHandlers()`, so nothing
-else has to change. `tools/list` and `tools/call` start routing the
-new tool immediately.
-
-### App — `QuickShow/Sources/Renderers/RendererRegistry.swift`
+### 3. Tool handler — append to `QuickShow/Sources/MCP/MCPToolHandlers.swift`
 
 ```swift
-static func makeDefault() -> RendererRegistry {
-    let registry = RendererRegistry()
-    registry.register(MarkdownRenderer.self) { MarkdownRenderer() }
-    registry.register(SVGRenderer.self) { SVGRenderer() }
-    registry.register(MermaidRenderer.self) { MermaidRenderer() }
-    registry.register(ImageRenderer.self) { ImageRenderer() }
-    registry.register(DotRenderer.self) { DotRenderer() }   // ← add this line
-    return registry
+// In the tools array inside register(...):
+showDotTool(),
+
+// In the CallTool switch:
+case "show_dot":
+    return await Self.handleShowDot(args: args, sm: sm, rt: rt, sid: sid)
+
+// New handler — mirrors show_mermaid's shape:
+private static func handleShowDot(
+    args: [String: Value],
+    sm: SessionManager,
+    rt: MCPSessionRouter,
+    sid: String
+) async -> CallTool.Result {
+    do {
+        let name = try ToolValidation.parseName(args)
+        guard let dv = args["definition"], let definition = dv.stringValue,
+              !definition.trimmingCharacters(in: .whitespaces).isEmpty
+        else {
+            throw ToolValidation.Error(message: "`definition` must be a non-empty string")
+        }
+        let payload = UpsertPayload(
+            name: name,
+            contentType: "dot",
+            form: "inline",
+            body: definition,
+            width: nil,
+            returnScreenshot: ToolValidation.parseReturnScreenshot(args),
+            grouping: try ToolValidation.parseGroupingFields(args)
+        )
+        let (result, snapshot) = try await dispatch(sm: sm, rt: rt, sid: sid, payload: payload)
+        return CallTool.Result(content: renderResultContent(payload: payload, result: result, snapshot: snapshot))
+    } catch let err as ToolValidation.Error {
+        return errorResult("invalid arguments: \(err.message)")
+    } catch {
+        return errorResult("render error: \(error.localizedDescription)")
+    }
+}
+
+private static func showDotTool() -> Tool {
+    var properties: [String: Value] = [
+        "name": .object(["type": .string("string"), …]),
+        "definition": .object(["type": .string("string"), …]),
+        "return_screenshot": .object(["type": .string("boolean"), …]),
+    ]
+    for (k, v) in ToolValidation.groupingSchemaProps { properties[k] = v }
+    return Tool(
+        name: "show_dot",
+        description: "Render a Graphviz DOT diagram …",
+        inputSchema: .object([
+            "type": .string("object"),
+            "required": .array([.string("name"), .string("definition")]),
+            "properties": .object(properties),
+        ])
+    )
 }
 ```
 
-The factory closure runs once per panel, so each panel gets its own
-fresh renderer instance with its own view.
+## The two registration lines
 
-## Wire-protocol mirror discipline
+### `QuickShow/Sources/Renderers/RendererRegistry.swift`
 
-If your new content type needs **new fields** on the wire envelope
-beyond `{name, content_type, form, body}` — say, a per-renderer
-option — update **both** of these files in the same commit:
+```swift
+registry.register(DotRenderer.self) { DotRenderer() }
+```
 
-- `QuickShow/Sources/Server/ControlProtocol.swift`
-- `sidecar/src/protocol.ts`
+### Add the entry to the `tools` array in `MCPToolHandlers.register(...)`
 
-This pairing is borrowed from PipAnything's `pipanythingctl` /
-Swift `ControlProtocol.swift` discipline. CI doesn't enforce it yet,
-but drifting them silently is the bug class this rule prevents.
+```swift
+let tools: [Tool] = [
+    …
+    showDotTool(),
+]
+```
 
-For most new content types you won't need to touch the protocol —
-the existing envelope is content-agnostic.
+## End-to-end verification
 
-## Verifying your new renderer
+```sh
+xcodegen generate
+tools/smoke-http-mcp.sh
+```
 
-1. **Sidecar unit test** — add a `tests/handlers.test.ts` case that
-   exercises `validate()` for valid + invalid args.
-2. **End-to-end smoke** — extend a `verify-phaseN.ts` script (or
-   write a new one) that drives a real upsert through the socket and
-   asserts the response is `ok` with a non-empty PNG.
-3. **Visual check** — `bun run sidecar/src/cli/demo.ts` with a panel
-   of your new type and eyeball the HUD.
+Then drive a real `tools/call`:
 
-## What this pattern intentionally doesn't support
+```sh
+curl -s http://127.0.0.1:7890/mcp -X POST \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Mcp-Session-Id: $SID" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+    "name":"show_dot",
+    "arguments":{"name":"smoke","definition":"digraph { A -> B }"}
+  }}'
+```
 
-- **Dynamic plugin loading from disk.** No `~/Library/Application
-  Support/QuickShow/plugins/`. Adding a content type requires a
-  rebuild. This is the v0.1 contract (see PRD § Out of Scope).
-- **Per-renderer JS bridge handlers.** There's exactly one bridge
-  name: `renderComplete`. If your renderer needs to post messages to
-  Swift, encode them as fields on the existing payload — the
-  `{copy: <text>}` side-channel in the markdown renderer is the
-  canonical example.
-- **Renderer-specific wire verbs.** All renderers go through the
-  same `upsert/close/list/inspect` surface. If your renderer needs
-  per-instance state mutation beyond an `update()` call, you're
-  probably reaching for something that should be its own MCP tool
-  rather than a renderer.
+Use the existing `enable_markup_events(group=…)` + `get_markup` to
+verify the markup loop works for the new content type — it should
+work uniformly because the WebView base owns the markup canvas.
+
+## Shared validation chokepoint
+
+`QuickShow/Sources/MCP/MCPToolValidation.swift` is the single
+source for grouping-field parsing, name validation, width clamping,
+and the file-path resolver. New tools should funnel through these
+helpers rather than reimplementing the caps.
 
 [Viz.js]: https://github.com/mdaines/viz-js

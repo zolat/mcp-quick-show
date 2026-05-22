@@ -5,34 +5,39 @@ knowledge about the project so a fresh session (yours, mine, a sibling
 running in parallel) can be productive immediately.
 
 Companion docs:
-- `ROADMAP.md` — phase pointer. Read first. v0.1 is complete; new
-  work lives outside the original phase list (markup feedback loop,
-  HTML renderer, design skill).
-- `BACKLOG.md` — unscheduled post-v0.1 ideas. Agent-ready outlines;
+- `ROADMAP.md` — phase pointer. Read first.
+- `BACKLOG.md` — unscheduled post-v0.2 ideas. Agent-ready outlines;
   move into ROADMAP.md as a phase when picking one up.
 - `PRD.md` — full v0.1 PRD (what + how).
 - `~/.claude/plans/mcp-quick-show-v01.md` — long-form plan with the
   *why* behind decisions.
-- `docs/control-protocol.md` — wire-protocol reference (parallel to
-  PipAnything's `docs/agent-control.md`).
-- `docs/adding-a-renderer.md` — three-file pattern for adding a new
-  content type (sidecar handler + app renderer + HTML template).
+- `HTTP_MIGRATION.md` + `HTTP_MIGRATION_POC_REPORT.md` — 0.2.0
+  migration that moved the MCP server from a TypeScript stdio
+  sidecar into the Swift app (HTTP transport, in-process).
+- `docs/adding-a-renderer.md` — pattern for adding a new content
+  type (Swift renderer + HTML template + tool handler).
 
 ## What this app is
 
-A macOS menu-bar app + TypeScript MCP sidecar that lets agents render
-content (markdown, SVG, mermaid, image, HTML) into floating HUD panels
-and *see* the rendered result via a screenshot returned through the
-MCP tool response.
+A macOS menu-bar app with an embedded HTTP MCP server. Lets agents
+render content (markdown, SVG, mermaid, image, HTML, URL) into
+floating HUD panels and *see* the rendered result via a screenshot
+returned through the MCP tool response.
 
 Beyond render-and-screenshot, the app also supports a **markup
 feedback loop**: the user can draw on a panel and Send the annotated
 snapshot back to the agent (see "Markup feedback loop" below).
 
-Sibling project `~/projects/PipAnything` is the architectural ancestor
-(also a Mac menu-bar HUD app with a sidecar binary). Lifts a lot of
-patterns wholesale — especially `ControlServer`, `OverlayWindow`,
-`ResizeHandle`, and the `feat/tabs` work from `PiPanything-tabs`.
+The MCP server speaks the Streamable HTTP transport (spec
+2025-11-25) on `http://127.0.0.1:7890/mcp`, with a sibling NDJSON
+endpoint at `/markup-events` for the per-group live event stream.
+QuickShow.app must be running for the Claude Code plugin to reach
+it — recommend Launch-at-login in Settings.
+
+Sibling project `~/projects/PipAnything` is the architectural
+ancestor (also a Mac menu-bar HUD app). Lifts UI patterns
+wholesale — `OverlayWindow`, `ResizeHandle`, the `feat/tabs` work
+from `PiPanything-tabs`.
 
 ## Build / run
 
@@ -44,44 +49,31 @@ APP=$(xcodebuild -showBuildSettings -scheme QuickShow 2>/dev/null \
 "$APP/QuickShow.app/Contents/MacOS/QuickShow"
 ```
 
-In **Debug** builds the sidecar runs from TS source (fast iteration);
-the `bun build --compile` step in `tools/build-sidecar.sh` only fires
-for **Release**, dropping a standalone `mcp-quick-show` binary into
-`QuickShow.app/Contents/Resources/`.
+Fast wire smoke (build + drive initialize/tools-list/show_html):
 
-Sidecar dev commands:
 ```sh
-cd sidecar
-bun install
-bun test                                                  # bun:test suite
-bun run typecheck                                         # tsc --noEmit — partially red: ControlRequest type drift in handshake/event handlers, fix wants a worktree session
-QUICKSHOW_SOCKET_PATH=/tmp/qs.sock bun run src/cli/ping.ts
+tools/smoke-http-mcp.sh        # build first
+tools/smoke-http-mcp.sh skip   # reuse existing .app
 ```
 
 `.xcodeproj` is **gitignored** — regenerate from `project.yml` after a clone.
 
 Headless verification env vars:
-- `QUICKSHOW_SOCKET_PATH` — override control-socket path so multiple
-  test instances can run in parallel.
-- `QUICKSHOW_NO_AUTOLAUNCH=1` — sidecar skips `open -g` so tests can
-  drive a pre-launched app.
+- `QUICKSHOW_MCP_HTTP=0` — opt out of starting the HTTP MCP server
+  (for integration tests that don't touch the wire).
+- `QUICKSHOW_MCP_PORT=7891` — override port so multiple test
+  instances can run in parallel against the same machine.
+- `QUICKSHOW_MCP_IDLE_SECONDS=10` — shrink the cleanup-loop idle
+  timeout so liveness/orphan tests don't have to wait 5 minutes.
+- `QUICKSHOW_RECONNECT_GRACE_SECONDS=2` — shrink the orphan-grace
+  badge timer for the same tests.
 - `QUICKSHOW_AUTO_PANEL=1` — on launch, open a HUD with fixture
   markdown for smoke verification.
-- `QUICKSHOW_APP_PATH=/path/to/QuickShow.app` — override sidecar's
-  app-bundle discovery (default: walk up from execPath, then
-  `/Applications`).
 - `QUICKSHOW_EVENTS_DIR=/tmp/qs-events` — override the markup events
   + artifacts base dir (default `~/Library/Caches/QuickShow/events/`).
-  Used by tests so they don't clobber a real session's log.
-- `QUICKSHOW_DEV_SIDECAR=1` — *plugin only*. Tells
-  `plugin/launcher/mcp-quick-show` to exec `bun sidecar/src/index.ts`
-  from the source repo instead of the compiled `plugin/bin/mcp-quick-show`.
-  Avoids the `tools/build-plugin.sh` cycle when iterating on sidecar TS
-  source. Still requires `/restart` in Claude Code to respawn the
-  MCP server; only kills the *rebuild* step, not the respawn. Export
-  in the shell that launches `claude` so the env propagates to the
-  spawned MCP process. No-op for end users running the compiled
-  release plugin.
+  Used by tests so they don't clobber a real group's log.
+- `QUICKSHOW_HUD_SPACE_POLICY_OVERRIDE` — `userSpace` / `claudeSpace`
+  / `allSpaces` (see "HUD Space placement" below).
 
 ## Repo topology
 
@@ -89,42 +81,21 @@ Headless verification env vars:
 mcp-quick-show/
 ├── project.yml                  xcodegen spec; single .app target
 ├── tools/
-│   ├── build-sidecar.sh         bun build --compile + copy into .app (Release only)
 │   ├── copy-resources.sh        copies templates/ + libs/ + scripts/ into bundle
-│   └── make-dmg.sh              build + signed-DMG packaging
-├── sidecar/                     TypeScript MCP server
-│   ├── package.json
-│   ├── tests/                   bun:test suite (handlers, socket, paths, markup)
-│   └── src/
-│       ├── index.ts             MCP bootstrap; routes upsert + raw handlers
-│       ├── protocol.ts          wire types (paired with Swift)
-│       ├── socket.ts            NDJSON Unix-socket client
-│       ├── session.ts           session UUID + markup-paths derivation
-│       ├── pathResolver.ts      ~, MIME, size-cap chokepoint
-│       ├── autolaunch.ts        locate + open -g the .app bundle
-│       ├── handlers/            content-type + raw handlers
-│       │   ├── registry.ts      upsert-style + raw-call registries
-│       │   ├── markdown.ts svg.ts mermaid.ts image.ts html.ts
-│       │   ├── enableMarkupEvents.ts   arms markup push channel
-│       │   └── getMarkup.ts            fetches a marked-up artifact PNG
-│       └── cli/                 ping.ts + verify-phase*.ts smoke scripts
+│   ├── make-dmg.sh              build + signed-DMG packaging
+│   └── smoke-http-mcp.sh        build + drive initialize/tools-list/show_html
 ├── docs/
-│   ├── control-protocol.md      wire-protocol reference
-│   └── adding-a-renderer.md     three-file pattern for new content types
+│   └── adding-a-renderer.md     pattern for new content types
 ├── .claude-plugin/
 │   └── marketplace.json         declares this repo as a single-plugin marketplace
 ├── plugin/                      Claude Code plugin tree (distribution)
 │   ├── .claude-plugin/plugin.json
-│   ├── .mcp.json                quickshow → ${CLAUDE_PLUGIN_ROOT}/launcher/mcp-quick-show
-│   ├── launcher/mcp-quick-show  committed bash shim; release: exec bin/mcp-quick-show, dev: exec `bun sidecar/src/index.ts` when QUICKSHOW_DEV_SIDECAR=1
-│   ├── bin/                     compiled sidecar binary (gitignored; built by tools/build-plugin.sh)
+│   ├── .mcp.json                {"type":"http","url":"http://127.0.0.1:7890/mcp"}
 │   ├── skills/quickshow/         foundational "how to use QuickShow" skill
 │   ├── skills/frontend-design/   bold-aesthetic design + markup loop
 │   └── skills/fun/               router skill — one SKILL.md + sibling
 │       │                         instruction files (chess.md, tic-tac-toe.md,
-│       │                         click-demo.md, pictionary.md) so only the
-│       │                         parent description lands in context until
-│       │                         Claude reads the chosen game's file
+│       │                         click-demo.md, pictionary.md)
 │       └── chess_helper.py       python-chess wrapper (board state, legal
 │                                 moves, HTML render) used by fun/chess.md
 ├── QuickShow/                   Swift app
@@ -136,15 +107,18 @@ mcp-quick-show/
 │   │                            quickshow-bridge.js (window.quickshow.emit shim)
 │   └── Sources/
 │       ├── App/                 QuickShowApp (@main), AppDelegate
-│       ├── Server/              ControlServer / ControlProtocol / ControlHandlers
-│       ├── Sessions/            SessionManager — session_id → HUD, reconnect
+│       ├── MCP/                 MCPHTTPServer / MCPHTTPParser / MCPSessionRouter /
+│       │                        MCPToolHandlers / MCPToolValidation /
+│       │                        MarkupEventsStream
+│       ├── Sessions/            SessionManager — group → HUD, orphan-grace
 │       ├── HUD/                 HUDWindow, TabStripView, TitleBarOverlay,
 │       │                        ResizeHandle, ZoomableCanvasScrollView, MarkupStroke
 │       ├── Renderers/           PanelRenderer + WebViewPanelRenderer +
-│       │                        Markdown/SVG/Mermaid/Image/HTML + RendererRegistry
+│       │                        Markdown/SVG/Mermaid/Image/HTML/URL + RendererRegistry
 │       ├── Snapshot/            SnapshotService (PNG capture)
 │       ├── Events/              EventLogWriter + MarkupPaths (NDJSON event log)
 │       │                        + PanelEventThrottle (per-panel token bucket)
+│       ├── Space/               PeerPidResolver (libproc) + SpaceResolver + CGSPrivate
 │       ├── Promote/             PromoteToWindowController (HUD → standard window)
 │       └── Settings/            Settings + SettingsWindow
 ├── ROADMAP.md                   phase pointer
@@ -171,81 +145,56 @@ multi-file changes, new code, refactors, or that you'd want to
 verify end-to-end → worktree. Merge back to `main` after the work
 is verified and the user approves.
 
-## Wire-protocol mirror discipline
+## Group is the canonical content namespace
 
-`QuickShow/Sources/Server/ControlProtocol.swift` and
-`sidecar/src/protocol.ts` are paired. **Change both in the same
-commit.** Borrowed from PipAnything's CLAUDE.md.
+Phase 2 (0.2.0) moved panel storage from "per MCP session" to "per
+group". Each `show_*` tool takes an optional `group` arg; when
+omitted, the handler defaults it to the MCP session id so old
+behaviour is preserved for one-shot renders. Skills opt into a
+named group when work spans multiple turns — that group is the
+identity that survives `claude --resume`.
 
-Current verbs (sidecar → app): `hello`, `ping`, `upsert`, `close`,
-`list`, `inspect`, `set_session_flag`, `claim_share`. Responses: `ok`,
-`render_error`, `protocol_error`.
+Storage shape:
+- `SessionManager.groups: [String: GroupState]` — keyed by group.
+- `GroupState` holds the HUD list, flags, events writer, and
+  `lastWriterMcpSession` (last MCP session that wrote into this
+  group). The latter drives orphan-grace.
+- `MCPSessionRouter.SessionState` tracks the MCP session itself —
+  Server, transport, claudePid, lastAccessedAt. Orthogonal to
+  GroupState.
 
-`set_session_flag` is generic over its `key`; adding a new flag name
-(today: `markup_events_armed`, `panel_events_armed`) is *not* a
-wire-protocol change. Only new verbs / response kinds require the
-paired-file edit.
+Liveness signals:
+- DELETE on `/mcp` → router drops the session immediately.
+- Cleanup loop (60s tick) → drops any session idle past
+  `QUICKSHOW_MCP_IDLE_SECONDS` (default 5 min).
+- Both call `onSessionRemoved`, which walks groups for a matching
+  `lastWriterMcpSession` and starts an orphan-grace timer
+  (`QUICKSHOW_RECONNECT_GRACE_SECONDS`, default 60s).
 
-`sidecar/src/handlers/_groupingFields.ts` is the shared validator
-chokepoint for the optional `group` / `description` / `hud_description`
-fields that ride on every `show_*` call. It's not on the wire itself,
-but it lives inside the mirror's blast radius — adding or changing
-how a grouping field is parsed or normalised must stay in lockstep
-with how `ControlProtocol.swift` reads it on the Swift side. Treat
-it as a third paired file for grouping/description work.
-
-### session_id is anchored to the Claude conversation UUID
-
-The sidecar's `hello.session_id` claim is the **conversation UUID**
-that Claude Code writes to
-`~/.claude/projects/<cwd-encoded>/<uuid>.jsonl`. That id is the
-actual semantic identity of a Claude session — distinct between
-parallel Claudes from the same cwd, stable across sidecar respawn,
-stable across `claude --resume <id>`. Anchoring to it means parallel
-sessions are naturally scoped and reconnect happens through identity
-rather than through a process-based heuristic.
-
-`sidecar/src/session.ts:resolveSessionId()` runs the discovery with
-a 3 s / 200 ms retry loop (Claude writes the JSONL ~2 s AFTER
-spawning the MCP server, so eager-at-module-load misses every time).
-Precedence: `QUICKSHOW_SESSION_ID` env override → JSONL discovery →
-`getOrCreateSessionId` per-cwd persisted UUID fallback (used by CLI
-smokes not invoked under Claude). Reference implementation:
-`~/projects/substant/mcp-plugin/server.ts:54-227`.
-
-`hello.session_id` is technically still a CLAIM. The app's allocator
-(`ControlServer.allocateSessionId`) does a live-FD contest check
-as belt-and-braces — it would mint a fresh UUID on a same-claim
-collision, but with conversation-UUID claims that should never fire
-in practice. The granted id rides back in `HelloResult.session_id`;
-the sidecar adopts it unconditionally and uses it for every
-subsequent verb and for derived paths (`events.ndjson`, artifacts).
-
-All sidecar code goes through `helloHandshake()` in
-`sidecar/src/handshake.ts` — single chokepoint, returns the granted id.
-Do not bypass it.
-
-`parent_pid` on `HelloRequest` (added in protocol 0.2) is now
-diagnostic only — useful for log forensics when investigating
-session lifecycle, not load-bearing for the allocator's decision.
+User-share migration: each user-initiated HUD ("Open URL…",
+"Open File…") spawns a `user-share-<random>` group via
+`SessionManager.userSharesGroupPrefix`. `claim_share` walks those
+groups for the matching `sourceHudId` and migrates the HUD into
+the Claude-specified `targetGroup`.
 
 ## Adding a new content type
 
-Three files + two registration lines, all documented in
-`docs/adding-a-renderer.md`:
+Documented in `docs/adding-a-renderer.md`:
 
-1. `sidecar/src/handlers/<type>.ts` — registers a `ContentTypeHandler`
-   (toolName, schema, `validate()`).
-2. `QuickShow/Sources/Renderers/<Type>Renderer.swift` — subclass
-   `WebViewPanelRenderer` (or implement `PanelRenderer` directly for
-   non-WebView).
-3. `QuickShow/Resources/templates/<type>.html` — template with
+1. `QuickShow/Sources/Renderers/<Type>Renderer.swift` — subclass
+   `WebViewPanelRenderer` (or implement `PanelRenderer` directly
+   for non-WebView).
+2. `QuickShow/Resources/templates/<type>.html` — template with
    `<!--QS_*-->` placeholders for inlined bundled libs and a
    `window.__quickshow_render(body)` entry point.
+3. Add a tool handler in
+   `QuickShow/Sources/MCP/MCPToolHandlers.swift` (validate args
+   via the `ToolValidation` helpers, dispatch through
+   `SessionManager.upsert`).
 
-Then add one import line in `sidecar/src/index.ts` and one
-`registry.register(...)` line in
-`QuickShow/Sources/Renderers/RendererRegistry.swift`.
+Then add one `registry.register(...)` line in
+`QuickShow/Sources/Renderers/RendererRegistry.swift` and one
+`tools` entry in `MCPToolHandlers.register(...)`.
 
 ## Markup feedback loop
 
@@ -253,31 +202,35 @@ Lets a user draw on a HUD panel and Send the annotated snapshot back
 to the agent. Two MCP tools (`enable_markup_events` and `get_markup`)
 plus a tail-based push channel:
 
-- `enable_markup_events()` flips a per-session `markup_events_armed`
-  flag (via `set_session_flag`) and returns a `Monitor`/`tail -F`
-  command the agent runs on the events log.
+- `enable_markup_events(group)` flips a per-group
+  `markup_events_armed` flag and returns a `curl -sN` Monitor
+  command pointed at `/markup-events` (NDJSON push channel, lives
+  outside the SDK's `/mcp` route because the SDK transport
+  enforces a single SSE per session and Claude Code's client
+  claims that slot).
 - The HUD's in-DOM canvas (`Resources/scripts/markup-canvas.js`,
-  driven by `ZoomableCanvasScrollView`) captures strokes inside the
-  WebView. Press **Send** → app composites a flattened PNG, writes
-  it as `<artifact-uuid>.png`, and appends a `markup_sent` NDJSON
-  line to the events log. Press **Close** → `markup_dismissed` line,
-  no artifact.
-- `get_markup(artifact_id)` reads the PNG off disk and returns it as
-  an MCP image content block.
+  driven by `ZoomableCanvasScrollView`) captures strokes inside
+  the WebView. Press **Send** → app composites a flattened PNG,
+  writes it as `<artifact-uuid>.png`, and appends a `markup_sent`
+  NDJSON line to the events log. Press **Close** →
+  `markup_dismissed` line, no artifact.
+- `get_markup(artifact_id, group)` reads the PNG off disk and
+  returns it as an MCP image content block.
 
 On-disk layout (override via `QUICKSHOW_EVENTS_DIR`):
 ```
-~/Library/Caches/QuickShow/events/<sessionId>/
+~/Library/Caches/QuickShow/events/<group>/
 ├── events.ndjson                 # one event per line
 └── artifacts/<artifact-id>.png   # flattened markup snapshots
 ```
 
-Path derivation lives in `sidecar/src/session.ts` and
-`QuickShow/Sources/Events/MarkupPaths.swift` — these are also paired;
-keep them in lockstep.
+Path derivation lives in `QuickShow/Sources/Events/MarkupPaths.swift`.
 
-The `skills/quickshow-design` skill is the canonical consumer: render
-HTML → arm events → wait for `markup_sent` → fetch + iterate.
+The `plugin/skills/frontend-design` skill is the canonical
+consumer: render HTML → arm events → wait for `markup_sent` →
+fetch + iterate. `plugin/skills/quickshow` documents the wider
+"reach for it when…" surface and the memory-save pattern for
+group-aware multi-turn work.
 
 ## Panel event channel
 
@@ -286,10 +239,11 @@ events back to Claude — turning `show_html` panels into real
 two-way UIs (click-to-act, form submission, drag/drop) instead of
 PNG-with-arrows markup.
 
-- `enable_panel_events()` flips `panel_events_armed` (via
-  `set_session_flag`) and returns the same `Monitor` / `tail -F`
-  command. Independent of `enable_markup_events`: arm one, the
-  other, or both — all events share the session's `events.ndjson`.
+- `enable_panel_events(group)` flips `panel_events_armed` on the
+  group and returns a `tail -F` Monitor command pointed at the
+  group's `events.ndjson`. Independent of `enable_markup_events`:
+  arm one, the other, or both — all events share the group's
+  events log.
 - A third script-message channel — `panelEvent`, peer of
   `renderComplete` and `markupStroke` — on every WebView. Wired in
   `WebViewPanelRenderer.makeView()`.
@@ -299,8 +253,8 @@ PNG-with-arrows markup.
   `loadHTMLString`-driven `show_html` panels and template-based
   renderers (markdown / svg / mermaid / image).
 - Persistence is gated twice:
-  1. `session.flags["panel_events_armed"]?.asBool` — symmetric with
-     how the Send button is gated.
+  1. `groupState.flags["panel_events_armed"]?.asBool` — symmetric
+     with how the Send button is gated.
   2. `PanelEventThrottle` (`QuickShow/Sources/Events/`): token
      bucket, capacity 20 events/sec/panel. Excess emits drop and a
      1Hz `panel_event_dropped {panel, dropped}` summary line lands
@@ -336,15 +290,17 @@ isn't (the project ships via DMG, so this is acceptable). Symbol
 missing on a future macOS → `CGSPrivate.isAvailable` flips false →
 `SpaceResolver` no-ops and the OS picks the Space.
 
-Resolution chain (per session, on **first HUD create only**):
-1. Walk up the process tree from `parent_pid` (sent on `hello`)
+Resolution chain (per group, on **first HUD create only**):
+1. Walk up the process tree from `parentPid` (libproc-resolved
+   from the Claude Code MCP client's socket on first
+   `initialize`, stashed on the GroupState by `registerGroup`)
    using `sysctl(KERN_PROC_PID)` to collect ancestor PIDs.
 2. Enumerate `CGWindowListCopyWindowInfo` and pick the first
    ancestor-owned window with `kCGWindowLayer == 0` (a normal
    terminal window — `Terminal.app`, iTerm2, Ghostty, WezTerm,
    Alacritty, etc., no hardcoded names).
 3. `CGSCopySpacesForWindows` → Space id.
-4. Fallback chain: per-session `lastResolvedSpaceID` cache →
+4. Fallback chain: per-group `lastResolvedSpaceID` cache →
    `CGSGetActiveSpace` → skip placement.
 
 The placement is called **three times** in `ensurePrimaryHud`:
@@ -366,44 +322,36 @@ Tear-out HUDs are NOT moved — they spawn under the cursor during
 a user-initiated drag, so they're already where the user wants
 them. The placement only applies to the primary HUD's birth.
 
-`registerSession(_:parentPid:)` retains the parent_pid on the
-`SessionState`; it used to be diagnostic-only. Sidecar reconnect
-refreshes it (a `claude --resume` may come from a new terminal).
+`registerGroup(_:parentPid:)` retains the parent_pid on the
+`GroupState`. A fresh `initialize` from a new MCP session
+(e.g. `claude --resume` from a different terminal) refreshes it
+through the same path.
 
 Test override: `QUICKSHOW_HUD_SPACE_POLICY_OVERRIDE` accepts the
 raw enum string (`userSpace`, `claudeSpace`, `allSpaces`).
 
 ## Logging convention
 
-- Swift: all NSLog lines start with `QuickShow: ` (parallel to
-  PipAnything's `PiPanything: `).
-- Sidecar: all `console.error` lines start with `[mcp-quick-show] ` so
-  they're greppable in MCP-server stderr captured by Claude Code.
+All NSLog lines start with `QuickShow: ` (parallel to PipAnything's
+`PiPanything: `).
 
 ## Notes for next session
 
-- Check `ROADMAP.md` first — v0.1 is shipped, so new work is
-  out-of-band; slot it intentionally rather than absorbing into a
-  finished phase.
-- Wire-protocol mirror discipline: *don't drift*. Same rule applies to
-  the markup-paths pair (`session.ts` ↔ `MarkupPaths.swift`).
-- Lift `OverlayWindow` / `ResizeHandle` / tab UI from PipAnything;
-  don't reinvent.
-- The user runs multiple parallel agent sessions. Multi-sidecar
-  coordination (`SessionManager`'s session_id → HUD mapping, per-session
-  events dir) is the load-bearing piece — don't regress it.
+- Check `ROADMAP.md` first.
+- The user runs multiple parallel agent sessions. Per-group state
+  (`groups[]`) is the load-bearing isolation; per-MCP-session
+  state (`MCPSessionRouter.sessions`) is orthogonal and only used
+  for liveness + placement.
 - SourceKit indexer in this Swift project produces persistent
   false-positive "Cannot find type X in scope" diagnostics for
-  same-module symbols (especially right after a `project.yml` change
-  or new `.swift` file). Trust `xcodebuild` as the compile oracle;
-  treat in-IDE / SourceKit output as advisory. Re-run
+  same-module symbols (especially right after a `project.yml`
+  change or new `.swift` file). Trust `xcodebuild` as the compile
+  oracle; treat in-IDE / SourceKit output as advisory. Re-run
   `xcodegen generate` if the indexer is wildly stale.
-- For cryptic mid-session MCP errors like "protocol error: data
-  couldn't be read" or `paths[1] ... got undefined`, the running
-  app binary may be older than the source/binary mtime suggests
-  (XPC respawn lag, in-flight rebuild). Probe the live process via
-  `nc -U "$HOME/Library/Application Support/QuickShow/control.sock"`
-  and a hand-rolled `hello` frame to confirm the wire protocol
-  version *the running process* speaks, before assuming it's a
-  sidecar bug. Dump diagnostics to `/tmp/<thing>-hang-<date>/` before
-  `pkill` — live state is gone forever once the process dies.
+- For cryptic mid-session MCP errors, probe the running app via
+  `curl http://127.0.0.1:7890/mcp` with a hand-rolled `initialize`
+  frame to confirm what the live process speaks, before assuming
+  a wire bug. The smoke script (`tools/smoke-http-mcp.sh`) is the
+  canonical 10s sanity check.
+- Lift `OverlayWindow` / `ResizeHandle` / tab UI from PipAnything;
+  don't reinvent.
